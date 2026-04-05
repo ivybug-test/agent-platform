@@ -5,7 +5,10 @@ let _queue: Queue | null = null;
 
 function getQueue(): Queue {
   if (!_queue) {
-    const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
+    if (!process.env.REDIS_URL) {
+      throw new Error("REDIS_URL environment variable is required");
+    }
+    const redisUrl = process.env.REDIS_URL;
     const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
     _queue = new Queue("memory", { connection });
   }

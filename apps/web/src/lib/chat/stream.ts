@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
 
 const AGENT_RUNTIME_URL =
-  process.env.AGENT_RUNTIME_URL || "http://localhost:3001";
+  process.env.AGENT_RUNTIME_URL!;
 
 /** Call agent-runtime and return a streaming Response */
 export async function streamAgentResponse(
