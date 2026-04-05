@@ -10,8 +10,10 @@ export AUTH_TRUST_HOST=true
 set +a
 
 echo "=== 2. Push database schema ==="
+# Create .env symlink so drizzle.config.ts can find it
+ln -sf ~/agent-platform/infra/.env.prod ~/agent-platform/.env
 cd packages/db
-DATABASE_URL=$DATABASE_URL pnpm db:push
+pnpm db:push
 cd ~/agent-platform
 
 echo "=== 3. Setup Caddy ==="
