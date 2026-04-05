@@ -24,7 +24,8 @@ caddy start --config /etc/caddy/Caddyfile 2>/dev/null || echo "Caddy not install
 echo "=== 4. Start services with pm2 ==="
 pm2 delete all 2>/dev/null || true
 
-pm2 start apps/web/node_modules/.bin/next --name web -- start --port 3000
+cd ~/agent-platform/apps/web && pm2 start "npx next start --port 3000" --name web
+cd ~/agent-platform
 pm2 start services/agent-runtime/dist/index.js --name agent-runtime
 pm2 start services/memory-worker/dist/index.js --name memory-worker
 
