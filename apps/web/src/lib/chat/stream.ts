@@ -1,5 +1,6 @@
 import { db, messages, rooms } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
+import { pushMemoryJobs } from "@/lib/queue";
 
 const AGENT_RUNTIME_URL =
   process.env.AGENT_RUNTIME_URL || "http://localhost:3001";
@@ -9,7 +10,8 @@ export async function streamAgentResponse(
   llmMessages: { role: string; content: string }[],
   agentMsgId: string,
   roomId: string,
-  userContent: string
+  userContent: string,
+  userId: string
 ): Promise<Response> {
   const response = await fetch(`${AGENT_RUNTIME_URL}/chat`, {
     method: "POST",
@@ -60,6 +62,10 @@ export async function streamAgentResponse(
 
         // Auto-generate room title (fire and forget)
         maybeGenerateRoomTitle(roomId, userContent, fullContent);
+
+        // Push memory extraction jobs (async, non-blocking)
+        pushMemoryJobs(roomId, userId).catch(() => {});
+
         controller.close();
       }
     },

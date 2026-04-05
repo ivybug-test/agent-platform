@@ -1,0 +1,3 @@
+testagent.fun {
+	reverse_proxy web:3000
+}

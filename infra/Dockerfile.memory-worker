@@ -1,0 +1,36 @@
+FROM node:22-alpine AS base
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+WORKDIR /app
+
+# Install dependencies
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY services/memory-worker/package.json ./services/memory-worker/
+COPY packages/db/package.json ./packages/db/
+COPY packages/types/package.json ./packages/types/
+RUN pnpm install --frozen-lockfile --filter @agent-platform/memory-worker...
+
+# Build
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/services/memory-worker/node_modules ./services/memory-worker/node_modules
+COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
+COPY --from=deps /app/packages/types/node_modules ./packages/types/node_modules
+COPY services/memory-worker/ ./services/memory-worker/
+COPY packages/db/ ./packages/db/
+COPY packages/types/ ./packages/types/
+COPY tsconfig.base.json ./
+RUN cd packages/types && npx tsc && cd ../db && npx tsc && cd ../../services/memory-worker && npx tsc
+
+# Production
+FROM node:22-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/services/memory-worker/dist ./dist
+COPY --from=builder /app/services/memory-worker/node_modules ./node_modules
+COPY --from=builder /app/packages/db/dist ./node_modules/@agent-platform/db/dist
+COPY --from=builder /app/packages/db/package.json ./node_modules/@agent-platform/db/
+COPY --from=builder /app/packages/types/dist ./node_modules/@agent-platform/types/dist
+COPY --from=builder /app/packages/types/package.json ./node_modules/@agent-platform/types/
+
+CMD ["node", "dist/index.js"]

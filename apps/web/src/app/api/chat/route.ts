@@ -8,6 +8,8 @@ import { parseMention } from "@/lib/chat/mention";
 import {
   loadChatContext,
   getRoomMemberNames,
+  getLatestSummary,
+  getUserMemories,
   buildSystemPrompt,
   buildLLMMessages,
 } from "@/lib/chat/context";
@@ -64,20 +66,27 @@ export async function POST(req: NextRequest) {
     return Response.json({ silent: true });
   }
 
-  // Load context
-  const { recentMessages, nameMap } = await loadChatContext(roomId);
+  // Load context + memory
+  const [{ recentMessages, nameMap }, memberNames, roomSummary, memories] =
+    await Promise.all([
+      loadChatContext(roomId),
+      getRoomMemberNames(roomId),
+      getLatestSummary(roomId),
+      getUserMemories(user.id),
+    ]);
   const currentUserName = nameMap.get(user.id) || "User";
-  const memberNames = await getRoomMemberNames(roomId);
 
-  // Build prompt
-  const systemContent = buildSystemPrompt(
-    agent?.systemPrompt || null,
-    room?.systemPrompt || null,
-    room?.name || "Chat",
+  // Build prompt (6 layers)
+  const systemContent = buildSystemPrompt({
+    agentPrompt: agent?.systemPrompt || null,
+    roomPrompt: room?.systemPrompt || null,
+    roomName: room?.name || "Chat",
     memberNames,
     agentName,
-    currentUserName
-  );
+    currentUserName,
+    roomSummary,
+    userMemories: memories,
+  });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
 
   // Create agent message placeholder
@@ -93,5 +102,5 @@ export async function POST(req: NextRequest) {
     .returning();
 
   // Stream response
-  return streamAgentResponse(llmMessages, agentMsg.id, roomId, content);
+  return streamAgentResponse(llmMessages, agentMsg.id, roomId, content, user.id);
 }
