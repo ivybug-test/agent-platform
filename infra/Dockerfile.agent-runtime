@@ -2,18 +2,20 @@ FROM node:22-alpine AS base
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 WORKDIR /app
 
-# Install dependencies
+# Install all dependencies (monorepo needs full install for workspace resolution)
 FROM base AS deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY apps/web/package.json ./apps/web/
+COPY packages/db/package.json ./packages/db/
+COPY packages/types/package.json ./packages/types/
 COPY services/agent-runtime/package.json ./services/agent-runtime/
-RUN pnpm install --frozen-lockfile --filter @agent-platform/agent-runtime
+COPY services/memory-worker/package.json ./services/memory-worker/
+RUN pnpm install --frozen-lockfile
 
 # Build
-FROM base AS builder
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/services/agent-runtime/node_modules ./services/agent-runtime/node_modules
-COPY services/agent-runtime/ ./services/agent-runtime/
+FROM deps AS builder
 COPY tsconfig.base.json ./
+COPY services/agent-runtime/ ./services/agent-runtime/
 RUN cd services/agent-runtime && npx tsc
 
 # Production
