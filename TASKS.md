@@ -2,96 +2,122 @@
 
 ## Phase 1 — Text MVP
 
-### Task group 1: Repository bootstrap
-- [ ] Initialize pnpm workspace
-- [ ] Add Turborepo config
-- [ ] Create root package.json
-- [ ] Create `.env.example`
-- [ ] Scaffold top-level directories:
-  - [ ] apps/web
-  - [ ] packages/types
-  - [ ] packages/config
-  - [ ] packages/db
-  - [ ] packages/prompts
-  - [ ] packages/sdk
-  - [ ] services/agent-runtime
-  - [ ] services/memory-worker
-  - [ ] services/realtime-gateway
-  - [ ] infra
-  - [ ] docs
+Development follows an incremental path. Each milestone is independently verifiable.
 
-### Task group 2: Web app scaffold
-- [ ] Initialize Next.js app in `apps/web`
-- [ ] Add base layout
-- [ ] Add auth pages
-- [ ] Add rooms list page
-- [ ] Add room detail page
-- [ ] Add basic chat UI components:
-  - [ ] message list
-  - [ ] message item
-  - [ ] message input
-  - [ ] typing / streaming state
+---
 
-### Task group 3: Shared packages
-- [ ] Add `packages/types`
-- [ ] Add `packages/config`
-- [ ] Add `packages/db`
-- [ ] Add `packages/prompts`
-- [ ] Add `packages/sdk`
+### Milestone 0: Planning docs ✅
+- [x] Define product direction and architecture
+- [x] Confirm all tech decisions (Fastify, OpenAI Node SDK, Drizzle, BullMQ, Auth.js)
+- [x] Update CLAUDE.md with confirmed decisions
+- [x] Update TASKS.md with milestones
+- [x] Update CHANGELOG.md
 
-### Task group 4: Database schema
-- [ ] Choose ORM / DB access strategy
-- [ ] Add initial schema for:
-  - [ ] users
-  - [ ] agents
-  - [ ] rooms
-  - [ ] room_members
-  - [ ] messages
-  - [ ] user_memories
-  - [ ] room_summaries
-- [ ] Add migration setup
-- [ ] Add seed strategy
+### Milestone 1: Monorepo skeleton ✅
+Dependencies: none
 
-### Task group 5: Backend chat path
-- [ ] Add API route / service for sending a message
-- [ ] Persist user messages
-- [ ] Trigger agent runtime
-- [ ] Stream agent response back to client
-- [ ] Persist final agent response
-- [ ] Handle failure and retry state
+- [x] Initialize pnpm workspace
+- [x] Add Turborepo config
+- [x] Create root package.json with dev/build/lint scripts
+- [x] Create `.gitignore`
+- [x] Create `.env.example`
+- [x] Scaffold directories with package.json + tsconfig.json:
+  - [x] apps/web (Next.js)
+  - [x] packages/types
+  - [x] packages/db
+  - [x] services/agent-runtime (Fastify)
+  - [x] services/memory-worker
+  - [x] infra
+  - [x] docs
 
-### Task group 6: Agent runtime
-- [ ] Scaffold `services/agent-runtime`
-- [ ] Add context builder
-- [ ] Add prompt loader
-- [ ] Add simple provider wrapper
-- [ ] Add one default chat agent
-- [ ] Add token/context budget strategy
+**Verified**: `pnpm install` succeeds, `pnpm -r build` runs without errors.
 
-### Task group 7: Memory worker
-- [ ] Scaffold `services/memory-worker`
-- [ ] Add room summary job
-- [ ] Add user memory extraction job
-- [ ] Add queue interface
-- [ ] Persist summary and memory outputs
+### Milestone 2: Minimal chat chain (no DB, no auth) ✅
+Dependencies: Milestone 1
 
-### Task group 8: MVP quality bar
-- [ ] User can create a room
-- [ ] User can send a text message
-- [ ] Agent can reply with streaming text
-- [ ] Refreshing the page keeps message history
-- [ ] Room summary can be generated
-- [ ] Basic user memory can be stored and retrieved
+- [x] agent-runtime: Fastify server with POST /chat endpoint
+  - [x] Accept messages array in request body
+  - [x] Call OpenAI API with streaming
+  - [x] Return SSE stream
+  - [x] Support mock mode (env var: MOCK_LLM=true)
+- [x] apps/web: Simple chat page
+  - [x] Message list component
+  - [x] Message input component
+  - [x] Call Next.js API route on send
+  - [x] Display streaming response
+- [x] apps/web: API route that proxies to agent-runtime SSE
+- [x] Hardcoded user, no persistence (refresh = gone)
+
+**Verified**: Both services running, DeepSeek streaming reply works in browser.
+
+### Milestone 3: Database + message persistence ✅
+Dependencies: Milestone 2
+
+- [x] infra: Docker Compose with PostgreSQL + Redis
+- [x] packages/db: Drizzle schema
+  - [x] users table
+  - [x] agents table
+  - [x] rooms table (with system_prompt)
+  - [x] room_members table (with member_type)
+  - [x] messages table (with status field)
+  - [x] user_memories table
+  - [x] room_summaries table
+- [x] packages/db: Migration setup (drizzle-kit)
+- [x] packages/db: Seed script (create default user + agent + room)
+- [x] apps/web: API route persists user message before calling agent-runtime
+- [x] apps/web: API route persists agent message after streaming completes
+- [x] apps/web: Load message history on page load
+
+**Verified**: Messages persist across page refresh.
+
+### Milestone 4: Rooms ✅
+Dependencies: Milestone 3
+
+- [x] Room list page
+- [x] Create room UI
+- [x] Room detail page with chat
+- [x] Each room has independent message history
+- [x] One agent bound per room
+- [x] Room navigation
+
+**Verified**: Two rooms created, messages isolated between rooms.
+
+### Milestone 5: Auth ✅
+Dependencies: Milestone 3
+
+- [x] Auth.js setup with credentials provider
+- [x] Login page
+- [x] Register page
+- [x] Protect API routes with session check
+- [x] Associate rooms with users
+- [x] Show only user's own rooms (via room_members membership)
+
+**Verified**: Two users (binqiu, bob) log in separately, each sees only their own rooms.
+
+### Milestone 6: Room summaries + User memory
+Dependencies: Milestone 3
+
+- [ ] services/memory-worker: BullMQ consumer setup
+- [ ] apps/web: Push job to BullMQ after chat completion
+- [ ] memory-worker: Room summary generation job
+- [ ] memory-worker: User memory extraction job
+- [ ] Persist summaries and memories to database
+- [ ] apps/web: Include summary + memory in context passed to agent-runtime
+- [ ] agent-runtime: Use provided context in prompt assembly
+
+**Verify**: After many messages, agent "remembers" prior conversation context.
+
+---
+
+## Milestone dependency graph
+```
+M0 → M1 → M2 → M3 → M4
+                  ↓      ↘
+                  M5      M6
+```
+M4, M5, M6 all depend on M3 but are independent of each other.
 
 ---
 
 ## Immediate next task
-Initialize the repository and scaffold the monorepo structure.
-
-## Execution instruction for Claude
-When starting work:
-1. Read `CLAUDE.md`
-2. Read `CHANGELOG.md`
-3. Inspect current repo state
-4. Complete the smallest useful next step
-5. Update `CHANGELOG.md`
+Milestone 6: Room summaries + User memory.

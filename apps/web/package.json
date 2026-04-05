@@ -1,0 +1,32 @@
+{
+  "name": "@agent-platform/web",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@agent-platform/db": "workspace:*",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.0",
+    "drizzle-orm": "^0.45.2",
+    "next": "^15.2.0",
+    "next-auth": "5.0.0-beta.30",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/bcryptjs": "^3.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.7.0"
+  }
+}
