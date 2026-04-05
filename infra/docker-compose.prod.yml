@@ -16,7 +16,8 @@ services:
   web:
     build:
       context: ..
-      dockerfile: infra/Dockerfile.web
+      dockerfile: infra/Dockerfile
+      target: web
     restart: unless-stopped
     environment:
       - DATABASE_URL=${DATABASE_URL}
@@ -32,7 +33,8 @@ services:
   agent-runtime:
     build:
       context: ..
-      dockerfile: infra/Dockerfile.agent-runtime
+      dockerfile: infra/Dockerfile
+      target: agent-runtime
     restart: unless-stopped
     environment:
       - LLM_API_KEY=${LLM_API_KEY}
@@ -44,7 +46,8 @@ services:
   memory-worker:
     build:
       context: ..
-      dockerfile: infra/Dockerfile.memory-worker
+      dockerfile: infra/Dockerfile
+      target: memory-worker
     restart: unless-stopped
     environment:
       - DATABASE_URL=${DATABASE_URL}
