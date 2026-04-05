@@ -24,12 +24,55 @@ caddy start --config /etc/caddy/Caddyfile 2>/dev/null || echo "Caddy not install
 echo "=== 4. Copy static assets for standalone ==="
 cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
 
-echo "=== 5. Start services with pm2 ==="
-pm2 delete all 2>/dev/null || true
+echo "=== 5. Create pm2 ecosystem ==="
+cat > ~/agent-platform/ecosystem.config.cjs << PMEOF
+module.exports = {
+  apps: [
+    {
+      name: "web",
+      script: "apps/web/.next/standalone/apps/web/server.js",
+      cwd: "$HOME/agent-platform",
+      env: {
+        PORT: 3000,
+        HOSTNAME: "0.0.0.0",
+        DATABASE_URL: "$DATABASE_URL",
+        REDIS_URL: "$REDIS_URL",
+        AUTH_SECRET: "$AUTH_SECRET",
+        AUTH_TRUST_HOST: "true",
+        AGENT_RUNTIME_URL: "$AGENT_RUNTIME_URL",
+      },
+    },
+    {
+      name: "agent-runtime",
+      script: "services/agent-runtime/dist/index.js",
+      cwd: "$HOME/agent-platform",
+      env: {
+        PORT: 3001,
+        LLM_API_KEY: "$LLM_API_KEY",
+        LLM_BASE_URL: "$LLM_BASE_URL",
+        LLM_MODEL: "$LLM_MODEL",
+        MOCK_LLM: "$MOCK_LLM",
+      },
+    },
+    {
+      name: "memory-worker",
+      script: "services/memory-worker/dist/index.js",
+      cwd: "$HOME/agent-platform",
+      env: {
+        DATABASE_URL: "$DATABASE_URL",
+        REDIS_URL: "$REDIS_URL",
+        LLM_API_KEY: "$LLM_API_KEY",
+        LLM_BASE_URL: "$LLM_BASE_URL",
+        LLM_MODEL: "$LLM_MODEL",
+      },
+    },
+  ],
+};
+PMEOF
 
-pm2 start "node apps/web/.next/standalone/apps/web/server.js" --name web --cwd ~/agent-platform
-pm2 start services/agent-runtime/dist/index.js --name agent-runtime
-pm2 start services/memory-worker/dist/index.js --name memory-worker
+echo "=== 6. Start services with pm2 ==="
+pm2 delete all 2>/dev/null || true
+pm2 start ~/agent-platform/ecosystem.config.cjs
 
 pm2 save
 
