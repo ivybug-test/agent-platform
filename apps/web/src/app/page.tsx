@@ -63,7 +63,7 @@ export default function Home() {
 
   return (
     <main className="flex h-screen overflow-hidden" data-theme="dark">
-      <div className={`${showSidebar ? "flex" : "hidden"} md:flex w-full md:w-auto shrink-0`}>
+      <div className={`${showSidebar ? "flex" : "hidden"} w-full md:w-auto shrink-0`}>
         <Sidebar
           rooms={rooms}
           activeRoomId={activeRoomId}
@@ -74,13 +74,13 @@ export default function Home() {
         />
       </div>
 
-      <div className={`${showSidebar ? "hidden" : "flex"} md:flex flex-1 flex-col min-w-0 overflow-hidden bg-base-100`}>
+      <div className={`${showSidebar ? "hidden" : "flex"} flex-1 flex-col min-w-0 overflow-hidden bg-base-100`}>
         <div className="navbar min-h-0 h-12 px-3 border-b border-base-300 bg-base-100">
           <button
-            className="btn btn-ghost btn-sm md:hidden mr-2"
-            onClick={() => setShowSidebar(true)}
+            className="btn btn-ghost btn-sm mr-2"
+            onClick={() => setShowSidebar(!showSidebar)}
           >
-            ←
+            ☰
           </button>
           <span className="text-sm font-semibold truncate">
             {activeRoom ? activeRoom.name : "Select a room"}
