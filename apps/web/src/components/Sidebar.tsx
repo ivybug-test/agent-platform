@@ -175,8 +175,8 @@ export default function Sidebar({
                   if (res.ok) {
                     const { code } = await res.json();
                     const url = `${window.location.origin}/register?code=${code}`;
-                    await navigator.clipboard.writeText(url).catch(() => {});
-                    alert(`Invite link copied!\n${url}`);
+                    try { await navigator.clipboard.writeText(url); } catch {}
+                    window.prompt("Invite link (copy it):", url);
                   }
                 }}
               >
