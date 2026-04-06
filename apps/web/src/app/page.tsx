@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import ChatPanel from "@/components/ChatPanel";
 
@@ -11,6 +13,22 @@ interface Room {
 }
 
 export default function Home() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (status === "unauthenticated") router.push("/login");
+  }, [status, router]);
+
+  if (status === "loading") {
+    return (
+      <main className="flex h-screen items-center justify-center" data-theme="dark">
+        <span className="loading loading-spinner loading-lg"></span>
+      </main>
+    );
+  }
+
+  if (!session) return null;
   const [rooms, setRooms] = useState<Room[]>([]);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [showSidebar, setShowSidebar] = useState(true);
