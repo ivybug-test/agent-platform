@@ -1,72 +1,85 @@
 #!/bin/bash
+# First-time server setup — run once on a fresh Ubuntu server
+# Usage: curl the repo, edit infra/.env.prod, then run this script
 set -e
 
-echo "=== 1. Install Node.js 22 ==="
+echo "========================================="
+echo "  Agent Platform — Server Setup"
+echo "========================================="
+echo ""
+
+cd ~/agent-platform
+
+# --- 1. Install Node.js ---
+echo "=== Installing Node.js 22 ==="
 if ! command -v node &> /dev/null; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
-echo "Node: $(node -v)"
+echo "  Node: $(node -v)"
 
-echo "=== 2. Install pnpm ==="
+# --- 2. Install pnpm ---
+echo "=== Installing pnpm ==="
 if ! command -v pnpm &> /dev/null; then
   npm install -g pnpm@9.15.4
 fi
-echo "pnpm: $(pnpm -v)"
+echo "  pnpm: $(pnpm -v)"
 
-echo "=== 3. Install pm2 ==="
+# --- 3. Install pm2 ---
+echo "=== Installing pm2 ==="
 if ! command -v pm2 &> /dev/null; then
   npm install -g pm2
 fi
-echo "pm2: $(pm2 -v)"
+echo "  pm2: $(pm2 -v)"
 
-echo "=== 4. Install Caddy ==="
+# --- 4. Install Caddy ---
+echo "=== Installing Caddy ==="
 if ! command -v caddy &> /dev/null; then
-  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update
-  apt-get install -y caddy
+  echo "  Caddy not found. Trying to install..."
+  curl -o /usr/bin/caddy -L "https://caddyserver.com/api/download?os=linux&arch=amd64" && chmod +x /usr/bin/caddy || echo "  WARNING: Caddy install failed. Install manually or use a proxy."
 fi
-echo "Caddy: $(caddy version)"
+if command -v caddy &> /dev/null; then
+  echo "  Caddy: $(caddy version)"
+fi
 
-echo "=== 5. Start PostgreSQL + Redis (Docker) ==="
-cd /root/agent-platform/infra
+# --- 5. Check .env.prod ---
+if [ ! -f infra/.env.prod ]; then
+  echo ""
+  echo "ERROR: infra/.env.prod not found!"
+  echo "Run: cp infra/.env.prod.example infra/.env.prod"
+  echo "Then edit it with your passwords and API keys."
+  exit 1
+fi
+
+# --- 6. Start PostgreSQL + Redis ---
+echo "=== Starting PostgreSQL + Redis (Docker) ==="
+cd infra
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 sleep 3
+cd ~/agent-platform
 
-echo "=== 6. Install dependencies ==="
-cd /root/agent-platform
+# --- 7. Install dependencies ---
+echo "=== Installing dependencies ==="
 pnpm install
 
-echo "=== 7. Build ==="
+# --- 8. Build ---
+echo "=== Building ==="
 pnpm -r build
 
-echo "=== 8. Push database schema ==="
-cd packages/db
-DATABASE_URL=$(grep DATABASE_URL /root/agent-platform/infra/.env.prod | cut -d= -f2-) pnpm db:push
+# --- 9. Symlink .env for drizzle ---
+ln -sf ~/agent-platform/infra/.env.prod ~/agent-platform/.env
 
-echo "=== 9. Setup Caddy ==="
-cp /root/agent-platform/infra/Caddyfile /etc/caddy/Caddyfile
-systemctl restart caddy
+# --- 10. Run deploy ---
+echo "=== Running deploy ==="
+chmod +x infra/deploy.sh
+./infra/deploy.sh
 
-echo "=== 10. Start services with pm2 ==="
-cd /root/agent-platform
-
-# Load env vars
-set -a
-source infra/.env.prod
-set +a
-
-pm2 delete all 2>/dev/null || true
-
-pm2 start apps/web/node_modules/.bin/next --name web -- start --port 3000
-pm2 start services/agent-runtime/dist/index.js --name agent-runtime
-pm2 start services/memory-worker/dist/index.js --name memory-worker
-
+# --- 11. Setup pm2 startup ---
+pm2 startup 2>/dev/null || true
 pm2 save
-pm2 startup
 
 echo ""
-echo "=== Done! ==="
-echo "Visit https://testagent.fun"
+echo "========================================="
+echo "  Setup complete!"
+echo "  Visit https://testagent.fun"
+echo "========================================="

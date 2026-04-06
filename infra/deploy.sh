@@ -1,30 +1,37 @@
 #!/bin/bash
+# Deploy after build — push schema, start caddy, start pm2 services
+# Called by setup-server.sh or manually after update.sh
 set -e
 
 cd ~/agent-platform
 
-echo "=== 1. Load env ==="
+# --- Load env ---
+echo "=== Loading env ==="
 set -a
 source infra/.env.prod
 export AUTH_TRUST_HOST=true
 set +a
 
-echo "=== 2. Push database schema ==="
-# Create .env symlink so drizzle.config.ts can find it
+# --- Push database schema ---
+echo "=== Pushing database schema ==="
 ln -sf ~/agent-platform/infra/.env.prod ~/agent-platform/.env
 cd packages/db
 pnpm db:push
 cd ~/agent-platform
 
-echo "=== 3. Setup Caddy ==="
-cp infra/Caddyfile /etc/caddy/Caddyfile 2>/dev/null || true
+# --- Setup Caddy ---
+echo "=== Setting up Caddy ==="
+mkdir -p /etc/caddy
+cp infra/Caddyfile /etc/caddy/Caddyfile
 caddy stop 2>/dev/null || true
-caddy start --config /etc/caddy/Caddyfile 2>/dev/null || echo "Caddy not installed or failed, skipping HTTPS"
+caddy start --config /etc/caddy/Caddyfile 2>/dev/null || echo "  Caddy failed, skipping HTTPS. Access via http://119.29.129.198:3000"
 
-echo "=== 4. Copy static assets for standalone ==="
+# --- Copy static assets ---
+echo "=== Copying static assets ==="
 cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
 
-echo "=== 5. Create pm2 ecosystem ==="
+# --- Create pm2 ecosystem ---
+echo "=== Creating pm2 ecosystem ==="
 cat > ~/agent-platform/ecosystem.config.cjs << PMEOF
 module.exports = {
   apps: [
@@ -70,14 +77,12 @@ module.exports = {
 };
 PMEOF
 
-echo "=== 6. Start services with pm2 ==="
+# --- Start services ---
+echo "=== Starting services ==="
 pm2 delete all 2>/dev/null || true
 pm2 start ~/agent-platform/ecosystem.config.cjs
-
 pm2 save
 
 echo ""
-echo "=== Done! ==="
+echo "=== Deploy complete! ==="
 pm2 list
-echo ""
-echo "Visit https://testagent.fun or http://119.29.129.198:3000"
