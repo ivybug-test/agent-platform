@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
@@ -15,48 +15,45 @@ interface Room {
 export default function Home() {
   const { data: session, status } = useSession();
   const router = useRouter();
+  const drawerRef = useRef<HTMLInputElement>(null);
+
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
-  if (status === "loading") {
-    return (
-      <main className="flex h-screen items-center justify-center" data-theme="dark">
-        <span className="loading loading-spinner loading-lg"></span>
-      </main>
-    );
-  }
-
-  if (!session) return null;
-  const [rooms, setRooms] = useState<Room[]>([]);
-  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
-  const [showSidebar, setShowSidebar] = useState(true);
-
   const refreshRooms = useCallback(async () => {
     const res = await fetch("/api/rooms");
     if (!res.ok) return;
-    const data = await res.json();
-    setRooms(data);
+    setRooms(await res.json());
   }, []);
 
   useEffect(() => {
+    if (status !== "authenticated") return;
     (async () => {
       const res = await fetch("/api/rooms");
       if (!res.ok) return;
       const data = await res.json();
       setRooms(data);
-      if (data.length > 0) {
-        setActiveRoomId(data[0].id);
-        setShowSidebar(false);
-      }
+      if (data.length > 0) setActiveRoomId(data[0].id);
     })();
-  }, []);
+  }, [status]);
+
+  const closeDrawer = () => {
+    if (drawerRef.current) drawerRef.current.checked = false;
+  };
+
+  const handleSelectRoom = (id: string) => {
+    setActiveRoomId(id);
+    closeDrawer();
+  };
 
   const handleRoomCreated = (room: Room) => {
     setRooms((prev) => [...prev, room]);
     setActiveRoomId(room.id);
-    setShowSidebar(false);
+    closeDrawer();
   };
 
   const handleRoomRemoved = (id: string) => {
@@ -72,38 +69,37 @@ export default function Home() {
     setTimeout(refreshRooms, 2000);
   }, [refreshRooms]);
 
-  const handleSelectRoom = (id: string) => {
-    setActiveRoomId(id);
-    setShowSidebar(false);
-  };
-
   const activeRoom = rooms.find((r) => r.id === activeRoomId);
 
-  return (
-    <main className="flex h-screen overflow-hidden" data-theme="dark">
-      <div className={`${showSidebar ? "flex" : "hidden"} w-full md:w-auto shrink-0`}>
-        <Sidebar
-          rooms={rooms}
-          activeRoomId={activeRoomId}
-          onSelectRoom={handleSelectRoom}
-          onRoomCreated={handleRoomCreated}
-          onRoomRemoved={handleRoomRemoved}
-          onRoomUpdated={handleRoomUpdated}
-        />
-      </div>
+  if (status === "loading") {
+    return (
+      <main className="flex h-screen items-center justify-center" data-theme="dark">
+        <span className="loading loading-spinner loading-lg"></span>
+      </main>
+    );
+  }
 
-      <div className={`${showSidebar ? "hidden" : "flex"} flex-1 flex-col min-w-0 min-h-0 h-screen overflow-hidden bg-base-100`}>
+  if (!session) return null;
+
+  return (
+    <div className="drawer lg:drawer-open h-screen" data-theme="dark">
+      <input ref={drawerRef} id="sidebar-drawer" type="checkbox" className="drawer-toggle" />
+
+      {/* Main content */}
+      <div className="drawer-content flex flex-col h-screen">
+        {/* Top bar with hamburger */}
         <div className="h-12 min-h-12 flex items-center px-3 border-b border-base-300 bg-base-100">
-          <button
-            className="btn btn-ghost btn-sm mr-2"
-            onClick={() => setShowSidebar(!showSidebar)}
-          >
-            ☰
-          </button>
+          <label htmlFor="sidebar-drawer" className="btn btn-ghost btn-sm btn-square lg:hidden mr-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="w-5 h-5 stroke-current">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </label>
           <span className="text-sm font-semibold truncate">
             {activeRoom ? activeRoom.name : "Select a room"}
           </span>
         </div>
+
+        {/* Chat area */}
         {activeRoomId ? (
           <ChatPanel
             key={activeRoomId}
@@ -116,6 +112,19 @@ export default function Home() {
           </div>
         )}
       </div>
-    </main>
+
+      {/* Sidebar drawer */}
+      <div className="drawer-side z-50">
+        <label htmlFor="sidebar-drawer" aria-label="close sidebar" className="drawer-overlay"></label>
+        <Sidebar
+          rooms={rooms}
+          activeRoomId={activeRoomId}
+          onSelectRoom={handleSelectRoom}
+          onRoomCreated={handleRoomCreated}
+          onRoomRemoved={handleRoomRemoved}
+          onRoomUpdated={handleRoomUpdated}
+        />
+      </div>
+    </div>
   );
 }

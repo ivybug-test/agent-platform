@@ -93,7 +93,7 @@ export default function Sidebar({
   };
 
   return (
-    <div className="w-full md:w-[260px] shrink-0 h-screen overflow-hidden border-r border-base-300 flex flex-col bg-base-200" data-theme="dark">
+    <div className="w-72 lg:w-[260px] min-h-full overflow-hidden border-r border-base-300 flex flex-col bg-base-200" data-theme="dark">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3">
         <h2 className="text-sm font-bold tracking-wide uppercase text-base-content/50">
