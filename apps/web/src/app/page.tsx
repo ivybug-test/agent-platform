@@ -106,13 +106,13 @@ export default function Home() {
   if (!session) return null;
 
   return (
-    <div className="drawer lg:drawer-open h-screen" data-theme="dark">
+    <div className="drawer lg:drawer-open" style={{ height: "100dvh" }} data-theme="dark">
       <input ref={drawerRef} id="sidebar-drawer" type="checkbox" className="drawer-toggle" />
 
       {/* Main content */}
-      <div className="drawer-content flex flex-col h-screen">
-        {/* Top bar with hamburger */}
-        <div className="h-12 min-h-12 flex items-center px-3 border-b border-base-300 bg-base-100">
+      <div className="drawer-content flex flex-col overflow-hidden" style={{ height: "100dvh" }}>
+        {/* Top bar with hamburger — sticky so it never scrolls away */}
+        <div className="sticky top-0 z-10 h-12 min-h-12 flex items-center px-3 border-b border-base-300 bg-base-100">
           <label htmlFor="sidebar-drawer" className="btn btn-ghost btn-sm btn-square lg:hidden mr-2">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="w-5 h-5 stroke-current">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
