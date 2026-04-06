@@ -31,7 +31,7 @@ export AUTH_TRUST_HOST=true
 set +a
 
 # Regenerate ecosystem config with current env
-./infra/deploy.sh
+bash infra/deploy.sh
 
 echo ""
 echo "=== Update complete! ==="
