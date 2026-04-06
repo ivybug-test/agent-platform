@@ -26,9 +26,10 @@ cp infra/Caddyfile /etc/caddy/Caddyfile
 caddy stop 2>/dev/null || true
 caddy start --config /etc/caddy/Caddyfile 2>/dev/null || echo "  Caddy failed, skipping HTTPS. Access via http://119.29.129.198:3000"
 
-# --- Copy static assets ---
-echo "=== Copying static assets ==="
+# --- Copy standalone assets ---
+echo "=== Copying standalone assets ==="
 cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
+cp -r apps/web/.next/server apps/web/.next/standalone/apps/web/.next/server
 
 # --- Create pm2 ecosystem ---
 echo "=== Creating pm2 ecosystem ==="

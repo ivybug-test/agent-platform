@@ -14,8 +14,9 @@ pnpm install
 echo "=== Building ==="
 pnpm -r build
 
-echo "=== Copying static assets ==="
+echo "=== Copying standalone assets ==="
 cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
+cp -r apps/web/.next/server apps/web/.next/standalone/apps/web/.next/server
 
 echo "=== Pushing database schema ==="
 ln -sf ~/agent-platform/infra/.env.prod ~/agent-platform/.env
