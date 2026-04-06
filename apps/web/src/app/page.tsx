@@ -24,6 +24,30 @@ export default function Home() {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
+  // Swipe right from left edge to open drawer
+  useEffect(() => {
+    let startX = 0;
+    let startY = 0;
+    const onTouchStart = (e: TouchEvent) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      const dx = e.changedTouches[0].clientX - startX;
+      const dy = Math.abs(e.changedTouches[0].clientY - startY);
+      // Swipe right from left 30px edge, horizontal movement > 60px, not too vertical
+      if (startX < 30 && dx > 60 && dy < 100 && drawerRef.current) {
+        drawerRef.current.checked = true;
+      }
+    };
+    document.addEventListener("touchstart", onTouchStart);
+    document.addEventListener("touchend", onTouchEnd);
+    return () => {
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
+  }, []);
+
   const refreshRooms = useCallback(async () => {
     const res = await fetch("/api/rooms");
     if (!res.ok) return;
