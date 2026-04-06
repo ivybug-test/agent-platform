@@ -30,6 +30,7 @@ export default function Home() {
       setRooms(data);
       if (data.length > 0) {
         setActiveRoomId(data[0].id);
+        setShowSidebar(false);
       }
     })();
   }, []);
