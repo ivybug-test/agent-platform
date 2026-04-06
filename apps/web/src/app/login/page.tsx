@@ -26,19 +26,23 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="flex h-screen items-center justify-center px-4">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-3 w-full max-w-sm">
-        <h1 className="text-2xl font-bold text-center mb-4">Agent Platform</h1>
-        {error && <p className="text-danger text-sm text-center">{error}</p>}
-        <input className="px-4 py-3 rounded-xl border border-border bg-bg-secondary text-white text-sm outline-none focus:border-primary transition-colors" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <input className="px-4 py-3 rounded-xl border border-border bg-bg-secondary text-white text-sm outline-none focus:border-primary transition-colors" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-        <button className="py-3 rounded-xl bg-primary text-white text-sm font-medium cursor-pointer active:opacity-80 transition-opacity" type="submit" disabled={loading}>
-          {loading ? "Logging in..." : "Login"}
-        </button>
-        <p className="text-sm text-center text-text-muted mt-2">
-          Don't have an account? <a href="/register" className="text-primary no-underline">Register</a>
-        </p>
-      </form>
+    <main className="flex h-screen items-center justify-center px-4" data-theme="dark">
+      <div className="card w-full max-w-sm bg-base-200 shadow-xl">
+        <div className="card-body">
+          <h1 className="card-title text-xl justify-center mb-2">Agent Platform</h1>
+          {error && <div className="alert alert-error text-sm py-2">{error}</div>}
+          <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+            <input className="input input-bordered w-full" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <input className="input input-bordered w-full" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <button className="btn btn-primary w-full" type="submit" disabled={loading}>
+              {loading ? <span className="loading loading-spinner loading-sm"></span> : "Login"}
+            </button>
+          </form>
+          <p className="text-sm text-center text-base-content/50 mt-2">
+            Don't have an account? <a href="/register" className="link link-primary">Register</a>
+          </p>
+        </div>
+      </div>
     </main>
   );
 }

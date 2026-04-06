@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "daisyui";
 
 @theme {
   --color-bg: #111;
@@ -26,12 +27,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Safe area for mobile (notch, home indicator) */
 .safe-area-bottom {
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
 }
 
-/* Smooth scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
 }

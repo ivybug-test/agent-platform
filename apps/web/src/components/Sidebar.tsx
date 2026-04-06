@@ -44,7 +44,7 @@ export default function Sidebar({
   };
 
   const deleteRoom = async (id: string) => {
-    if (!confirm("Delete this room and all its messages? This cannot be undone.")) return;
+    if (!confirm("Delete this room and all its messages?")) return;
     await fetch(`/api/rooms/${id}`, { method: "DELETE" });
     setMenuRoomId(null);
     onRoomRemoved(id);
@@ -77,93 +77,92 @@ export default function Sidebar({
     setCreating(true);
     try {
       const res = await fetch("/api/rooms", { method: "POST" });
-      if (res.ok) {
-        const room = await res.json();
-        onRoomCreated(room);
-      }
+      if (res.ok) onRoomCreated(await res.json());
     } finally {
       setCreating(false);
     }
   };
 
   return (
-    <div className="w-full md:w-[260px] shrink-0 h-screen overflow-hidden border-r border-border flex flex-col">
+    <div className="w-full md:w-[260px] shrink-0 h-screen overflow-hidden border-r border-base-300 flex flex-col bg-base-200" data-theme="dark">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 pt-3 pb-2">
-        <h2 className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+      <div className="flex items-center justify-between px-4 py-3">
+        <h2 className="text-sm font-bold tracking-wide uppercase text-base-content/50">
           Rooms
         </h2>
-        <button
-          className="px-2.5 py-1 rounded bg-primary text-white text-xs cursor-pointer"
-          onClick={createRoom}
-          disabled={creating}
-        >
+        <button className="btn btn-primary btn-xs" onClick={createRoom} disabled={creating}>
           + New
         </button>
       </div>
 
       {/* Room list */}
-      <div className="flex-1 overflow-y-auto flex flex-col gap-0.5">
+      <ul className="menu menu-sm flex-1 overflow-y-auto gap-0.5 px-2">
         {rooms.map((room) => (
-          <div key={room.id} className="flex items-center mx-1">
-            <button
-              onClick={() => onSelectRoom(room.id)}
-              className={`flex-1 px-3 py-2 text-sm text-left text-white rounded cursor-pointer truncate border-none ${
-                room.id === activeRoomId ? "bg-bg-tertiary" : "bg-transparent hover:bg-bg-secondary"
+          <li key={room.id}>
+            <div
+              className={`flex items-center justify-between pr-1 ${
+                room.id === activeRoomId ? "active" : ""
               }`}
             >
-              {room.name}
-            </button>
-            <div className="relative">
-              <button
-                className="px-1.5 py-1 text-text-dim text-sm bg-transparent border-none cursor-pointer rounded hover:text-text-muted"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMenuRoomId(menuRoomId === room.id ? null : room.id);
-                }}
-              >
-                ···
-              </button>
-              {menuRoomId === room.id && (
-                <div className="absolute right-0 top-full bg-bg-secondary border border-border rounded-md p-1 z-50 min-w-[120px]">
-                  <button
-                    className="block w-full px-2.5 py-1.5 text-xs text-left text-text-muted bg-transparent border-none cursor-pointer rounded hover:bg-bg-tertiary"
-                    onClick={() => toggleAutoReply(room)}
+              <span className="truncate flex-1" onClick={() => onSelectRoom(room.id)}>
+                {room.name}
+              </span>
+              <div className="dropdown dropdown-end">
+                <button
+                  tabIndex={0}
+                  className="btn btn-ghost btn-xs text-base-content/40 px-1"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuRoomId(menuRoomId === room.id ? null : room.id);
+                  }}
+                >
+                  ···
+                </button>
+                {menuRoomId === room.id && (
+                  <ul
+                    tabIndex={0}
+                    className="dropdown-content menu bg-base-300 rounded-box z-50 w-36 p-1 shadow-lg"
                   >
-                    Auto-reply: {room.autoReply !== false ? "ON" : "OFF"}
-                  </button>
-                  <button
-                    className="block w-full px-2.5 py-1.5 text-xs text-left text-text-muted bg-transparent border-none cursor-pointer rounded hover:bg-bg-tertiary"
-                    onClick={() => archiveRoom(room.id)}
-                  >
-                    Archive
-                  </button>
-                  <button
-                    className="block w-full px-2.5 py-1.5 text-xs text-left text-danger bg-transparent border-none cursor-pointer rounded hover:bg-bg-tertiary"
-                    onClick={() => deleteRoom(room.id)}
-                  >
-                    Delete
-                  </button>
-                </div>
-              )}
+                    <li>
+                      <a onClick={() => toggleAutoReply(room)} className="text-xs">
+                        Auto-reply: {room.autoReply !== false ? "ON" : "OFF"}
+                      </a>
+                    </li>
+                    <li>
+                      <a onClick={() => archiveRoom(room.id)} className="text-xs">
+                        Archive
+                      </a>
+                    </li>
+                    <li>
+                      <a onClick={() => deleteRoom(room.id)} className="text-xs text-error">
+                        Delete
+                      </a>
+                    </li>
+                  </ul>
+                )}
+              </div>
             </div>
-          </div>
+          </li>
         ))}
-      </div>
+      </ul>
 
       {/* User bar */}
       {session?.user && (
-        <div className="flex items-center justify-between px-3 py-2 border-t border-border">
-          <span className="text-xs text-text-muted truncate">{session.user.name}</span>
-          <div className="flex gap-1 shrink-0">
+        <div className="flex items-center justify-between px-4 py-2 border-t border-base-300">
+          <span className="text-xs text-base-content/50 truncate">
+            {session.user.name}
+          </span>
+          <div className="flex gap-1">
             <button
-              className="px-2 py-1 rounded border border-border bg-transparent text-primary text-xs cursor-pointer"
+              className="btn btn-ghost btn-xs text-primary"
               onClick={() => setShowFriends(true)}
             >
-              Friends{pendingCount > 0 && ` (${pendingCount})`}
+              Friends{pendingCount > 0 && (
+                <span className="badge badge-primary badge-xs ml-1">{pendingCount}</span>
+              )}
             </button>
             <button
-              className="px-2 py-1 rounded border border-border bg-transparent text-text-muted text-xs cursor-pointer"
+              className="btn btn-ghost btn-xs text-base-content/40"
               onClick={() => signOut({ callbackUrl: "/login" })}
             >
               Logout

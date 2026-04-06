@@ -62,13 +62,8 @@ export default function Home() {
   const activeRoom = rooms.find((r) => r.id === activeRoomId);
 
   return (
-    <main className="flex h-screen overflow-hidden">
-      {/* Sidebar: always visible on desktop, toggleable on mobile */}
-      <div
-        className={`${
-          showSidebar ? "flex" : "hidden"
-        } md:flex w-full md:w-[260px] shrink-0`}
-      >
+    <main className="flex h-screen overflow-hidden" data-theme="dark">
+      <div className={`${showSidebar ? "flex" : "hidden"} md:flex w-full md:w-auto shrink-0`}>
         <Sidebar
           rooms={rooms}
           activeRoomId={activeRoomId}
@@ -79,21 +74,15 @@ export default function Home() {
         />
       </div>
 
-      {/* Chat area: hidden on mobile when sidebar is showing */}
-      <div
-        className={`${
-          showSidebar ? "hidden" : "flex"
-        } md:flex flex-1 flex-col min-w-0 overflow-hidden`}
-      >
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
-          {/* Back button: mobile only */}
+      <div className={`${showSidebar ? "hidden" : "flex"} md:flex flex-1 flex-col min-w-0 overflow-hidden bg-base-100`}>
+        <div className="navbar min-h-0 h-12 px-3 border-b border-base-300 bg-base-100">
           <button
-            className="md:hidden text-text-muted text-lg"
+            className="btn btn-ghost btn-sm md:hidden mr-2"
             onClick={() => setShowSidebar(true)}
           >
             ←
           </button>
-          <span className="text-base font-semibold truncate">
+          <span className="text-sm font-semibold truncate">
             {activeRoom ? activeRoom.name : "Select a room"}
           </span>
         </div>
@@ -104,7 +93,7 @@ export default function Home() {
             onChatComplete={handleChatComplete}
           />
         ) : (
-          <div className="flex-1 flex items-center justify-center text-text-dim text-sm">
+          <div className="flex-1 flex items-center justify-center text-base-content/30 text-sm">
             Create or select a room to start chatting.
           </div>
         )}

@@ -15,11 +15,18 @@ interface ChatPanelProps {
   onChatComplete?: () => void;
 }
 
-const userColors = ["bg-primary", "bg-orange-700", "bg-purple-700", "bg-green-700", "bg-red-800", "bg-cyan-700"];
-function colorClassForUser(id: string): string {
+const bubbleColors = [
+  "chat-bubble-primary",
+  "chat-bubble-secondary",
+  "chat-bubble-accent",
+  "chat-bubble-warning",
+  "chat-bubble-error",
+  "chat-bubble-info",
+];
+function colorForUser(id: string): string {
   let hash = 0;
   for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
-  return userColors[Math.abs(hash) % userColors.length];
+  return bubbleColors[Math.abs(hash) % bubbleColors.length];
 }
 
 export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
@@ -76,10 +83,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       });
 
       const contentType = res.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        return;
-      }
-
+      if (contentType.includes("application/json")) return;
       if (!res.ok || !res.body) throw new Error("Request failed");
 
       setMessages((prev) => [
@@ -94,26 +98,20 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
-
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
           if (data === "[DONE]") break;
-
           try {
             const { content } = JSON.parse(data);
             if (content) {
               setMessages((prev) => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: last.content + content,
-                };
+                updated[updated.length - 1] = { ...last, content: last.content + content };
                 return updated;
               });
             }
@@ -145,10 +143,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   };
 
   return (
-    <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
-      <div className="flex-1 overflow-y-auto flex flex-col gap-2 p-3 md:p-4">
+    <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden" data-theme="dark">
+      <div className="flex-1 overflow-y-auto px-2 py-3 md:px-4">
         {messages.length === 0 && (
-          <p className="text-text-dim text-center mt-[30vh]">
+          <p className="text-base-content/40 text-center mt-[30vh] text-sm">
             Send a message to start chatting.
           </p>
         )}
@@ -158,27 +156,29 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           const displayName = isMe
             ? "You"
             : msg.senderName || (isAgent ? "Agent" : "User");
-          const bgClass = isAgent
-            ? "bg-bg-tertiary"
+          const bubbleColor = isAgent
+            ? "chat-bubble-neutral"
             : isMe
-              ? "bg-primary"
-              : colorClassForUser(msg.senderId || "unknown");
+              ? "chat-bubble-primary"
+              : colorForUser(msg.senderId || "unknown");
 
           return (
-            <div
-              key={i}
-              className={`max-w-[85%] md:max-w-[70%] px-3 py-2 rounded-xl text-sm leading-relaxed text-white ${bgClass} ${isMe ? "self-end" : "self-start"}`}
-            >
-              <div className="text-[11px] opacity-60 mb-0.5">{displayName}</div>
-              <div className="whitespace-pre-wrap">{msg.content}</div>
+            <div key={i} className={`chat ${isMe ? "chat-end" : "chat-start"}`}>
+              <div className="chat-header text-xs opacity-60 mb-0.5">
+                {displayName}
+              </div>
+              <div className={`chat-bubble ${bubbleColor} text-sm`}>
+                <div className="whitespace-pre-wrap">{msg.content}</div>
+              </div>
             </div>
           );
         })}
         <div ref={bottomRef} />
       </div>
-      <div className="flex gap-2 px-3 py-2 md:px-4 md:py-3 border-t border-border safe-area-bottom">
+
+      <div className="flex gap-2 px-3 py-2 md:px-4 md:py-3 border-t border-base-300 safe-area-bottom">
         <textarea
-          className="flex-1 px-3 py-2.5 rounded-xl border border-border bg-bg-secondary text-white text-sm resize-none outline-none focus:border-primary transition-colors"
+          className="textarea textarea-bordered flex-1 min-h-[2.5rem] max-h-32 text-sm leading-normal resize-none bg-base-200"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -187,11 +187,15 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           disabled={isStreaming}
         />
         <button
-          className="px-4 md:px-5 py-2.5 rounded-xl bg-primary text-white text-sm cursor-pointer disabled:opacity-50 active:opacity-80 transition-opacity"
+          className="btn btn-primary btn-sm self-end"
           onClick={sendMessage}
           disabled={isStreaming}
         >
-          {isStreaming ? "..." : "Send"}
+          {isStreaming ? (
+            <span className="loading loading-dots loading-xs"></span>
+          ) : (
+            "Send"
+          )}
         </button>
       </div>
     </div>

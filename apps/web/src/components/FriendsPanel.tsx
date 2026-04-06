@@ -20,9 +20,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
     if (res.ok) setFriends(await res.json());
   };
 
-  useEffect(() => {
-    loadFriends();
-  }, []);
+  useEffect(() => { loadFriends(); }, []);
 
   const sendRequest = async () => {
     const trimmed = email.trim();
@@ -36,30 +34,23 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({ email: trimmed }),
       });
       const data = await res.json();
-      if (res.ok) {
-        setEmail("");
-        setMessage("Request sent!");
-        loadFriends();
-      } else {
-        setMessage(data.error || "Failed");
-      }
-    } finally {
-      setLoading(false);
-    }
+      if (res.ok) { setEmail(""); setMessage("Request sent!"); loadFriends(); }
+      else setMessage(data.error || "Failed");
+    } finally { setLoading(false); }
   };
 
   const acceptRequest = async (id: string) => {
-    const res = await fetch(`/api/friends/${id}`, {
+    await fetch(`/api/friends/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "accept" }),
     });
-    if (res.ok) loadFriends();
+    loadFriends();
   };
 
   const removeFriend = async (id: string) => {
-    const res = await fetch(`/api/friends/${id}`, { method: "DELETE" });
-    if (res.ok || res.status === 204) loadFriends();
+    await fetch(`/api/friends/${id}`, { method: "DELETE" });
+    loadFriends();
   };
 
   const incoming = friends.filter((f) => f.direction === "incoming");
@@ -67,21 +58,19 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
   const accepted = friends.filter((f) => f.direction === "mutual");
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]" onClick={onClose}>
-      <div className="bg-bg-secondary rounded-xl w-[calc(100%-2rem)] max-w-[400px] max-h-[80vh] overflow-y-auto p-4 md:p-5 mx-4" onClick={(e) => e.stopPropagation()}>
+    <div className="modal modal-open" onClick={onClose}>
+      <div className="modal-box w-[calc(100%-2rem)] max-w-md" data-theme="dark" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-lg font-semibold">Friends</h2>
-          <button className="bg-transparent border-none text-text-muted text-2xl cursor-pointer" onClick={onClose}>
-            ×
-          </button>
+          <h3 className="font-bold text-lg">Friends</h3>
+          <button className="btn btn-sm btn-circle btn-ghost" onClick={onClose}>✕</button>
         </div>
 
         {/* Add friend */}
-        <div className="mb-4">
-          <div className="flex gap-2">
+        <div className="form-control mb-4">
+          <div className="join w-full">
             <input
-              className="flex-1 px-2.5 py-2 rounded-md border border-border bg-bg text-white text-sm outline-none"
+              className="input input-bordered join-item flex-1 input-sm"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && sendRequest()}
@@ -89,41 +78,29 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
               disabled={loading}
             />
             <button
-              className="px-3.5 py-2 rounded-md bg-primary text-white text-sm cursor-pointer disabled:opacity-50"
+              className="btn btn-primary join-item btn-sm"
               onClick={sendRequest}
               disabled={loading || !email.trim()}
             >
               Add
             </button>
           </div>
-          {message && <p className="text-xs text-primary mt-1.5">{message}</p>}
+          {message && <label className="label"><span className="label-text-alt text-primary">{message}</span></label>}
         </div>
 
         {/* Incoming */}
         {incoming.length > 0 && (
           <div className="mb-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
-              Pending Requests
-            </h3>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-base-content/40 mb-2">Pending Requests</h4>
             {incoming.map((f) => (
-              <div key={f.id} className="flex justify-between items-center py-1.5 border-b border-border/50">
-                <span className="text-sm">
-                  {f.friend.name}{" "}
-                  <span className="text-xs text-text-dim">{f.friend.email}</span>
-                </span>
+              <div key={f.id} className="flex items-center justify-between py-2 border-b border-base-300">
+                <div>
+                  <span className="text-sm font-medium">{f.friend.name}</span>
+                  <span className="text-xs text-base-content/40 ml-2">{f.friend.email}</span>
+                </div>
                 <div className="flex gap-1">
-                  <button
-                    className="px-2.5 py-1 rounded bg-primary text-white text-xs cursor-pointer"
-                    onClick={() => acceptRequest(f.id)}
-                  >
-                    Accept
-                  </button>
-                  <button
-                    className="px-2.5 py-1 rounded border border-border bg-transparent text-text-muted text-xs cursor-pointer"
-                    onClick={() => removeFriend(f.id)}
-                  >
-                    Reject
-                  </button>
+                  <button className="btn btn-primary btn-xs" onClick={() => acceptRequest(f.id)}>Accept</button>
+                  <button className="btn btn-ghost btn-xs" onClick={() => removeFriend(f.id)}>Reject</button>
                 </div>
               </div>
             ))}
@@ -133,46 +110,34 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
         {/* Outgoing */}
         {outgoing.length > 0 && (
           <div className="mb-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
-              Sent Requests
-            </h3>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-base-content/40 mb-2">Sent Requests</h4>
             {outgoing.map((f) => (
-              <div key={f.id} className="flex justify-between items-center py-1.5 border-b border-border/50">
-                <span className="text-sm">
-                  {f.friend.name}{" "}
-                  <span className="text-xs text-text-dim">{f.friend.email}</span>
-                </span>
-                <button
-                  className="px-2.5 py-1 rounded border border-border bg-transparent text-text-muted text-xs cursor-pointer"
-                  onClick={() => removeFriend(f.id)}
-                >
-                  Cancel
-                </button>
+              <div key={f.id} className="flex items-center justify-between py-2 border-b border-base-300">
+                <div>
+                  <span className="text-sm font-medium">{f.friend.name}</span>
+                  <span className="text-xs text-base-content/40 ml-2">{f.friend.email}</span>
+                </div>
+                <button className="btn btn-ghost btn-xs" onClick={() => removeFriend(f.id)}>Cancel</button>
               </div>
             ))}
           </div>
         )}
 
         {/* Accepted */}
-        <div className="mb-4">
-          <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
+        <div>
+          <h4 className="text-xs font-bold uppercase tracking-wider text-base-content/40 mb-2">
             Friends {accepted.length > 0 && `(${accepted.length})`}
-          </h3>
+          </h4>
           {accepted.length === 0 && (
-            <p className="text-sm text-text-dim">No friends yet. Add someone above!</p>
+            <p className="text-sm text-base-content/30">No friends yet. Add someone above!</p>
           )}
           {accepted.map((f) => (
-            <div key={f.id} className="flex justify-between items-center py-1.5 border-b border-border/50">
-              <span className="text-sm">
-                {f.friend.name}{" "}
-                <span className="text-xs text-text-dim">{f.friend.email}</span>
-              </span>
-              <button
-                className="px-2.5 py-1 rounded border border-border bg-transparent text-text-muted text-xs cursor-pointer"
-                onClick={() => removeFriend(f.id)}
-              >
-                Remove
-              </button>
+            <div key={f.id} className="flex items-center justify-between py-2 border-b border-base-300">
+              <div>
+                <span className="text-sm font-medium">{f.friend.name}</span>
+                <span className="text-xs text-base-content/40 ml-2">{f.friend.email}</span>
+              </div>
+              <button className="btn btn-ghost btn-xs text-error" onClick={() => removeFriend(f.id)}>Remove</button>
             </div>
           ))}
         </div>
