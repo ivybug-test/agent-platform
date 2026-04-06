@@ -13,6 +13,7 @@ interface Room {
 export default function Home() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+  const [showSidebar, setShowSidebar] = useState(true);
 
   const refreshRooms = useCallback(async () => {
     const res = await fetch("/api/rooms");
@@ -36,6 +37,7 @@ export default function Home() {
   const handleRoomCreated = (room: Room) => {
     setRooms((prev) => [...prev, room]);
     setActiveRoomId(room.id);
+    setShowSidebar(false);
   };
 
   const handleRoomRemoved = (id: string) => {
@@ -51,21 +53,48 @@ export default function Home() {
     setTimeout(refreshRooms, 2000);
   }, [refreshRooms]);
 
+  const handleSelectRoom = (id: string) => {
+    setActiveRoomId(id);
+    setShowSidebar(false);
+  };
+
   const activeRoom = rooms.find((r) => r.id === activeRoomId);
 
   return (
     <main className="flex h-screen overflow-hidden">
-      <Sidebar
-        rooms={rooms}
-        activeRoomId={activeRoomId}
-        onSelectRoom={setActiveRoomId}
-        onRoomCreated={handleRoomCreated}
-        onRoomRemoved={handleRoomRemoved}
-        onRoomUpdated={handleRoomUpdated}
-      />
-      <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
-        <div className="px-4 py-3 border-b border-border text-base font-semibold">
-          {activeRoom ? activeRoom.name : "Select a room"}
+      {/* Sidebar: always visible on desktop, toggleable on mobile */}
+      <div
+        className={`${
+          showSidebar ? "flex" : "hidden"
+        } md:flex w-full md:w-[260px] shrink-0`}
+      >
+        <Sidebar
+          rooms={rooms}
+          activeRoomId={activeRoomId}
+          onSelectRoom={handleSelectRoom}
+          onRoomCreated={handleRoomCreated}
+          onRoomRemoved={handleRoomRemoved}
+          onRoomUpdated={handleRoomUpdated}
+        />
+      </div>
+
+      {/* Chat area: hidden on mobile when sidebar is showing */}
+      <div
+        className={`${
+          showSidebar ? "hidden" : "flex"
+        } md:flex flex-1 flex-col min-w-0 overflow-hidden`}
+      >
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+          {/* Back button: mobile only */}
+          <button
+            className="md:hidden text-text-muted text-lg"
+            onClick={() => setShowSidebar(true)}
+          >
+            ←
+          </button>
+          <span className="text-base font-semibold truncate">
+            {activeRoom ? activeRoom.name : "Select a room"}
+          </span>
         </div>
         {activeRoomId ? (
           <ChatPanel
@@ -74,7 +103,7 @@ export default function Home() {
             onChatComplete={handleChatComplete}
           />
         ) : (
-          <div className="flex-1 flex items-center justify-center text-text-dim">
+          <div className="flex-1 flex items-center justify-center text-text-dim text-sm">
             Create or select a room to start chatting.
           </div>
         )}

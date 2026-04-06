@@ -68,7 +68,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]" onClick={onClose}>
-      <div className="bg-bg-secondary rounded-xl w-[400px] max-h-[80vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-bg-secondary rounded-xl w-[calc(100%-2rem)] max-w-[400px] max-h-[80vh] overflow-y-auto p-4 md:p-5 mx-4" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-lg font-semibold">Friends</h2>

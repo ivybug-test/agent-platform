@@ -146,7 +146,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
   return (
     <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
-      <div className="flex-1 overflow-y-auto flex flex-col gap-2 p-3">
+      <div className="flex-1 overflow-y-auto flex flex-col gap-2 p-3 md:p-4">
         {messages.length === 0 && (
           <p className="text-text-dim text-center mt-[30vh]">
             Send a message to start chatting.
@@ -167,7 +167,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           return (
             <div
               key={i}
-              className={`max-w-[80%] px-3 py-2 rounded-lg text-sm leading-relaxed text-white ${bgClass} ${isMe ? "self-end" : "self-start"}`}
+              className={`max-w-[85%] md:max-w-[70%] px-3 py-2 rounded-xl text-sm leading-relaxed text-white ${bgClass} ${isMe ? "self-end" : "self-start"}`}
             >
               <div className="text-[11px] opacity-60 mb-0.5">{displayName}</div>
               <div className="whitespace-pre-wrap">{msg.content}</div>
@@ -176,9 +176,9 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         })}
         <div ref={bottomRef} />
       </div>
-      <div className="flex gap-2 px-4 py-2 border-t border-border">
+      <div className="flex gap-2 px-3 py-2 md:px-4 md:py-3 border-t border-border safe-area-bottom">
         <textarea
-          className="flex-1 px-3 py-2.5 rounded-lg border border-border bg-bg-secondary text-white text-sm resize-none outline-none"
+          className="flex-1 px-3 py-2.5 rounded-xl border border-border bg-bg-secondary text-white text-sm resize-none outline-none focus:border-primary transition-colors"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -187,7 +187,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           disabled={isStreaming}
         />
         <button
-          className="px-5 py-2.5 rounded-lg bg-primary text-white text-sm cursor-pointer disabled:opacity-50"
+          className="px-4 md:px-5 py-2.5 rounded-xl bg-primary text-white text-sm cursor-pointer disabled:opacity-50 active:opacity-80 transition-opacity"
           onClick={sendMessage}
           disabled={isStreaming}
         >
