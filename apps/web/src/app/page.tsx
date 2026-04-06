@@ -92,8 +92,8 @@ export default function Home() {
         />
       </div>
 
-      <div className={`${showSidebar ? "hidden" : "flex"} flex-1 flex-col min-w-0 overflow-hidden bg-base-100`}>
-        <div className="navbar min-h-0 h-12 px-3 border-b border-base-300 bg-base-100">
+      <div className={`${showSidebar ? "hidden" : "flex"} flex-1 flex-col min-w-0 min-h-0 h-screen overflow-hidden bg-base-100`}>
+        <div className="h-12 min-h-12 flex items-center px-3 border-b border-base-300 bg-base-100">
           <button
             className="btn btn-ghost btn-sm mr-2"
             onClick={() => setShowSidebar(!showSidebar)}
