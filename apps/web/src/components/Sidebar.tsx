@@ -32,6 +32,15 @@ export default function Sidebar({
   const [showFriends, setShowFriends] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [menuRoomId, setMenuRoomId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Check admin status on load
+  useEffect(() => {
+    (async () => {
+      const res = await fetch("/api/invite");
+      setIsAdmin(res.ok);
+    })();
+  }, []);
 
   const archiveRoom = async (id: string) => {
     await fetch(`/api/rooms/${id}`, {
@@ -158,6 +167,22 @@ export default function Sidebar({
             {session.user.name}
           </span>
           <div className="flex gap-1">
+            {isAdmin && (
+              <button
+                className="btn btn-ghost btn-xs text-warning"
+                onClick={async () => {
+                  const res = await fetch("/api/invite", { method: "POST" });
+                  if (res.ok) {
+                    const { code } = await res.json();
+                    const url = `${window.location.origin}/register?code=${code}`;
+                    await navigator.clipboard.writeText(url).catch(() => {});
+                    alert(`Invite link copied!\n${url}`);
+                  }
+                }}
+              >
+                Invite
+              </button>
+            )}
             <button
               className="btn btn-ghost btn-xs text-primary"
               onClick={() => setShowFriends(true)}

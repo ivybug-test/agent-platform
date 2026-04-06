@@ -24,8 +24,19 @@ export const users = pgTable("users", {
   name: varchar("name", { length: 100 }).notNull(),
   email: varchar("email", { length: 255 }).notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  isAdmin: boolean("is_admin").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Invite codes
+export const inviteCodes = pgTable("invite_codes", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  code: varchar("code", { length: 20 }).notNull().unique(),
+  createdBy: uuid("created_by").notNull().references(() => users.id),
+  usedBy: uuid("used_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  usedAt: timestamp("used_at"),
 });
 
 // Agents
