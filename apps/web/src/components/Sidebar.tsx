@@ -96,55 +96,60 @@ export default function Sidebar({
       </div>
 
       {/* Room list */}
-      <ul className="menu menu-sm flex-1 overflow-y-auto gap-0.5 px-2">
+      <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
         {rooms.map((room) => (
-          <li key={room.id}>
-            <div
-              className={`flex items-center justify-between pr-1 ${
-                room.id === activeRoomId ? "active" : ""
-              }`}
+          <div
+            key={room.id}
+            className={`group flex items-center rounded-lg cursor-pointer transition-colors ${
+              room.id === activeRoomId
+                ? "bg-primary/20 text-primary-content"
+                : "hover:bg-base-300"
+            }`}
+          >
+            <button
+              className="flex-1 text-left text-sm truncate px-3 py-2 min-w-0"
+              onClick={() => onSelectRoom(room.id)}
             >
-              <span className="truncate flex-1" onClick={() => onSelectRoom(room.id)}>
-                {room.name}
-              </span>
-              <div className="dropdown dropdown-end">
-                <button
-                  tabIndex={0}
-                  className="btn btn-ghost btn-xs text-base-content/40 px-1"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setMenuRoomId(menuRoomId === room.id ? null : room.id);
-                  }}
-                >
-                  ···
-                </button>
-                {menuRoomId === room.id && (
-                  <ul
-                    tabIndex={0}
-                    className="dropdown-content menu bg-base-300 rounded-box z-50 w-36 p-1 shadow-lg"
-                  >
+              {room.name}
+            </button>
+            <div className="relative">
+              <button
+                className="opacity-0 group-hover:opacity-100 transition-opacity btn btn-ghost btn-xs btn-square text-base-content/50 mr-1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMenuRoomId(menuRoomId === room.id ? null : room.id);
+                }}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="w-4 h-4" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01" />
+                </svg>
+              </button>
+              {menuRoomId === room.id && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setMenuRoomId(null)} />
+                  <ul className="absolute right-0 top-full mt-1 z-50 menu bg-base-300 rounded-lg shadow-xl w-40 p-1">
                     <li>
-                      <a onClick={() => toggleAutoReply(room)} className="text-xs">
+                      <button onClick={() => toggleAutoReply(room)} className="text-xs rounded-md">
                         Auto-reply: {room.autoReply !== false ? "ON" : "OFF"}
-                      </a>
+                      </button>
                     </li>
                     <li>
-                      <a onClick={() => archiveRoom(room.id)} className="text-xs">
+                      <button onClick={() => archiveRoom(room.id)} className="text-xs rounded-md">
                         Archive
-                      </a>
+                      </button>
                     </li>
                     <li>
-                      <a onClick={() => deleteRoom(room.id)} className="text-xs text-error">
+                      <button onClick={() => deleteRoom(room.id)} className="text-xs text-error rounded-md">
                         Delete
-                      </a>
+                      </button>
                     </li>
                   </ul>
-                )}
-              </div>
+                </>
+              )}
             </div>
-          </li>
+          </div>
         ))}
-      </ul>
+      </div>
 
       {/* User bar */}
       {session?.user && (
