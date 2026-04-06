@@ -47,7 +47,7 @@ module.exports = {
         REDIS_URL: "$REDIS_URL",
         AUTH_SECRET: "$AUTH_SECRET",
         AUTH_TRUST_HOST: "true",
-        AUTH_URL: "https://testagent.fun",
+        AUTH_URL: "$AUTH_URL",
         AGENT_RUNTIME_URL: "$AGENT_RUNTIME_URL",
       },
     },
