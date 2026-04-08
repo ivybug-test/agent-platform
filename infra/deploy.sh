@@ -75,6 +75,15 @@ module.exports = {
         LLM_MODEL: "$LLM_MODEL",
       },
     },
+    {
+      name: "realtime-gateway",
+      script: "services/realtime-gateway/dist/index.js",
+      cwd: "$HOME/agent-platform",
+      env: {
+        GATEWAY_PORT: "$GATEWAY_PORT",
+        REDIS_URL: "$REDIS_URL",
+      },
+    },
   ],
 };
 PMEOF

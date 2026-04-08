@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 
 // @ts-ignore -- next-auth beta type inference issue
 export const { handlers, signIn, signOut, auth }: any = NextAuth({
+  trustHost: true,
   providers: [
     Credentials({
       credentials: {

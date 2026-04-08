@@ -14,6 +14,7 @@ import {
   buildLLMMessages,
 } from "@/lib/chat/context";
 import { streamAgentResponse } from "@/lib/chat/stream";
+import { publishRoomEvent } from "@/lib/redis";
 
 async function getDefaultRoomAgent(roomId: string) {
   const [member] = await db
@@ -53,12 +54,26 @@ export async function POST(req: NextRequest) {
   const { hasMention, cleanContent } = parseMention(content, agentName);
 
   // Save user message
-  await db.insert(messages).values({
+  const [userMsg] = await db.insert(messages).values({
     roomId,
     senderType: "user",
     senderId: user.id,
     content: cleanContent,
     status: "completed",
+  }).returning();
+
+  // Broadcast user message to room via Redis
+  publishRoomEvent({
+    type: "user-message",
+    roomId,
+    message: {
+      id: userMsg.id,
+      senderType: "user",
+      senderId: user.id,
+      senderName: user.name || "User",
+      content: cleanContent,
+      status: "completed",
+    },
   });
 
   // Check if agent should respond

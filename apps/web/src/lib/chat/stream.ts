@@ -1,6 +1,7 @@
 import { db, messages, rooms } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
+import { publishRoomEvent } from "@/lib/redis";
 
 const AGENT_RUNTIME_URL =
   process.env.AGENT_RUNTIME_URL!;
@@ -59,6 +60,20 @@ export async function streamAgentResponse(
             updatedAt: new Date(),
           })
           .where(eq(messages.id, agentMsgId));
+
+        // Broadcast completed agent message to room
+        publishRoomEvent({
+          type: "agent-message",
+          roomId,
+          message: {
+            id: agentMsgId,
+            senderType: "agent",
+            senderId: null,
+            senderName: "Agent",
+            content: fullContent,
+            status: "completed",
+          },
+        });
 
         // Auto-generate room title (fire and forget)
         maybeGenerateRoomTitle(roomId, userContent, fullContent);

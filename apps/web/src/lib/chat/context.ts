@@ -27,7 +27,29 @@ export async function loadChatContext(roomId: string) {
       : [];
   const nameMap = new Map(senderUsers.map((u) => [u.id, u.name]));
 
-  return { recentMessages, nameMap };
+  // Deduplicate repetitive agent responses — if agent said similar things
+  // consecutively (first 50 chars match), keep only the last one
+  const deduped: typeof recentMessages = [];
+  for (let i = 0; i < recentMessages.length; i++) {
+    const msg = recentMessages[i];
+    if (
+      msg.senderType === "agent" &&
+      i > 0 &&
+      deduped.length > 0
+    ) {
+      const prev = deduped[deduped.length - 1];
+      if (
+        prev.senderType === "agent" &&
+        msg.content.slice(0, 50) === prev.content.slice(0, 50)
+      ) {
+        deduped[deduped.length - 1] = msg; // replace with newer
+        continue;
+      }
+    }
+    deduped.push(msg);
+  }
+
+  return { recentMessages: deduped, nameMap };
 }
 
 /** Get all user member names in a room */
@@ -104,7 +126,9 @@ export function buildSystemPrompt(opts: {
     `You are an AI assistant in this group chat. Your name is ${opts.agentName}.`
       + `\nUser messages are prefixed with their name, e.g. 'Alice: hello'.`
       + `\nThe user currently talking to you is ${opts.currentUserName}.`
-      + `\nReply as the assistant. Never pretend to be a user. Never prefix your reply with a name.`,
+      + `\nReply as the assistant. Never pretend to be a user. Never prefix your reply with a name.`
+      + `\nDo not repeat previous responses. Each reply must be fresh and contextual. If you said something similar before, say something different.`
+      + `\nAlways respond to the most recent message from ${opts.currentUserName}. Do not confuse users — check who said the last message before replying.`,
   ]
     .filter(Boolean)
     .join("\n\n");

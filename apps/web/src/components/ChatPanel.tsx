@@ -2,8 +2,10 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useSession } from "next-auth/react";
+import { io, Socket } from "socket.io-client";
 
 interface Message {
+  id?: string;
   senderType: "user" | "agent";
   senderId: string | null;
   senderName: string | null;
@@ -56,6 +58,49 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       );
     })();
   }, [roomId]);
+
+  // WebSocket: listen for real-time messages from other users
+  const socketRef = useRef<Socket | null>(null);
+  const seenIds = useRef(new Set<string>());
+
+  useEffect(() => {
+    const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
+    if (!gatewayUrl) return;
+
+    const socket = io(gatewayUrl, { transports: ["websocket"] });
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("join-room", roomId);
+    });
+
+    socket.on("room-message", (event: any) => {
+      const msg = event.message;
+      if (!msg) return;
+      // Skip our own messages (we already show them locally)
+      if (msg.senderType === "user" && msg.senderId === currentUserId) return;
+      // Skip duplicates
+      if (msg.id && seenIds.current.has(msg.id)) return;
+      if (msg.id) seenIds.current.add(msg.id);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: msg.id,
+          senderType: msg.senderType,
+          senderId: msg.senderId,
+          senderName: msg.senderName,
+          content: msg.content,
+        },
+      ]);
+    });
+
+    return () => {
+      socket.emit("leave-room", roomId);
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [roomId, currentUserId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
