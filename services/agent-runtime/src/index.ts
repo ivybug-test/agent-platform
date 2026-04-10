@@ -5,6 +5,9 @@ config({ path: resolve(process.cwd(), "../../.env") });
 import Fastify from "fastify";
 import { getClient, getModel } from "./llm.js";
 import { mockStream } from "./mock.js";
+import { createLogger } from "@agent-platform/logger";
+
+const log = createLogger("agent-runtime");
 
 const app = Fastify({ logger: true });
 const isMock = process.env.MOCK_LLM === "true";
@@ -17,6 +20,9 @@ interface ChatBody {
 
 app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
   const { messages } = request.body;
+  const startTime = Date.now();
+
+  log.info({ messageCount: messages.length, model: getModel() }, "llm.request");
 
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -24,25 +30,38 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
     Connection: "keep-alive",
   });
 
-  if (isMock) {
-    for await (const chunk of mockStream()) {
-      reply.raw.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
-    }
-  } else {
-    const client = getClient();
-    const model = getModel();
-    const stream = await client.chat.completions.create({
-      model,
-      messages,
-      stream: true,
-    });
+  let totalChars = 0;
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        reply.raw.write(`data: ${JSON.stringify({ content })}\n\n`);
+  try {
+    if (isMock) {
+      for await (const chunk of mockStream()) {
+        reply.raw.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+        totalChars += chunk.length;
+      }
+    } else {
+      const client = getClient();
+      const model = getModel();
+      const stream = await client.chat.completions.create({
+        model,
+        messages,
+        stream: true,
+        temperature: 0.8,
+        frequency_penalty: 0.6,
+        presence_penalty: 0.5,
+      });
+
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          reply.raw.write(`data: ${JSON.stringify({ content })}\n\n`);
+          totalChars += content.length;
+        }
       }
     }
+
+    log.info({ duration: Date.now() - startTime, totalChars }, "llm.complete");
+  } catch (err) {
+    log.error({ err, duration: Date.now() - startTime }, "llm.error");
   }
 
   reply.raw.write("data: [DONE]\n\n");

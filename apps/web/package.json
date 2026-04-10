@@ -4,12 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "next dev --port 3000",
-    "build": "next build",
+    "build": "next build && pnpm run postbuild",
+    "postbuild": "rm -rf .next/standalone/apps/web/.next/static .next/standalone/apps/web/public && cp -r .next/static .next/standalone/apps/web/.next/static && ([ -d public ] && cp -r public .next/standalone/apps/web/public || true)",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
     "@agent-platform/db": "workspace:*",
+    "@agent-platform/logger": "workspace:^",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.0.0",
     "dotenv": "^17.4.0",

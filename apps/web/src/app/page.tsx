@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
+import { io, Socket } from "socket.io-client";
 import Sidebar from "@/components/Sidebar";
 import ChatPanel from "@/components/ChatPanel";
 
@@ -54,16 +55,30 @@ export default function Home() {
     setRooms(await res.json());
   }, []);
 
+  const currentUserId = session?.user?.id;
+
   useEffect(() => {
-    if (status !== "authenticated") return;
+    if (status !== "authenticated" || !currentUserId) return;
     (async () => {
       const res = await fetch("/api/rooms");
       if (!res.ok) return;
       const data = await res.json();
       setRooms(data);
-      if (data.length > 0) setActiveRoomId(data[0].id);
+      if (data.length > 0) {
+        const key = `lastRoomId:${currentUserId}`;
+        const lastId = localStorage.getItem(key);
+        const found = lastId && data.some((r: Room) => r.id === lastId);
+        setActiveRoomId(found ? lastId : data[0].id);
+      }
     })();
-  }, [status]);
+  }, [status, currentUserId]);
+
+  // Persist activeRoomId whenever it changes
+  useEffect(() => {
+    if (activeRoomId && currentUserId) {
+      try { localStorage.setItem(`lastRoomId:${currentUserId}`, activeRoomId); } catch {}
+    }
+  }, [activeRoomId, currentUserId]);
 
   const closeDrawer = () => {
     if (drawerRef.current) drawerRef.current.checked = false;
@@ -92,6 +107,37 @@ export default function Home() {
   const handleChatComplete = useCallback(() => {
     setTimeout(refreshRooms, 2000);
   }, [refreshRooms]);
+
+  // Listen for user-level events (new rooms, etc.) via Socket.IO
+  useEffect(() => {
+    const userId = session?.user?.id;
+    const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
+    if (!userId || !gatewayUrl || status !== "authenticated") return;
+
+    const socket: Socket = io(gatewayUrl);
+
+    socket.on("connect", () => {
+      socket.emit("register-user", userId);
+    });
+
+    socket.on("user-event", (event: any) => {
+      if (event.type === "room-added" && event.room) {
+        setRooms((prev) => {
+          if (prev.some((r) => r.id === event.room.id)) return prev;
+          return [...prev, event.room];
+        });
+      } else if (event.type === "room-removed" && event.roomId) {
+        setRooms((prev) => prev.filter((r) => r.id !== event.roomId));
+        setActiveRoomId((cur) => (cur === event.roomId ? null : cur));
+      } else if (event.type === "room-updated" && event.room) {
+        setRooms((prev) => prev.map((r) => (r.id === event.room.id ? { ...r, ...event.room } : r)));
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [session?.user?.id, status]);
 
   const activeRoom = rooms.find((r) => r.id === activeRoomId);
 
@@ -138,8 +184,8 @@ export default function Home() {
       </div>
 
       {/* Sidebar drawer */}
-      <div className="drawer-side z-50">
-        <label htmlFor="sidebar-drawer" aria-label="close sidebar" className="drawer-overlay"></label>
+      <div className="drawer-side z-50" data-theme="dark">
+        <label htmlFor="sidebar-drawer" aria-label="close sidebar" className="drawer-overlay !bg-black/50"></label>
         <Sidebar
           rooms={rooms}
           activeRoomId={activeRoomId}

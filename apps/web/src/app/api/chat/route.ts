@@ -9,12 +9,15 @@ import {
   loadChatContext,
   getRoomMemberNames,
   getLatestSummary,
-  getUserMemories,
+  getRoomUsersMemories,
   buildSystemPrompt,
   buildLLMMessages,
 } from "@/lib/chat/context";
 import { streamAgentResponse } from "@/lib/chat/stream";
 import { publishRoomEvent } from "@/lib/redis";
+import { createLogger } from "@agent-platform/logger";
+
+const log = createLogger("web");
 
 async function getDefaultRoomAgent(roomId: string) {
   const [member] = await db
@@ -81,13 +84,15 @@ export async function POST(req: NextRequest) {
     return Response.json({ silent: true });
   }
 
+  log.info({ roomId, userId: user.id, contentPreview: cleanContent.slice(0, 80) }, "chat.request");
+
   // Load context + memory
-  const [{ recentMessages, nameMap }, memberNames, roomSummary, memories] =
+  const [{ recentMessages, nameMap }, memberNames, roomSummary, allUsersMemories] =
     await Promise.all([
       loadChatContext(roomId),
       getRoomMemberNames(roomId),
       getLatestSummary(roomId),
-      getUserMemories(user.id),
+      getRoomUsersMemories(roomId),
     ]);
   const currentUserName = nameMap.get(user.id) || "User";
 
@@ -100,9 +105,21 @@ export async function POST(req: NextRequest) {
     agentName,
     currentUserName,
     roomSummary,
-    userMemories: memories,
+    allUsersMemories,
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
+
+  // Log full context for debugging
+  const memoryCount = [...allUsersMemories.values()].reduce((s, m) => s + m.length, 0);
+  log.info({
+    roomId,
+    messageCount: recentMessages.length,
+    llmMessageCount: llmMessages.length,
+    memoryCount,
+    hasSummary: !!roomSummary,
+    systemPromptLength: systemContent.length,
+  }, "chat.context");
+  log.debug({ roomId, llmMessages }, "chat.llm-input");
 
   // Create agent message placeholder
   const [agentMsg] = await db

@@ -19,5 +19,8 @@ function getQueue(): Queue {
 export async function pushMemoryJobs(roomId: string, userId: string) {
   const queue = getQueue();
   await queue.add("room-summary", { roomId });
-  await queue.add("user-memory", { roomId, userId });
+  // Dedup: same user only triggers extraction once per 5 minutes
+  await queue.add("user-memory", { roomId, userId }, {
+    jobId: `user-memory-${userId}-${Math.floor(Date.now() / 300000)}`,
+  });
 }

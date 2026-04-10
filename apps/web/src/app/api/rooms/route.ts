@@ -3,6 +3,7 @@ import { db, rooms, roomMembers, agents } from "@agent-platform/db";
 import { eq, and, inArray, ne } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
 import { getAcceptedFriendIds } from "@/lib/friends";
+import { publishUserEvent } from "@/lib/redis";
 
 export async function GET() {
   const user = await getRequiredUser();
@@ -53,6 +54,11 @@ export async function POST() {
     members.unshift({ roomId: room.id, memberId: agent.id, memberType: "agent" });
   }
   await db.insert(roomMembers).values(members);
+
+  // Notify friends that they've been added to a new room
+  for (const friendId of friendIds) {
+    publishUserEvent(friendId, { type: "room-added", room: { id: room.id, name: room.name } });
+  }
 
   return Response.json(room, { status: 201 });
 }

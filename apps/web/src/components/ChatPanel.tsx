@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { io, Socket } from "socket.io-client";
 
@@ -38,24 +38,30 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
+  const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMessages([]);
+    seenIds.current.clear();
     (async () => {
       const res = await fetch(`/api/messages?roomId=${roomId}`);
       if (!res.ok) return;
       const data = await res.json();
-      setMessages(
-        data.messages
-          .filter((r: any) => r.senderType !== "system")
-          .map((r: any) => ({
-            senderType: r.senderType,
-            senderId: r.senderId,
-            senderName: r.senderName,
-            content: r.content,
-          }))
-      );
+      const loaded = data.messages
+        .filter((r: any) => r.senderType !== "system")
+        .map((r: any) => ({
+          id: r.id,
+          senderType: r.senderType,
+          senderId: r.senderId,
+          senderName: r.senderName,
+          content: r.content,
+        }));
+      for (const m of loaded) {
+        if (m.id) seenIds.current.add(m.id);
+      }
+      setMessages(loaded);
     })();
   }, [roomId]);
 
@@ -63,25 +69,88 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const socketRef = useRef<Socket | null>(null);
   const seenIds = useRef(new Set<string>());
 
+  // Refetch messages from API and merge (used on reconnect to fill gaps)
+  const refetchMessages = useCallback(async () => {
+    const res = await fetch(`/api/messages?roomId=${roomId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const fetched: Message[] = data.messages
+      .filter((r: any) => r.senderType !== "system")
+      .map((r: any) => ({
+        id: r.id,
+        senderType: r.senderType,
+        senderId: r.senderId,
+        senderName: r.senderName,
+        content: r.content,
+      }));
+    // Mark all fetched IDs as seen
+    for (const m of fetched) {
+      if (m.id) seenIds.current.add(m.id);
+    }
+    setMessages(fetched);
+  }, [roomId]);
+
   useEffect(() => {
     const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
-    if (!gatewayUrl) return;
+    if (!gatewayUrl || !currentUserId) return;
 
-    const socket = io(gatewayUrl, { transports: ["websocket"] });
+    const socket = io(gatewayUrl, {
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+    });
     socketRef.current = socket;
+
+    let isFirstConnect = true;
 
     socket.on("connect", () => {
       socket.emit("join-room", roomId);
+      // On reconnect (not first connect), refetch messages to fill the gap
+      if (!isFirstConnect) {
+        refetchMessages();
+      }
+      isFirstConnect = false;
+    });
+
+    socket.on("typing", (data: { userName: string }) => {
+      if (!data?.userName) return;
+      const name = data.userName;
+      setTypingUsers((prev) => new Set(prev).add(name));
+      // Clear previous timer for this user
+      const existing = typingTimers.current.get(name);
+      if (existing) clearTimeout(existing);
+      // Auto-remove after 3s
+      typingTimers.current.set(name, setTimeout(() => {
+        setTypingUsers((prev) => {
+          const next = new Set(prev);
+          next.delete(name);
+          return next;
+        });
+        typingTimers.current.delete(name);
+      }, 3000));
     });
 
     socket.on("room-message", (event: any) => {
       const msg = event.message;
       if (!msg) return;
-      // Skip our own messages (we already show them locally)
+      // Skip empty messages
+      if (!msg.content) return;
+      // Skip our own user messages (already shown locally)
       if (msg.senderType === "user" && msg.senderId === currentUserId) return;
+      // Skip agent messages triggered by us (already rendered via SSE)
+      if (msg.senderType === "agent" && event.triggeredBy === currentUserId) return;
       // Skip duplicates
       if (msg.id && seenIds.current.has(msg.id)) return;
       if (msg.id) seenIds.current.add(msg.id);
+
+      // Clear typing indicator for this sender
+      if (msg.senderName) {
+        setTypingUsers((prev) => {
+          if (!prev.has(msg.senderName)) return prev;
+          const next = new Set(prev);
+          next.delete(msg.senderName);
+          return next;
+        });
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -100,11 +169,23 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [roomId, currentUserId]);
+  }, [roomId, currentUserId, refetchMessages]);
+
+  // Emit typing event (debounced: at most once per 2s)
+  const lastTypingEmit = useRef(0);
+  const emitTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTypingEmit.current < 2000) return;
+    lastTypingEmit.current = now;
+    const socket = socketRef.current;
+    if (socket) {
+      socket.emit("typing", { roomId, userName: session?.user?.name || "User" });
+    }
+  }, [roomId, session?.user?.name]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, typingUsers]);
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -149,14 +230,19 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
-          if (data === "[DONE]") break;
+          if (data === "[DONE]") continue;
           try {
-            const { content } = JSON.parse(data);
-            if (content) {
+            const parsed = JSON.parse(data);
+            // Server sends {done: true, messageId} at end of stream for dedup
+            if (parsed.done && parsed.messageId) {
+              seenIds.current.add(parsed.messageId);
+              continue;
+            }
+            if (parsed.content) {
               setMessages((prev) => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
-                updated[updated.length - 1] = { ...last, content: last.content + content };
+                updated[updated.length - 1] = { ...last, content: last.content + parsed.content };
                 return updated;
               });
             }
@@ -218,6 +304,16 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
             </div>
           );
         })}
+        {typingUsers.size > 0 && (
+          <div className="chat chat-start">
+            <div className="chat-header text-xs opacity-60 mb-0.5">
+              {[...typingUsers].join(", ")}
+            </div>
+            <div className="chat-bubble chat-bubble-neutral text-sm py-1 px-3 min-h-0">
+              <span className="loading loading-dots loading-xs"></span>
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
@@ -225,7 +321,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         <textarea
           className="textarea textarea-bordered flex-1 min-h-[2.5rem] max-h-32 text-sm leading-normal resize-none bg-base-200"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => { setInput(e.target.value); emitTyping(); }}
           onKeyDown={handleKeyDown}
           placeholder="Type a message..."
           rows={1}

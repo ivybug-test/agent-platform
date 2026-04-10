@@ -107,6 +107,22 @@ export const friendships = pgTable("friendships", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// Memory enums
+export const memoryCategoryEnum = pgEnum("memory_category", [
+  "identity",
+  "preference",
+  "relationship",
+  "event",
+  "opinion",
+  "context",
+]);
+
+export const memoryImportanceEnum = pgEnum("memory_importance", [
+  "high",
+  "medium",
+  "low",
+]);
+
 // User memories
 export const userMemories = pgTable("user_memories", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -114,7 +130,11 @@ export const userMemories = pgTable("user_memories", {
     .notNull()
     .references(() => users.id),
   content: text("content").notNull(),
+  category: memoryCategoryEnum("category").notNull().default("context"),
+  importance: memoryImportanceEnum("importance").notNull().default("medium"),
+  sourceRoomId: uuid("source_room_id").references(() => rooms.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 // Room summaries

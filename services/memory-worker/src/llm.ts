@@ -31,3 +31,25 @@ export async function llmComplete(
 
   return res.choices[0]?.message?.content || "";
 }
+
+/** Call LLM and return parsed JSON response */
+export async function llmCompleteJSON<T = unknown>(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<T> {
+  const client = getClient();
+  const model = process.env.LLM_MODEL || "gpt-4o";
+
+  const res = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+  });
+
+  const text = res.choices[0]?.message?.content || "{}";
+  return JSON.parse(text);
+}

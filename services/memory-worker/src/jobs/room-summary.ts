@@ -1,6 +1,9 @@
-import { db, messages, roomSummaries } from "@agent-platform/db";
-import { eq, desc } from "drizzle-orm";
+import { db, messages, roomSummaries, users } from "@agent-platform/db";
+import { eq, desc, inArray } from "drizzle-orm";
 import { llmComplete } from "../llm.js";
+import { createLogger } from "@agent-platform/logger";
+
+const log = createLogger("memory-worker");
 
 interface RoomSummaryData {
   roomId: string;
@@ -33,15 +36,33 @@ export async function processRoomSummary(data: RoomSummaryData) {
     : 0;
 
   if (msgCount - lastCount < SUMMARY_THRESHOLD) {
-    console.log(`room-summary: only ${msgCount - lastCount} new messages, skipping`);
+    log.info({ roomId, newMessages: msgCount - lastCount }, "memory.skip-summary");
     return;
   }
 
-  // Build conversation text
+  // Resolve sender names for user messages
+  const senderIds = [
+    ...new Set(
+      recentMessages
+        .filter((m) => m.senderType === "user" && m.senderId)
+        .map((m) => m.senderId!)
+    ),
+  ];
+  const senderUsers =
+    senderIds.length > 0
+      ? await db
+          .select({ id: users.id, name: users.name })
+          .from(users)
+          .where(inArray(users.id, senderIds))
+      : [];
+  const nameMap = new Map(senderUsers.map((u) => [u.id, u.name]));
+
+  // Build conversation text with real user names
   const convoText = recentMessages
     .map((m) => {
-      const role = m.senderType === "agent" ? "Assistant" : "User";
-      return `${role}: ${m.content}`;
+      if (m.senderType === "agent") return `Agent: ${m.content}`;
+      const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
+      return `${name}: ${m.content}`;
     })
     .join("\n");
 
@@ -58,6 +79,6 @@ export async function processRoomSummary(data: RoomSummaryData) {
       content: summary.trim(),
       messageCount: String(msgCount),
     });
-    console.log(`room-summary: saved summary for room ${roomId.slice(0, 8)}`);
+    log.info({ roomId, summaryLength: summary.trim().length, messageCount: msgCount }, "memory.summary-saved");
   }
 }

@@ -193,7 +193,7 @@ export default function Sidebar({
             </button>
             <button
               className="btn btn-ghost btn-xs text-base-content/40"
-              onClick={() => signOut({ callbackUrl: "/login" })}
+              onClick={() => signOut({ redirect: false }).then(() => window.location.href = "/login")}
             >
               Logout
             </button>

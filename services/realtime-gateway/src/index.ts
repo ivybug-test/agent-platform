@@ -5,6 +5,9 @@ config({ path: resolve(process.cwd(), "../../.env") });
 import { createServer } from "http";
 import { Server } from "socket.io";
 import Redis from "ioredis";
+import { createLogger } from "@agent-platform/logger";
+
+const log = createLogger("gateway");
 
 const port = process.env.GATEWAY_PORT;
 if (!port) {
@@ -24,49 +27,81 @@ const io = new Server(httpServer, {
   },
 });
 
-// Subscribe to all room channels via pattern
-subscriber.psubscribe("room:*", (err) => {
+// Subscribe to room and user channels
+subscriber.psubscribe("room:*", "user:*", (err) => {
   if (err) {
-    console.error("Failed to subscribe to room channels:", err);
+    log.error({ err }, "ws.subscribe-failed");
     process.exit(1);
   }
-  console.log("Subscribed to room:* channels");
+  log.info("ws.subscribed to room:* and user:*");
 });
 
-// Forward Redis pub/sub messages to Socket.IO rooms
+// Forward Redis pub/sub messages to Socket.IO rooms/users
 subscriber.on("pmessage", (_pattern, channel, message) => {
-  // channel format: "room:<roomId>"
-  const roomId = channel.slice("room:".length);
   try {
     const data = JSON.parse(message);
-    io.to(roomId).emit("room-message", data);
+
+    if (channel.startsWith("room:")) {
+      const roomId = channel.slice("room:".length);
+      const clientCount = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+      log.info({
+        roomId,
+        eventType: data.type,
+        messageId: data.message?.id,
+        clientCount,
+      }, "ws.forward");
+      io.to(roomId).emit("room-message", data);
+    } else if (channel.startsWith("user:")) {
+      const userId = channel.slice("user:".length);
+      const clientCount = io.sockets.adapter.rooms.get(`u:${userId}`)?.size || 0;
+      log.info({ userId, eventType: data.type, clientCount }, "ws.user-event");
+      io.to(`u:${userId}`).emit("user-event", data);
+    }
   } catch (err) {
-    console.error("Failed to parse Redis message:", err);
+    log.error({ err, channel }, "ws.parse-error");
   }
 });
 
 // Handle Socket.IO connections
 io.on("connection", (socket) => {
-  console.log(`Client connected: ${socket.id}`);
+  log.info({ socketId: socket.id }, "ws.connect");
+
+  // Debug: log ALL events from this socket
+  socket.onAny((eventName, ...args) => {
+    if (!["join-room", "leave-room", "register-user", "typing"].includes(eventName)) {
+      log.info({ socketId: socket.id, event: eventName }, "ws.unknown-event");
+    }
+  });
+
+  // Register user-level channel for notifications (room-added, etc.)
+  socket.on("register-user", (userId: string) => {
+    if (typeof userId !== "string" || !userId) return;
+    socket.join(`u:${userId}`);
+    log.info({ socketId: socket.id, userId }, "ws.register-user");
+  });
 
   socket.on("join-room", (roomId: string) => {
-    if (typeof roomId !== "string" || !roomId) {
-      return;
-    }
+    if (typeof roomId !== "string" || !roomId) return;
     socket.join(roomId);
-    console.log(`Socket ${socket.id} joined room ${roomId}`);
+    const clientCount = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+    log.info({ socketId: socket.id, roomId, clientCount }, "ws.join");
+  });
+
+  // Typing indicator — broadcast to others in the same room
+  socket.on("typing", (data: { roomId: string; userName: string }) => {
+    log.info({ socketId: socket.id, roomId: data?.roomId, userName: data?.userName }, "ws.typing");
+    if (!data?.roomId || !data?.userName) return;
+    socket.to(data.roomId).emit("typing", { userName: data.userName, roomId: data.roomId });
   });
 
   socket.on("leave-room", (roomId: string) => {
-    if (typeof roomId !== "string" || !roomId) {
-      return;
-    }
+    if (typeof roomId !== "string" || !roomId) return;
     socket.leave(roomId);
-    console.log(`Socket ${socket.id} left room ${roomId}`);
+    log.info({ socketId: socket.id, roomId }, "ws.leave");
   });
 
   socket.on("disconnect", (reason) => {
-    console.log(`Client disconnected: ${socket.id} (${reason})`);
+    log.info({ socketId: socket.id, reason }, "ws.disconnect");
   });
 });
 

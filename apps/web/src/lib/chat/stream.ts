@@ -2,7 +2,9 @@ import { db, messages, rooms } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
 import { publishRoomEvent } from "@/lib/redis";
+import { createLogger } from "@agent-platform/logger";
 
+const log = createLogger("web");
 const AGENT_RUNTIME_URL =
   process.env.AGENT_RUNTIME_URL!;
 
@@ -21,6 +23,7 @@ export async function streamAgentResponse(
   });
 
   if (!response.ok || !response.body) {
+    log.error({ roomId, agentMsgId, status: response.status }, "stream.runtime-error");
     await db
       .update(messages)
       .set({ status: "failed" })
@@ -28,6 +31,7 @@ export async function streamAgentResponse(
     return new Response("Agent runtime error", { status: 502 });
   }
 
+  const streamStartTime = Date.now();
   let fullContent = "";
 
   const stream = new ReadableStream({
@@ -52,6 +56,10 @@ export async function streamAgentResponse(
           }
         }
       } finally {
+        const duration = Date.now() - streamStartTime;
+        log.info({ roomId, agentMsgId, contentLength: fullContent.length, duration }, "stream.complete");
+        log.debug({ roomId, agentMsgId, content: fullContent }, "stream.content");
+
         await db
           .update(messages)
           .set({
@@ -62,9 +70,11 @@ export async function streamAgentResponse(
           .where(eq(messages.id, agentMsgId));
 
         // Broadcast completed agent message to room
+        log.info({ roomId, eventType: "agent-message", agentMsgId }, "stream.publish");
         publishRoomEvent({
           type: "agent-message",
           roomId,
+          triggeredBy: userId,
           message: {
             id: agentMsgId,
             senderType: "agent",

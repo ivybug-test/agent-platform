@@ -15,6 +15,7 @@ function getPublisher(): IORedis {
 interface RoomEvent {
   type: "user-message" | "agent-message" | "agent-chunk";
   roomId: string;
+  triggeredBy?: string; // userId who triggered this agent response
   message: {
     id: string;
     senderType: string;
@@ -28,4 +29,15 @@ interface RoomEvent {
 export function publishRoomEvent(event: RoomEvent) {
   const redis = getPublisher();
   redis.publish(`room:${event.roomId}`, JSON.stringify(event)).catch(() => {});
+}
+
+interface UserEvent {
+  type: "room-added" | "room-updated" | "room-removed";
+  room?: { id: string; name: string };
+  roomId?: string;
+}
+
+export function publishUserEvent(userId: string, event: UserEvent) {
+  const redis = getPublisher();
+  redis.publish(`user:${userId}`, JSON.stringify(event)).catch(() => {});
 }
