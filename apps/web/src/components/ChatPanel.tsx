@@ -10,6 +10,7 @@ interface Message {
   senderId: string | null;
   senderName: string | null;
   content: string;
+  createdAt?: string;
 }
 
 interface ChatPanelProps {
@@ -39,11 +40,15 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
+  const [hasMore, setHasMore] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMessages([]);
+    setHasMore(false);
     seenIds.current.clear();
     (async () => {
       const res = await fetch(`/api/messages?roomId=${roomId}`);
@@ -57,11 +62,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           senderId: r.senderId,
           senderName: r.senderName,
           content: r.content,
+          createdAt: r.createdAt,
         }));
       for (const m of loaded) {
         if (m.id) seenIds.current.add(m.id);
       }
       setMessages(loaded);
+      setHasMore(data.hasMore ?? false);
     })();
   }, [roomId]);
 
@@ -82,13 +89,58 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         senderId: r.senderId,
         senderName: r.senderName,
         content: r.content,
+        createdAt: r.createdAt,
       }));
-    // Mark all fetched IDs as seen
     for (const m of fetched) {
       if (m.id) seenIds.current.add(m.id);
     }
     setMessages(fetched);
+    setHasMore(data.hasMore ?? false);
   }, [roomId]);
+
+  // Load older messages when scrolling to top
+  const loadOlderMessages = useCallback(async () => {
+    if (isLoadingMore || !hasMore) return;
+    const oldest = messages.find((m) => m.createdAt);
+    if (!oldest?.createdAt) return;
+
+    setIsLoadingMore(true);
+    const container = scrollContainerRef.current;
+    const prevScrollHeight = container?.scrollHeight ?? 0;
+
+    try {
+      const res = await fetch(
+        `/api/messages?roomId=${roomId}&before=${encodeURIComponent(oldest.createdAt)}`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const older: Message[] = data.messages
+        .filter((r: any) => r.senderType !== "system")
+        .map((r: any) => ({
+          id: r.id,
+          senderType: r.senderType,
+          senderId: r.senderId,
+          senderName: r.senderName,
+          content: r.content,
+          createdAt: r.createdAt,
+        }));
+      for (const m of older) {
+        if (m.id) seenIds.current.add(m.id);
+      }
+      if (older.length > 0) {
+        setMessages((prev) => [...older, ...prev]);
+        // Restore scroll position after prepending
+        requestAnimationFrame(() => {
+          if (container) {
+            container.scrollTop = container.scrollHeight - prevScrollHeight;
+          }
+        });
+      }
+      setHasMore(data.hasMore ?? false);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [roomId, hasMore, isLoadingMore, messages]);
 
   useEffect(() => {
     const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
@@ -183,8 +235,36 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     }
   }, [roomId, session?.user?.name]);
 
+  // Detect scroll near top to load older messages
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const handleScroll = () => {
+      if (container.scrollTop < 80 && hasMore && !isLoadingMore) {
+        loadOlderMessages();
+      }
+    };
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [hasMore, isLoadingMore, loadOlderMessages]);
+
+  // Auto-scroll to bottom only when near bottom (not when loading older messages)
+  const shouldAutoScroll = useRef(true);
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const handleUserScroll = () => {
+      const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      shouldAutoScroll.current = distFromBottom < 150;
+    };
+    container.addEventListener("scroll", handleUserScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleUserScroll);
+  }, []);
+
+  useEffect(() => {
+    if (shouldAutoScroll.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, typingUsers]);
 
   const sendMessage = async () => {
@@ -275,8 +355,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
   return (
     <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden" data-theme="dark">
-      <div className="flex-1 overflow-y-auto px-2 py-3 md:px-4">
-        {messages.length === 0 && (
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-2 py-3 md:px-4">
+        {isLoadingMore && (
+          <div className="flex justify-center py-3">
+            <span className="loading loading-spinner loading-sm text-base-content/50"></span>
+          </div>
+        )}
+        {messages.length === 0 && !isLoadingMore && (
           <p className="text-base-content/40 text-center mt-[30vh] text-sm">
             Send a message to start chatting.
           </p>

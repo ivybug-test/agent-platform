@@ -1,8 +1,10 @@
 import "@/lib/env";
 import { NextRequest } from "next/server";
 import { db, messages, users, agents } from "@agent-platform/db";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, desc, and, lt } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const user = await getRequiredUser();
@@ -13,12 +15,24 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: "Missing roomId" }, { status: 400 });
   }
 
-  const rows = await db
+  const before = req.nextUrl.searchParams.get("before"); // ISO timestamp cursor
+  const limit = Math.min(Number(req.nextUrl.searchParams.get("limit")) || 100, 200);
+
+  const conditions = [eq(messages.roomId, roomId)];
+  if (before) {
+    conditions.push(lt(messages.createdAt, new Date(before)));
+  }
+
+  const rowsDesc = await db
     .select()
     .from(messages)
-    .where(eq(messages.roomId, roomId))
-    .orderBy(messages.createdAt)
-    .limit(100);
+    .where(and(...conditions))
+    .orderBy(desc(messages.createdAt))
+    .limit(limit + 1); // fetch one extra to determine hasMore
+
+  const hasMore = rowsDesc.length > limit;
+  if (hasMore) rowsDesc.pop();
+  const rows = rowsDesc.reverse();
 
   // Resolve sender names
   const userIds = [...new Set(rows.filter((m) => m.senderType === "user" && m.senderId).map((m) => m.senderId!))];
@@ -42,5 +56,5 @@ export async function GET(req: NextRequest) {
     senderName: m.senderId ? nameMap.get(m.senderId) || null : null,
   }));
 
-  return Response.json({ messages: result, currentUserId: user.id });
+  return Response.json({ messages: result, currentUserId: user.id, hasMore });
 }
