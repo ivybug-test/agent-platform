@@ -1,7 +1,7 @@
 # CHANGELOG.md
 
 ## Project status
-Milestone 5 complete. Ready to start Milestone 6.
+Phase 1 (Text MVP) complete — all milestones M0–M6 done. Ready to begin Phase 2.
 
 ## Current phase
 Phase 1 — Text MVP
@@ -92,8 +92,46 @@ Phase 1 — Text MVP
 - apps/web/.env.local for Next.js native env loading (AUTH_SECRET, DATABASE_URL)
 - Fixed rooms query: two-step query (memberships → rooms) instead of innerJoin
 
+### Milestone 6: Room summaries + User memory (2026-04-10)
+- services/memory-worker: BullMQ `memory` queue consumer, dispatching by job name
+- apps/web: `lib/queue.ts` `pushMemoryJobs(roomId, userId)` called from `lib/chat/stream.ts` after streaming completes
+- Job 1 — room-summary:
+  - Triggered every chat turn; skips unless ≥20 new messages since last summary (`SUMMARY_THRESHOLD`)
+  - Reads latest 100 messages, resolves real user names, feeds previous summary + transcript to LLM
+  - Writes new row into `room_summaries` (append-only; latest row wins at read time)
+- Job 2 — user-memory:
+  - Deduped per user via `jobId = user-memory-{userId}-{5min-bucket}` (max one extraction per 5 min per user)
+  - Skipped if user has <3 messages in room
+  - Loads ALL existing memories for the user, groups by category with ids, passes to LLM
+  - LLM returns strict JSON `{actions: [create|update|delete]}` via `response_format: json_object`
+  - Actions applied in a single DB transaction; validates category/importance enums before write
+  - Categories: identity | preference | relationship | event | opinion | context
+  - Importance: high | medium | low (drives read-side ordering)
+- Schema:
+  - `user_memories`: content, category (enum), importance (enum), sourceRoomId, userId, timestamps
+  - `room_summaries`: content, messageCount (string), roomId, createdAt (append log)
+- Read path (apps/web `lib/chat/context.ts`):
+  - `getLatestSummary(roomId)` — most recent summary row
+  - `getRoomUsersMemories(roomId)` — memories for ALL user members (max 15/user), ordered by importance then recency, grouped by user name → category
+  - `buildSystemPrompt` injects memory section ("What you remember about {name}:") and summary section into the 6-layer prompt
+  - Context assembly stays in Next.js per architecture rule; agent-runtime receives fully-built messages array
+- Context dedup: bigram-based similarity filter removes near-duplicate agent replies from the window before sending to LLM (CJK-safe)
+
+### Image messages (2026-04-12)
+- Users can send images in rooms; images broadcast to other members like text messages, but do not trigger LLM calls
+- Storage: Tencent Cloud COS (bucket `agentimage-1411620332`, region `ap-guangzhou`, public-read / private-write)
+- Upload path: browser → COS direct, Next.js only signs STS temp credentials
+- Compression: browser-side canvas, long edge ≤1600px, JPEG quality 0.8 (via `apps/web/src/lib/upload-image.ts`)
+- New route `POST /api/upload/sts` — verifies room membership, issues STS credential scoped to a single key `rooms/{roomId}/{userId}/{yyyymm}/{uuid}.jpg`, 10-minute TTL
+- New route `POST /api/messages/image` — validates URL host (`*.myqcloud.com`), persists with `contentType="image"`, `content=publicUrl`, publishes `user-message` Redis event
+- `RoomEvent.message` gained optional `contentType` field; ChatPanel renders `<img>` when `contentType === "image"`, otherwise falls back to text
+- ChatPanel: new image button uses `<input type="file">`, optimistic local append + seenIds dedup against Socket.IO echo
+- Schema unchanged — existing `messages.contentType` varchar(50) was already in place from M3
+- Deps added: `qcloud-cos-sts` (server STS signing), `cos-js-sdk-v5` (browser PUT with temp credentials)
+- Env: `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`, `TENCENT_COS_BUCKET`, `TENCENT_COS_REGION`
+
 ## Not started
-- Milestone 6: Memory
+- Phase 2: Agent architecture upgrade (tool calling, MCP, memory retrieval tools, prompt versioning)
 
 ## Risks / notes
 - D1: Next.js SSE proxy may be tricky — validate in Milestone 2 early
@@ -101,7 +139,7 @@ Phase 1 — Text MVP
 - Backup plan if SSE proxy fails: frontend calls agent-runtime directly
 
 ## Next step
-Milestone 6: Room summaries + User memory.
+Begin Phase 2: agent architecture upgrade — tool calling, MCP support, memory retrieval as a tool instead of always-on injection, prompt versioning.
 
 ## Update rule
 After each meaningful implementation step, append:

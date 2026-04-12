@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { io, Socket } from "socket.io-client";
+import { sendImageMessage } from "@/lib/upload-image";
 
 interface Message {
   id?: string;
@@ -10,6 +11,7 @@ interface Message {
   senderId: string | null;
   senderName: string | null;
   content: string;
+  contentType?: string;
   createdAt?: string;
 }
 
@@ -39,6 +41,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -46,10 +50,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
+  const isInitialLoad = useRef(true);
+
   useEffect(() => {
     setMessages([]);
     setHasMore(false);
     seenIds.current.clear();
+    isInitialLoad.current = true;
     (async () => {
       const res = await fetch(`/api/messages?roomId=${roomId}`);
       if (!res.ok) return;
@@ -62,6 +69,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           senderId: r.senderId,
           senderName: r.senderName,
           content: r.content,
+          contentType: r.contentType,
           createdAt: r.createdAt,
         }));
       for (const m of loaded) {
@@ -122,6 +130,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           senderId: r.senderId,
           senderName: r.senderName,
           content: r.content,
+          contentType: r.contentType,
           createdAt: r.createdAt,
         }));
       for (const m of older) {
@@ -212,6 +221,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           senderId: msg.senderId,
           senderName: msg.senderName,
           content: msg.content,
+          contentType: msg.contentType,
         },
       ]);
     });
@@ -262,6 +272,15 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   }, []);
 
   useEffect(() => {
+    if (isInitialLoad.current && messages.length > 0) {
+      // First load or room switch: jump to bottom instantly
+      isInitialLoad.current = false;
+      shouldAutoScroll.current = true;
+      requestAnimationFrame(() => {
+        bottomRef.current?.scrollIntoView();
+      });
+      return;
+    }
     if (shouldAutoScroll.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
@@ -346,6 +365,37 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     }
   };
 
+  const handleImagePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || isUploading) return;
+    if (!file.type.startsWith("image/")) {
+      alert("Please choose an image file");
+      return;
+    }
+    setIsUploading(true);
+    try {
+      const msg = await sendImageMessage(file, roomId);
+      seenIds.current.add(msg.id);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: msg.id,
+          senderType: "user",
+          senderId: msg.senderId,
+          senderName: msg.senderName,
+          content: msg.content,
+          contentType: msg.contentType,
+          createdAt: msg.createdAt,
+        },
+      ]);
+    } catch (err: any) {
+      alert(`Failed to send image: ${err?.message || "unknown error"}`);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
@@ -384,7 +434,19 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                 {displayName}
               </div>
               <div className={`chat-bubble ${bubbleColor} text-sm`}>
-                <div className="whitespace-pre-wrap">{msg.content}</div>
+                {msg.contentType === "image" ? (
+                  <a href={msg.content} target="_blank" rel="noopener noreferrer">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={msg.content}
+                      alt="sent image"
+                      className="max-w-[240px] max-h-[320px] rounded object-contain"
+                      loading="lazy"
+                    />
+                  </a>
+                ) : (
+                  <div className="whitespace-pre-wrap">{msg.content}</div>
+                )}
               </div>
             </div>
           );
@@ -403,6 +465,28 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       </div>
 
       <div className="flex gap-2 px-3 py-2 md:px-4 md:py-3 border-t border-base-300 safe-area-bottom">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleImagePick}
+        />
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm self-end px-2"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isStreaming || isUploading}
+          title="Send image"
+        >
+          {isUploading ? (
+            <span className="loading loading-spinner loading-xs"></span>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+            </svg>
+          )}
+        </button>
         <textarea
           className="textarea textarea-bordered flex-1 min-h-[2.5rem] max-h-32 text-sm leading-normal resize-none bg-base-200"
           value={input}

@@ -94,18 +94,18 @@ Dependencies: Milestone 3
 
 **Verified**: Two users (binqiu, bob) log in separately, each sees only their own rooms.
 
-### Milestone 6: Room summaries + User memory
+### Milestone 6: Room summaries + User memory ✅
 Dependencies: Milestone 3
 
-- [ ] services/memory-worker: BullMQ consumer setup
-- [ ] apps/web: Push job to BullMQ after chat completion
-- [ ] memory-worker: Room summary generation job
-- [ ] memory-worker: User memory extraction job
-- [ ] Persist summaries and memories to database
-- [ ] apps/web: Include summary + memory in context passed to agent-runtime
-- [ ] agent-runtime: Use provided context in prompt assembly
+- [x] services/memory-worker: BullMQ consumer setup
+- [x] apps/web: Push job to BullMQ after chat completion (pushMemoryJobs in stream.ts)
+- [x] memory-worker: Room summary generation job (threshold = 20 new messages)
+- [x] memory-worker: User memory extraction job (CRUD actions via JSON mode)
+- [x] Persist summaries and memories to database
+- [x] apps/web: Include summary + memory in context passed to agent-runtime
+- [x] agent-runtime: Use provided context in prompt assembly (system prompt built in web, passed via messages array)
 
-**Verify**: After many messages, agent "remembers" prior conversation context.
+**Verified**: Agent recalls prior user facts across sessions; summaries regenerate past threshold.
 
 ---
 
@@ -120,4 +120,4 @@ M4, M5, M6 all depend on M3 but are independent of each other.
 ---
 
 ## Immediate next task
-Milestone 6: Room summaries + User memory.
+Phase 1 complete. Next: begin Phase 2 (agent architecture upgrade — tool calling, MCP, memory retrieval tools, prompt versioning).

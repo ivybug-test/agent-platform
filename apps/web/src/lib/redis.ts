@@ -22,6 +22,7 @@ interface RoomEvent {
     senderId: string | null;
     senderName: string | null;
     content: string;
+    contentType?: string;
     status: string;
   };
 }
