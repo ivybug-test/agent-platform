@@ -28,6 +28,14 @@ const bubbleColors = [
   "chat-bubble-error",
   "chat-bubble-info",
 ];
+function isImageMessage(msg: { content: string; contentType?: string }): boolean {
+  if (msg.contentType === "image") return true;
+  // Fallback: detect COS image URLs even if contentType is missing
+  return /^https:\/\/[^\s]+\.myqcloud\.com\/[^\s]+\.(jpg|jpeg|png|gif|webp)(\?|$)/i.test(
+    msg.content
+  );
+}
+
 function colorForUser(id: string): string {
   let hash = 0;
   for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
@@ -434,7 +442,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                 {displayName}
               </div>
               <div className={`chat-bubble ${bubbleColor} text-sm`}>
-                {msg.contentType === "image" ? (
+                {isImageMessage(msg) ? (
                   <a href={msg.content} target="_blank" rel="noopener noreferrer">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img

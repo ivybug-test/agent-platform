@@ -38,8 +38,8 @@ module.exports = {
   apps: [
     {
       name: "web",
-      script: "apps/web/.next/standalone/apps/web/server.js",
-      cwd: "$HOME/agent-platform",
+      script: "server.js",
+      cwd: "$HOME/agent-platform/apps/web/.next/standalone/apps/web",
       env: {
         PORT: 3000,
         HOSTNAME: "0.0.0.0",
