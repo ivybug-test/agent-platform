@@ -17,6 +17,7 @@ RULES:
 - DO NOT extract: greetings, test messages, emotional expressions, single-word responses, questions the user asked the AI, commands to the AI
 - DO extract: personal info (name, age, location, language), preferences (food, music, hobbies), relationships (family, friends mentioned by name), significant events, opinions, ongoing situations
 - Each fact must be a single clear statement in third person (e.g. "Likes spicy food" not "I like spicy food")
+- LANGUAGE: Write each fact in the same language the user predominantly uses in the recent messages. If the user writes in Chinese, write the fact in Chinese (e.g. "喜欢吃辣"). If in English, write in English. Mirror the user's language — do NOT translate.
 - If a new fact contradicts an existing memory, output an UPDATE action with the existing memory's id
 - If a new fact is already captured by an existing memory, SKIP it
 - If a fact is genuinely new, output a CREATE action

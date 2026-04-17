@@ -403,7 +403,7 @@ export const memoryToolDefs = [
           content: {
             type: "string",
             description:
-              'Third-person single-sentence fact, e.g. "Lives in Shenzhen".',
+              'Third-person single-sentence fact, written in the SAME LANGUAGE the user is speaking (Chinese input → Chinese fact, English input → English fact, do not translate). Example: "住在深圳" / "Lives in Shenzhen".',
           },
           category: {
             type: "string",
