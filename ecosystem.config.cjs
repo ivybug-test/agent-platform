@@ -47,6 +47,9 @@ module.exports = {
           "DATABASE_URL",
           "REDIS_URL",
           "AUTH_SECRET",
+          "INTERNAL_JWT_SECRET",
+          "WEB_BASE_URL",
+          "LOG_DIR",
           "TENCENT_SECRET_ID",
           "TENCENT_SECRET_KEY",
           "TENCENT_COS_BUCKET",
@@ -61,7 +64,7 @@ module.exports = {
       env: {
         PORT: 3001,
         MOCK_LLM: "false",
-        ...pick("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"),
+        ...pick("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LOG_DIR"),
       },
     },
     {
@@ -74,7 +77,9 @@ module.exports = {
           "REDIS_URL",
           "LLM_API_KEY",
           "LLM_BASE_URL",
-          "LLM_MODEL"
+          "LLM_MODEL",
+          "LOG_DIR",
+          "MEMORY_DEDUP_INTERVAL_MS"
         ),
       },
     },
