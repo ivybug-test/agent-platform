@@ -12,6 +12,11 @@ function getPublisher(): IORedis {
   return _pub;
 }
 
+/** Shared ioredis client for general GET/SET use (cache, etc). Same connection as the publisher — ioredis allows mixing commands with pub/sub on one client. */
+export function getRedisClient(): IORedis {
+  return getPublisher();
+}
+
 interface RoomEvent {
   type: "user-message" | "agent-message" | "agent-chunk";
   roomId: string;

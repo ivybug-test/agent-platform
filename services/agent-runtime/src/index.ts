@@ -14,6 +14,36 @@ const isMock = process.env.MOCK_LLM === "true";
 
 app.get("/health", async () => ({ status: "ok" }));
 
+interface SummarizeBody {
+  system: string;
+  user: string;
+  temperature?: number;
+}
+
+// Non-streaming completion used for ad-hoc summaries (release notes etc).
+app.post<{ Body: SummarizeBody }>("/summarize", async (request, reply) => {
+  const { system, user, temperature = 0.3 } = request.body;
+  if (isMock) {
+    return { text: "(mock mode — no real summary)" };
+  }
+  try {
+    const client = getClient();
+    const res = await client.chat.completions.create({
+      model: getModel(),
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      temperature,
+    });
+    return { text: res.choices[0]?.message?.content || "" };
+  } catch (err) {
+    log.error({ err }, "summarize.error");
+    reply.code(502);
+    return { error: "summarize failed" };
+  }
+});
+
 interface ToolDef {
   type: "function";
   function: {

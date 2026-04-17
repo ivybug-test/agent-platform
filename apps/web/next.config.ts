@@ -1,29 +1,42 @@
 import type { NextConfig } from "next";
 import { execSync } from "child_process";
 
-function git(format: string): string {
+interface CommitInfo {
+  sha: string;
+  subject: string;
+  date: string;
+}
+
+function gitRecent(n: number): CommitInfo[] {
   try {
-    return execSync(`git log -1 --format=${format}`, { stdio: ["ignore", "pipe", "ignore"] })
-      .toString()
-      .trim();
+    // \x1f = unit separator (between fields); \x1e = record separator (between commits)
+    const out = execSync(
+      `git log -${n} --format=%h%x1f%s%x1f%ci%x1e`,
+      { stdio: ["ignore", "pipe", "ignore"] }
+    ).toString();
+    return out
+      .split("\x1e")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [sha, subject, date] = line.split("\x1f");
+        return { sha, subject, date };
+      });
   } catch {
-    return "";
+    return [];
   }
 }
 
-const NEXT_PUBLIC_GIT_COMMIT = git("%h");
-const NEXT_PUBLIC_GIT_SUBJECT = git("%s");
-const NEXT_PUBLIC_GIT_DATE = git("%ci");
+const NEXT_PUBLIC_RECENT_COMMITS = JSON.stringify(gitRecent(3));
 
 const nextConfig: NextConfig = {
   output: "standalone",
   serverExternalPackages: ["postgres"],
-  // Bake the current git commit metadata into the client bundle so
-  // UpdateBanner can detect new deployments without a runtime endpoint.
+  // Bake the last few commits into the client bundle so UpdateBanner can
+  // display "what's new" without a runtime endpoint. Each deploy freezes a
+  // new snapshot.
   env: {
-    NEXT_PUBLIC_GIT_COMMIT,
-    NEXT_PUBLIC_GIT_SUBJECT,
-    NEXT_PUBLIC_GIT_DATE,
+    NEXT_PUBLIC_RECENT_COMMITS,
   },
 };
 
