@@ -15,6 +15,20 @@
       "when": 1775805927162,
       "tag": "0001_long_sprite",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776439563400,
+      "tag": "0002_nifty_matthew_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1776443400000,
+      "tag": "0003_messages_trgm_index",
+      "breakpoints": true
     }
   ]
 }

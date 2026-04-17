@@ -183,6 +183,12 @@ export default function Sidebar({
                 Invite
               </button>
             )}
+            <a
+              className="btn btn-ghost btn-xs text-info"
+              href="/memories"
+            >
+              Memories
+            </a>
             <button
               className="btn btn-ghost btn-xs text-primary"
               onClick={() => setShowFriends(true)}

@@ -3,10 +3,14 @@ import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
 import { publishRoomEvent } from "@/lib/redis";
 import { createLogger } from "@agent-platform/logger";
+import { signToolToken } from "@/lib/tool-token";
+import { agentToolDefs } from "@/lib/tools";
 
 const log = createLogger("web");
 const AGENT_RUNTIME_URL =
   process.env.AGENT_RUNTIME_URL!;
+const WEB_BASE_URL =
+  process.env.WEB_BASE_URL || "http://localhost:3000";
 
 /** Call agent-runtime and return a streaming Response */
 export async function streamAgentResponse(
@@ -16,10 +20,17 @@ export async function streamAgentResponse(
   userContent: string,
   userId: string
 ): Promise<Response> {
+  const toolAuth = await signToolToken({ userId, roomId });
+
   const response = await fetch(`${AGENT_RUNTIME_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages: llmMessages }),
+    body: JSON.stringify({
+      messages: llmMessages,
+      tools: agentToolDefs,
+      toolCallbackUrl: `${WEB_BASE_URL}/api/agent/tool`,
+      toolAuth,
+    }),
   });
 
   if (!response.ok || !response.body) {

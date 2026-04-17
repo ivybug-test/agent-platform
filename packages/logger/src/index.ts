@@ -2,8 +2,6 @@ import pino from "pino";
 import { resolve } from "path";
 import { mkdirSync } from "fs";
 
-const LOG_DIR = process.env.LOG_DIR || "/root/agent-platform/logs";
-
 let dirEnsured = false;
 
 export function createLogger(service: string) {
@@ -12,6 +10,8 @@ export function createLogger(service: string) {
 
   function getLogger(): pino.Logger {
     if (!_logger) {
+      // Read LOG_DIR at first-use time so dotenv has had a chance to load
+      const LOG_DIR = process.env.LOG_DIR || "/root/agent-platform/logs";
       if (!dirEnsured) {
         try { mkdirSync(LOG_DIR, { recursive: true }); } catch {}
         dirEnsured = true;

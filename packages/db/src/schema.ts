@@ -123,6 +123,11 @@ export const memoryImportanceEnum = pgEnum("memory_importance", [
   "low",
 ]);
 
+export const memorySourceEnum = pgEnum("memory_source", [
+  "extracted",
+  "user_explicit",
+]);
+
 // User memories
 export const userMemories = pgTable("user_memories", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -132,7 +137,10 @@ export const userMemories = pgTable("user_memories", {
   content: text("content").notNull(),
   category: memoryCategoryEnum("category").notNull().default("context"),
   importance: memoryImportanceEnum("importance").notNull().default("medium"),
+  source: memorySourceEnum("source").notNull().default("extracted"),
   sourceRoomId: uuid("source_room_id").references(() => rooms.id),
+  lastReinforcedAt: timestamp("last_reinforced_at"),
+  deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

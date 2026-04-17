@@ -109,7 +109,7 @@ Dependencies: Milestone 3
 
 ---
 
-## Milestone dependency graph
+## Phase 1 milestone dependency graph
 ```
 M0 → M1 → M2 → M3 → M4
                   ↓      ↘
@@ -119,5 +119,41 @@ M4, M5, M6 all depend on M3 but are independent of each other.
 
 ---
 
+## Phase 2 — Agent architecture upgrade
+
+Goal: move from always-on memory injection to tool-based, on-demand retrieval. Give the user (and the agent) a way to correct and forget facts.
+
+### Checkpoint A — Memory safety foundation ✅
+- [x] A1: extend `user_memories` schema (source / deleted_at / last_reinforced_at) + migration
+- [x] A2: filter soft-deleted memories in read path (`context.ts`)
+- [x] A3: memory-worker respects tombstones + `source='user_explicit'` lock (prompt + code + SQL)
+- [x] A4: "我的记忆" management API + `/memories` page; user edits flip source to `user_explicit`
+
+### Checkpoint B — Tool-calling infrastructure ✅
+- [x] B1: agent-runtime tool-calling loop (SSE tool_call/result events, JWT opaque passthrough, max rounds)
+- [x] B2: `POST /api/agent/tool` JWT-verified dispatcher + `toolRegistry`
+- [x] Side fix: `packages/logger` now reads `LOG_DIR` lazily so non-root deployments work
+
+### Checkpoint C — On-demand retrieval ✅
+- [x] C1: five tools — `search_memories`, `search_messages`, `remember` (bigram dedup), `update_memory`, `forget_memory`
+- [x] C2: `buildSystemPrompt` pins only identity + high-importance; `stream.ts` signs JWT and ships tools to agent-runtime
+- [x] E2E verified with real DeepSeek: forget flow works across tool rounds and languages
+
+### Checkpoint D — Retrieval hardening
+- [ ] D1: `pg_trgm` GIN index on `messages.content` for `search_messages`; consider tsvector with zhparser for Chinese later
+- [ ] D2: systematic memory dedup — embeddings + pgvector OR periodic cron that pairs near-duplicate rows and merges them via LLM
+
+### Checkpoint E — Stabilization
+- [x] CHANGELOG + TASKS brought up to date
+- [ ] Live smoke test of `remember` (uncovered in current run — only forget was exercised end-to-end)
+- [ ] Consider evaluation harness so Phase 2 regressions surface (manual flow for now)
+
+### Deferred within Phase 2
+- [ ] MCP support — gate on real third-party tool need
+- [ ] Prompt versioning (`packages/prompts`) — gate on a first prompt regression or A/B need
+- [ ] Memory-worker mock/offline mode — gate on CI or shared-machine dev needs
+
+---
+
 ## Immediate next task
-Phase 1 complete. Next: begin Phase 2 (agent architecture upgrade — tool calling, MCP, memory retrieval tools, prompt versioning).
+D1 — add `pg_trgm` GIN index on `messages.content`, update `search_messages` if we pick a different operator. Then D2.

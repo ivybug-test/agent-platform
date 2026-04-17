@@ -1,5 +1,5 @@
 import { db, messages, users, userMemories } from "@agent-platform/db";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, isNull, isNotNull } from "drizzle-orm";
 import { llmCompleteJSON } from "../llm.js";
 import { createLogger } from "@agent-platform/logger";
 
@@ -21,6 +21,10 @@ RULES:
 - If a new fact is already captured by an existing memory, SKIP it
 - If a fact is genuinely new, output a CREATE action
 - If an existing memory is clearly wrong based on new info, output a DELETE action
+
+HARD CONSTRAINTS (violating these will be rejected):
+- FORGOTTEN FACTS: The user has explicitly asked to forget some facts. They are listed under "Forgotten facts". NEVER re-create any fact that is semantically similar to a forgotten one, even if the conversation mentions it again. If unsure, skip.
+- LOCKED MEMORIES: Memories marked [LOCKED] were set or confirmed by the user directly. You MUST NOT output UPDATE or DELETE actions for locked memory ids. You may output CREATE for genuinely new facts that do not conflict.
 
 OUTPUT FORMAT (strict JSON):
 {
@@ -68,15 +72,28 @@ export async function processUserMemory(data: UserMemoryData) {
     return;
   }
 
-  // Get ALL existing memories for this user (not just 10)
-  const existingMemories = await db
+  // Get ALL active memories (tombstones loaded separately below)
+  const activeMemories = await db
     .select()
     .from(userMemories)
-    .where(eq(userMemories.userId, userId))
+    .where(and(eq(userMemories.userId, userId), isNull(userMemories.deletedAt)))
     .orderBy(userMemories.category, desc(userMemories.createdAt));
 
-  // Format existing memories by category with IDs
-  const categorized = formatMemoriesByCategory(existingMemories);
+  // Get soft-deleted (tombstoned) memories — the LLM must not re-create these
+  const tombstones = await db
+    .select({ content: userMemories.content })
+    .from(userMemories)
+    .where(and(eq(userMemories.userId, userId), isNotNull(userMemories.deletedAt)));
+
+  const lockedIds = new Set(
+    activeMemories.filter((m) => m.source === "user_explicit").map((m) => m.id)
+  );
+
+  const categorized = formatMemoriesByCategory(activeMemories, lockedIds);
+  const tombstoneText =
+    tombstones.length > 0
+      ? tombstones.map((t) => `- ${t.content}`).join("\n")
+      : "(none)";
 
   const messagesText = recentUserMessages
     .reverse()
@@ -87,6 +104,9 @@ export async function processUserMemory(data: UserMemoryData) {
 
 Existing memories about this user:
 ${categorized}
+
+Forgotten facts (user asked to forget — DO NOT re-create these):
+${tombstoneText}
 
 Recent messages from this user:
 ${messagesText}
@@ -106,7 +126,7 @@ Analyze and return JSON:`;
     return;
   }
 
-  let created = 0, updated = 0, deleted = 0;
+  let created = 0, updated = 0, deleted = 0, rejected = 0;
 
   await db.transaction(async (tx) => {
     for (const action of result.actions!) {
@@ -119,10 +139,16 @@ Analyze and return JSON:`;
             content: a.content,
             category: a.category as any,
             importance: a.importance as any,
+            source: "extracted",
             sourceRoomId: roomId,
           });
           created++;
         } else if (a.action === "update" && a.memoryId && a.content) {
+          if (lockedIds.has(a.memoryId)) {
+            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-update-on-locked");
+            rejected++;
+            continue;
+          }
           await tx
             .update(userMemories)
             .set({
@@ -131,12 +157,31 @@ Analyze and return JSON:`;
               importance: VALID_IMPORTANCES.includes(a.importance) ? (a.importance as any) : undefined,
               updatedAt: new Date(),
             })
-            .where(and(eq(userMemories.id, a.memoryId), eq(userMemories.userId, userId)));
+            .where(
+              and(
+                eq(userMemories.id, a.memoryId),
+                eq(userMemories.userId, userId),
+                eq(userMemories.source, "extracted")
+              )
+            );
           updated++;
         } else if (a.action === "delete" && a.memoryId) {
+          if (lockedIds.has(a.memoryId)) {
+            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-delete-on-locked");
+            rejected++;
+            continue;
+          }
+          // Soft delete so the fact becomes a tombstone for future runs
           await tx
-            .delete(userMemories)
-            .where(and(eq(userMemories.id, a.memoryId), eq(userMemories.userId, userId)));
+            .update(userMemories)
+            .set({ deletedAt: new Date(), updatedAt: new Date() })
+            .where(
+              and(
+                eq(userMemories.id, a.memoryId),
+                eq(userMemories.userId, userId),
+                eq(userMemories.source, "extracted")
+              )
+            );
           deleted++;
         }
       } catch (err) {
@@ -145,16 +190,17 @@ Analyze and return JSON:`;
     }
   });
 
-  log.info({ roomId, userId, userName: user.name, created, updated, deleted }, "memory.result");
+  log.info({ roomId, userId, userName: user.name, created, updated, deleted, rejected }, "memory.result");
 }
 
 function formatMemoriesByCategory(
-  memories: { id: string; content: string; category: string }[]
+  memories: { id: string; content: string; category: string }[],
+  lockedIds: Set<string>
 ): string {
-  const groups = new Map<string, { id: string; content: string }[]>();
+  const groups = new Map<string, { id: string; content: string; locked: boolean }[]>();
   for (const m of memories) {
     const list = groups.get(m.category) || [];
-    list.push({ id: m.id, content: m.content });
+    list.push({ id: m.id, content: m.content, locked: lockedIds.has(m.id) });
     groups.set(m.category, list);
   }
 
@@ -165,7 +211,12 @@ function formatMemoriesByCategory(
     const items = groups.get(cat);
     if (items && items.length > 0) {
       sections.push(
-        `[${cat}]\n${items.map((m) => `- (id: ${m.id}) ${m.content}`).join("\n")}`
+        `[${cat}]\n${items
+          .map(
+            (m) =>
+              `- ${m.locked ? "[LOCKED] " : ""}(id: ${m.id}) ${m.content}`
+          )
+          .join("\n")}`
       );
     }
   }

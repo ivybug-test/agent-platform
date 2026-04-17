@@ -1,5 +1,5 @@
 import { db, messages, roomMembers, users, roomSummaries, userMemories } from "@agent-platform/db";
-import { eq, and, inArray, desc, ne } from "drizzle-orm";
+import { eq, and, inArray, desc, ne, isNull, or } from "drizzle-orm";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("web");
@@ -74,7 +74,7 @@ export async function getUserMemories(
       category: userMemories.category,
     })
     .from(userMemories)
-    .where(eq(userMemories.userId, userId))
+    .where(and(eq(userMemories.userId, userId), isNull(userMemories.deletedAt)))
     .orderBy(desc(userMemories.importance), desc(userMemories.updatedAt))
     .limit(30);
   return rows;
@@ -101,7 +101,10 @@ export async function getRoomUsersMemories(
     .where(inArray(users.id, memberIds));
   const idToName = new Map(memberUsers.map((u) => [u.id, u.name]));
 
-  // Get memories for all members
+  // Always-on memory policy (C2): inject only identity facts and high-importance
+  // memories. Everything else is retrievable on-demand through the search_memories
+  // tool so the prompt stays lean while the agent can still pull details when
+  // they matter.
   const allMemories = await db
     .select({
       userId: userMemories.userId,
@@ -109,10 +112,19 @@ export async function getRoomUsersMemories(
       category: userMemories.category,
     })
     .from(userMemories)
-    .where(inArray(userMemories.userId, memberIds))
+    .where(
+      and(
+        inArray(userMemories.userId, memberIds),
+        isNull(userMemories.deletedAt),
+        or(
+          eq(userMemories.category, "identity"),
+          eq(userMemories.importance, "high")
+        )
+      )
+    )
     .orderBy(desc(userMemories.importance), desc(userMemories.updatedAt));
 
-  // Group by user name, limit per user
+  // Group by user name, cap per-user to keep context bounded
   const result = new Map<string, { category: string; content: string }[]>();
   const countPerUser = new Map<string, number>();
 
@@ -120,7 +132,7 @@ export async function getRoomUsersMemories(
     const name = idToName.get(m.userId);
     if (!name) continue;
     const count = countPerUser.get(m.userId) || 0;
-    if (count >= 15) continue; // max 15 memories per user
+    if (count >= 8) continue;
     countPerUser.set(m.userId, count + 1);
 
     const list = result.get(name) || [];
@@ -172,18 +184,28 @@ export function buildSystemPrompt(opts: {
   roomSummary: string | null;
   allUsersMemories: Map<string, { category: string; content: string }[]>;
 }): string {
-  // Layer 3: Build memory section for all users
+  // Layer 3: Pinned memory snapshot (identity + high-importance only).
+  // Everything else is retrievable via the search_memories tool on demand.
   let memorySection: string | null = null;
   if (opts.allUsersMemories.size > 0) {
     const parts: string[] = [];
     for (const [name, memories] of opts.allUsersMemories) {
       const formatted = formatUserMemories(memories);
       if (formatted) {
-        parts.push(`What you remember about ${name}:\n${formatted}`);
+        parts.push(`Pinned facts about ${name}:\n${formatted}`);
       }
     }
     if (parts.length > 0) memorySection = parts.join("\n\n");
   }
+
+  const toolGuidance = `TOOLS YOU CAN CALL (optional, use only when genuinely useful):
+- search_memories: look up facts about the current user beyond the pinned list above — preferences, relationships, past events, opinions, current context. Call this BEFORE claiming you don't know something.
+- search_messages: find something said earlier in this room that is outside the recent window shown below.
+- remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. The tool auto-skips near-duplicates.
+- update_memory: call ONLY when the user explicitly corrects a fact ("actually it's X", "I moved", "no, not Y"). Pass the id from search_memories.
+- forget_memory: call ONLY when the user explicitly asks to forget something ("don't remember X", "stop tracking Y"). Pass the id from search_memories.
+
+Prefer not calling a tool if your current context is already sufficient.`;
 
   return [
     // Layer 1: Agent identity (system prompt)
@@ -195,13 +217,15 @@ export function buildSystemPrompt(opts: {
     ]
       .filter(Boolean)
       .join("\n"),
-    // Layer 3: All users' memories
+    // Layer 3: Pinned memory snapshot
     memorySection,
     // Layer 4: Room summary
     opts.roomSummary
       ? `Previous conversation summary:\n${opts.roomSummary}`
       : null,
     // Layer 5: (recent messages are added separately as user/assistant turns)
+    // Tool usage hints
+    toolGuidance,
     // Layer 6: User context + rules
     `IMPORTANT RULES:
 1. The message you are replying to was sent by: ${opts.currentUserName}. Respond ONLY to ${opts.currentUserName}'s latest message. Do NOT confuse them with other users.
