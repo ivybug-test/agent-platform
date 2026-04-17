@@ -61,15 +61,23 @@ const dedupIntervalMs = Number(process.env.MEMORY_DEDUP_INTERVAL_MS) ||
 
 // upsertJobScheduler replaces any prior schedule with the same key, so
 // changing the interval just takes effect on next worker restart.
-queue
-  .upsertJobScheduler(
+Promise.all([
+  queue.upsertJobScheduler(
     "memory-dedup-scan-scheduler",
     { every: dedupIntervalMs },
     { name: "memory-dedup-scan" }
-  )
+  ),
+  // Run one scan right after boot so a fresh deploy cleans up any
+  // existing duplicates instead of waiting up to `dedupIntervalMs`.
+  queue.add(
+    "memory-dedup-scan",
+    {},
+    { removeOnComplete: 20, removeOnFail: 20 }
+  ),
+])
   .then(() => {
     console.log(
-      `memory-worker: listening for jobs... (dedup scan every ${Math.round(dedupIntervalMs / 1000)}s)`
+      `memory-worker: listening for jobs... (dedup scan every ${Math.round(dedupIntervalMs / 1000)}s; one-off startup scan queued)`
     );
   })
   .catch((err) => {
