@@ -165,7 +165,7 @@ export default function Home() {
             </svg>
           </label>
           <span className="text-sm font-semibold truncate">
-            {activeRoom ? activeRoom.name : "Select a room"}
+            {activeRoom ? activeRoom.name : "选择房间"}
           </span>
         </div>
 
@@ -178,14 +178,14 @@ export default function Home() {
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-base-content/30 text-sm">
-            Create or select a room to start chatting.
+            创建或选择一个房间开始聊天。
           </div>
         )}
       </div>
 
       {/* Sidebar drawer */}
       <div className="drawer-side z-50" data-theme="dark">
-        <label htmlFor="sidebar-drawer" aria-label="close sidebar" className="drawer-overlay !bg-black/50"></label>
+        <label htmlFor="sidebar-drawer" aria-label="关闭侧边栏" className="drawer-overlay !bg-black/50"></label>
         <Sidebar
           rooms={rooms}
           activeRoomId={activeRoomId}

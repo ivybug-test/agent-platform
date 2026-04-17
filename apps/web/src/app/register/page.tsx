@@ -24,7 +24,7 @@ function RegisterForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, password, inviteCode }),
       });
-      if (!res.ok) { setError((await res.json()).error || "Registration failed"); return; }
+      if (!res.ok) { setError((await res.json()).error || "注册失败"); return; }
       router.push("/login");
     } finally {
       setLoading(false);
@@ -34,19 +34,19 @@ function RegisterForm() {
   return (
     <div className="card w-full max-w-sm bg-base-200 shadow-xl">
       <div className="card-body">
-        <h1 className="card-title text-xl justify-center mb-2">Create Account</h1>
+        <h1 className="card-title text-xl justify-center mb-2">创建账号</h1>
         {error && <div className="alert alert-error text-sm py-2">{error}</div>}
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <input className="input input-bordered w-full" type="text" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
-          <input className="input input-bordered w-full" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          <input className="input input-bordered w-full" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={4} />
-          <input className="input input-bordered w-full" type="text" placeholder="Invite Code" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} required />
+          <input className="input input-bordered w-full" type="text" placeholder="昵称" value={name} onChange={(e) => setName(e.target.value)} required />
+          <input className="input input-bordered w-full" type="email" placeholder="邮箱" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <input className="input input-bordered w-full" type="password" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={4} />
+          <input className="input input-bordered w-full" type="text" placeholder="邀请码" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} required />
           <button className="btn btn-primary w-full" type="submit" disabled={loading}>
-            {loading ? <span className="loading loading-spinner loading-sm"></span> : "Register"}
+            {loading ? <span className="loading loading-spinner loading-sm"></span> : "注册"}
           </button>
         </form>
         <p className="text-sm text-center text-base-content/50 mt-2">
-          Already have an account? <a href="/login" className="link link-primary">Login</a>
+          已有账号?<a href="/login" className="link link-primary">登录</a>
         </p>
       </div>
     </div>

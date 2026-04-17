@@ -34,8 +34,8 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({ email: trimmed }),
       });
       const data = await res.json();
-      if (res.ok) { setEmail(""); setMessage("Request sent!"); loadFriends(); }
-      else setMessage(data.error || "Failed");
+      if (res.ok) { setEmail(""); setMessage("已发送请求"); loadFriends(); }
+      else setMessage(data.error || "失败");
     } finally { setLoading(false); }
   };
 
@@ -62,7 +62,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
       <div className="modal-box w-[calc(100%-2rem)] max-w-md" data-theme="dark" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
-          <h3 className="font-bold text-lg">Friends</h3>
+          <h3 className="font-bold text-lg">好友</h3>
           <button className="btn btn-sm btn-circle btn-ghost" onClick={onClose}>✕</button>
         </div>
 
@@ -74,7 +74,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && sendRequest()}
-              placeholder="Add by email..."
+              placeholder="输入对方邮箱添加好友..."
               disabled={loading}
             />
             <button
@@ -82,7 +82,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
               onClick={sendRequest}
               disabled={loading || !email.trim()}
             >
-              Add
+              添加
             </button>
           </div>
           {message && <label className="label"><span className="label-text-alt text-primary">{message}</span></label>}
@@ -91,7 +91,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
         {/* Incoming */}
         {incoming.length > 0 && (
           <div className="mb-4">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-base-content/40 mb-2">Pending Requests</h4>
+            <h4 className="text-xs font-bold tracking-wider text-base-content/40 mb-2">待处理请求</h4>
             {incoming.map((f) => (
               <div key={f.id} className="flex items-center justify-between py-2 border-b border-base-300">
                 <div>
@@ -99,8 +99,8 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
                   <span className="text-xs text-base-content/40 ml-2">{f.friend.email}</span>
                 </div>
                 <div className="flex gap-1">
-                  <button className="btn btn-primary btn-xs" onClick={() => acceptRequest(f.id)}>Accept</button>
-                  <button className="btn btn-ghost btn-xs" onClick={() => removeFriend(f.id)}>Reject</button>
+                  <button className="btn btn-primary btn-xs" onClick={() => acceptRequest(f.id)}>接受</button>
+                  <button className="btn btn-ghost btn-xs" onClick={() => removeFriend(f.id)}>拒绝</button>
                 </div>
               </div>
             ))}
@@ -110,14 +110,14 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
         {/* Outgoing */}
         {outgoing.length > 0 && (
           <div className="mb-4">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-base-content/40 mb-2">Sent Requests</h4>
+            <h4 className="text-xs font-bold tracking-wider text-base-content/40 mb-2">已发送</h4>
             {outgoing.map((f) => (
               <div key={f.id} className="flex items-center justify-between py-2 border-b border-base-300">
                 <div>
                   <span className="text-sm font-medium">{f.friend.name}</span>
                   <span className="text-xs text-base-content/40 ml-2">{f.friend.email}</span>
                 </div>
-                <button className="btn btn-ghost btn-xs" onClick={() => removeFriend(f.id)}>Cancel</button>
+                <button className="btn btn-ghost btn-xs" onClick={() => removeFriend(f.id)}>撤回</button>
               </div>
             ))}
           </div>
@@ -125,11 +125,11 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
 
         {/* Accepted */}
         <div>
-          <h4 className="text-xs font-bold uppercase tracking-wider text-base-content/40 mb-2">
-            Friends {accepted.length > 0 && `(${accepted.length})`}
+          <h4 className="text-xs font-bold tracking-wider text-base-content/40 mb-2">
+            好友 {accepted.length > 0 && `(${accepted.length})`}
           </h4>
           {accepted.length === 0 && (
-            <p className="text-sm text-base-content/30">No friends yet. Add someone above!</p>
+            <p className="text-sm text-base-content/30">还没有好友,在上方添加一个吧。</p>
           )}
           {accepted.map((f) => (
             <div key={f.id} className="flex items-center justify-between py-2 border-b border-base-300">
@@ -137,7 +137,7 @@ export default function FriendsPanel({ onClose }: { onClose: () => void }) {
                 <span className="text-sm font-medium">{f.friend.name}</span>
                 <span className="text-xs text-base-content/40 ml-2">{f.friend.email}</span>
               </div>
-              <button className="btn btn-ghost btn-xs text-error" onClick={() => removeFriend(f.id)}>Remove</button>
+              <button className="btn btn-ghost btn-xs text-error" onClick={() => removeFriend(f.id)}>移除</button>
             </div>
           ))}
         </div>

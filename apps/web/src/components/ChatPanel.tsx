@@ -363,7 +363,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           senderType: "agent",
           senderId: null,
           senderName: "Agent",
-          content: "Error: failed to get response.",
+          content: "错误:未能获取回复。",
         };
         return updated;
       });
@@ -378,7 +378,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     e.target.value = "";
     if (!file || isUploading) return;
     if (!file.type.startsWith("image/")) {
-      alert("Please choose an image file");
+      alert("请选择图片文件");
       return;
     }
     setIsUploading(true);
@@ -398,7 +398,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         },
       ]);
     } catch (err: any) {
-      alert(`Failed to send image: ${err?.message || "unknown error"}`);
+      alert(`图片发送失败:${err?.message || "未知错误"}`);
     } finally {
       setIsUploading(false);
     }
@@ -421,15 +421,15 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         )}
         {messages.length === 0 && !isLoadingMore && (
           <p className="text-base-content/40 text-center mt-[30vh] text-sm">
-            Send a message to start chatting.
+            发送消息开始聊天。
           </p>
         )}
         {messages.map((msg, i) => {
           const isMe = msg.senderType === "user" && msg.senderId === currentUserId;
           const isAgent = msg.senderType === "agent";
           const displayName = isMe
-            ? "You"
-            : msg.senderName || (isAgent ? "Agent" : "User");
+            ? "我"
+            : msg.senderName || (isAgent ? "Agent" : "用户");
           const bubbleColor = isAgent
             ? "chat-bubble-neutral"
             : isMe
@@ -485,7 +485,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           className="btn btn-ghost btn-sm self-end px-2"
           onClick={() => fileInputRef.current?.click()}
           disabled={isStreaming || isUploading}
-          title="Send image"
+          title="发送图片"
         >
           {isUploading ? (
             <span className="loading loading-spinner loading-xs"></span>
@@ -500,7 +500,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           value={input}
           onChange={(e) => { setInput(e.target.value); emitTyping(); }}
           onKeyDown={handleKeyDown}
-          placeholder="Type a message..."
+          placeholder="输入消息..."
           rows={1}
           disabled={isStreaming}
         />
@@ -512,7 +512,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           {isStreaming ? (
             <span className="loading loading-dots loading-xs"></span>
           ) : (
-            "Send"
+            "发送"
           )}
         </button>
       </div>

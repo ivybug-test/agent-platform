@@ -53,7 +53,7 @@ export default function Sidebar({
   };
 
   const deleteRoom = async (id: string) => {
-    if (!confirm("Delete this room and all its messages?")) return;
+    if (!confirm("删除该房间及其所有消息?")) return;
     await fetch(`/api/rooms/${id}`, { method: "DELETE" });
     setMenuRoomId(null);
     onRoomRemoved(id);
@@ -96,11 +96,11 @@ export default function Sidebar({
     <div className="w-72 lg:w-[260px] min-h-full overflow-hidden border-r border-base-300 flex flex-col bg-base-200" data-theme="dark">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3">
-        <h2 className="text-sm font-bold tracking-wide uppercase text-base-content/50">
-          Rooms
+        <h2 className="text-sm font-bold tracking-wide text-base-content/50">
+          房间
         </h2>
         <button className="btn btn-primary btn-xs" onClick={createRoom} disabled={creating}>
-          + New
+          + 新建
         </button>
       </div>
 
@@ -139,17 +139,17 @@ export default function Sidebar({
                   <ul className="absolute right-0 top-full mt-1 z-50 menu bg-base-300 rounded-lg shadow-xl w-40 p-1">
                     <li>
                       <button onClick={() => toggleAutoReply(room)} className="text-xs rounded-md">
-                        Auto-reply: {room.autoReply !== false ? "ON" : "OFF"}
+                        自动回复: {room.autoReply !== false ? "开" : "关"}
                       </button>
                     </li>
                     <li>
                       <button onClick={() => archiveRoom(room.id)} className="text-xs rounded-md">
-                        Archive
+                        归档
                       </button>
                     </li>
                     <li>
                       <button onClick={() => deleteRoom(room.id)} className="text-xs text-error rounded-md">
-                        Delete
+                        删除
                       </button>
                     </li>
                   </ul>
@@ -176,24 +176,24 @@ export default function Sidebar({
                     const { code } = await res.json();
                     const url = `${window.location.origin}/register?code=${code}`;
                     try { await navigator.clipboard.writeText(url); } catch {}
-                    window.prompt("Invite link (copy it):", url);
+                    window.prompt("邀请链接(复制后发送):", url);
                   }
                 }}
               >
-                Invite
+                邀请
               </button>
             )}
             <a
               className="btn btn-ghost btn-xs text-info"
               href="/memories"
             >
-              Memories
+              记忆
             </a>
             <button
               className="btn btn-ghost btn-xs text-primary"
               onClick={() => setShowFriends(true)}
             >
-              Friends{pendingCount > 0 && (
+              好友{pendingCount > 0 && (
                 <span className="badge badge-primary badge-xs ml-1">{pendingCount}</span>
               )}
             </button>
@@ -201,7 +201,7 @@ export default function Sidebar({
               className="btn btn-ghost btn-xs text-base-content/40"
               onClick={() => signOut({ redirect: false }).then(() => window.location.href = "/login")}
             >
-              Logout
+              退出
             </button>
           </div>
         </div>

@@ -36,12 +36,18 @@ const CATEGORY_ORDER: Category[] = [
 ];
 
 const CATEGORY_LABELS: Record<Category, string> = {
-  identity: "Identity",
-  preference: "Preferences",
-  relationship: "Relationships",
-  event: "Events",
-  opinion: "Opinions",
-  context: "Context",
+  identity: "身份",
+  preference: "偏好",
+  relationship: "人际",
+  event: "事件",
+  opinion: "观点",
+  context: "近况",
+};
+
+const IMPORTANCE_LABELS: Record<Importance, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
 };
 
 const IMPORTANCE_COLORS: Record<Importance, string> = {
@@ -117,7 +123,7 @@ export default function MemoriesPage() {
   };
 
   const remove = async (id: string) => {
-    if (!confirm("Forget this memory? The agent will be told not to recreate it."))
+    if (!confirm("遗忘这条记忆?后台抽取器将被告知不要重新创建。"))
       return;
     const res = await fetch(`/api/memories/${id}`, { method: "DELETE" });
     if (res.ok) setMemories((prev) => prev.filter((m) => m.id !== id));
@@ -181,7 +187,7 @@ export default function MemoriesPage() {
     >
       {/* Sticky header — always visible */}
       <div className="sticky top-0 z-10 flex items-center gap-2 px-3 py-2 border-b border-base-300 bg-base-100">
-        <Link href="/" className="btn btn-ghost btn-sm btn-square" aria-label="Back">
+        <Link href="/" className="btn btn-ghost btn-sm btn-square" aria-label="返回">
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
@@ -194,7 +200,7 @@ export default function MemoriesPage() {
           </svg>
         </Link>
         <h1 className="text-sm font-semibold flex-1 truncate">
-          My Memories
+          我的记忆
           <span className="text-base-content/40 font-normal ml-2">
             {memories.length}
           </span>
@@ -203,7 +209,7 @@ export default function MemoriesPage() {
           className={`btn btn-sm ${addOpen ? "btn-ghost" : "btn-primary"}`}
           onClick={() => setAddOpen((v) => !v)}
         >
-          {addOpen ? "Cancel" : "+ Add"}
+          {addOpen ? "取消" : "+ 新增"}
         </button>
       </div>
 
@@ -214,7 +220,7 @@ export default function MemoriesPage() {
           <div className="card bg-base-200 p-3 mb-4 space-y-2">
             <textarea
               className="textarea textarea-bordered w-full text-sm"
-              placeholder="e.g. 我住在深圳,是后端工程师。"
+              placeholder="例如:住在深圳,是后端工程师。"
               rows={2}
               value={newContent}
               onChange={(e) => setNewContent(e.target.value)}
@@ -237,16 +243,16 @@ export default function MemoriesPage() {
                 value={newImportance}
                 onChange={(e) => setNewImportance(e.target.value as Importance)}
               >
-                <option value="high">high</option>
-                <option value="medium">medium</option>
-                <option value="low">low</option>
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
               </select>
               <button
                 className="btn btn-primary btn-sm ml-auto"
                 onClick={create}
                 disabled={saving || !newContent.trim()}
               >
-                Save
+                保存
               </button>
             </div>
           </div>
@@ -254,7 +260,7 @@ export default function MemoriesPage() {
 
         {grouped.length === 0 && (
           <div className="text-center text-sm text-base-content/40 py-16">
-            No memories yet. Tap “+ Add” to create one, or chat with the agent.
+            还没有记忆。点击右上角“+ 新增”手动添加,或在聊天中让 agent 记录。
           </div>
         )}
 
@@ -327,9 +333,9 @@ export default function MemoriesPage() {
                                 }))
                               }
                             >
-                              <option value="high">high</option>
-                              <option value="medium">medium</option>
-                              <option value="low">low</option>
+                              <option value="high">高</option>
+                              <option value="medium">中</option>
+                              <option value="low">低</option>
                             </select>
                             <div className="ml-auto flex gap-1">
                               <button
@@ -337,14 +343,14 @@ export default function MemoriesPage() {
                                 onClick={cancelEdit}
                                 disabled={saving}
                               >
-                                Cancel
+                                取消
                               </button>
                               <button
                                 className="btn btn-primary btn-xs"
                                 onClick={() => saveEdit(m.id)}
                                 disabled={saving || !draft.content?.trim()}
                               >
-                                Save
+                                保存
                               </button>
                             </div>
                           </div>
@@ -358,11 +364,11 @@ export default function MemoriesPage() {
                             <span
                               className={`badge badge-xs ${IMPORTANCE_COLORS[m.importance]}`}
                             >
-                              {m.importance}
+                              {IMPORTANCE_LABELS[m.importance]}
                             </span>
                             {m.source === "user_explicit" && (
                               <span className="badge badge-xs badge-info">
-                                locked
+                                已锁定
                               </span>
                             )}
                             <div className="ml-auto flex gap-0.5">
@@ -370,13 +376,13 @@ export default function MemoriesPage() {
                                 className="btn btn-ghost btn-xs h-6 min-h-0 px-2"
                                 onClick={() => startEdit(m)}
                               >
-                                Edit
+                                编辑
                               </button>
                               <button
                                 className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
                                 onClick={() => remove(m.id)}
                               >
-                                Forget
+                                遗忘
                               </button>
                             </div>
                           </div>

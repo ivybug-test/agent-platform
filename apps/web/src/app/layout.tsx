@@ -1,10 +1,11 @@
 import Providers from "@/components/Providers";
+import UpdateBanner from "@/components/UpdateBanner";
 import "./globals.css";
 import type { Viewport } from "next";
 
 export const metadata = {
-  title: "Agent Platform",
-  description: "Agent chat platform",
+  title: "Agent 平台",
+  description: "Agent 聊天平台",
 };
 
 export const viewport: Viewport = {
@@ -20,9 +21,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body>
-        <Providers>{children}</Providers>
+        <Providers>
+          <UpdateBanner />
+          {children}
+        </Providers>
       </body>
     </html>
   );
