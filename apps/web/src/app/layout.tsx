@@ -1,5 +1,4 @@
 import Providers from "@/components/Providers";
-import UpdateBanner from "@/components/UpdateBanner";
 import "./globals.css";
 import type { Viewport } from "next";
 
@@ -24,7 +23,6 @@ export default function RootLayout({
     <html lang="zh-CN">
       <body>
         <Providers>
-          <UpdateBanner />
           {children}
         </Providers>
       </body>

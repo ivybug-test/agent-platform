@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useSession, signOut } from "next-auth/react";
 import FriendsPanel from "./FriendsPanel";
+import AnnouncementPanel from "./AnnouncementPanel";
 
 interface Room {
   id: string;
@@ -159,6 +160,9 @@ export default function Sidebar({
           </div>
         ))}
       </div>
+
+      {/* Announcement (collapsible, auto-hides after 3 days) */}
+      <AnnouncementPanel />
 
       {/* User bar */}
       {session?.user && (
