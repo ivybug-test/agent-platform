@@ -6,7 +6,8 @@ import type { Queue } from "bullmq";
 
 const log = createLogger("memory-worker");
 
-const CANDIDATE_THRESHOLD = 0.35; // pair survives to LLM if bigram-Jaccard ≥ this
+const CANDIDATE_THRESHOLD = 0.35; // pair enters candidate list if bigram-Jaccard ≥ this
+const AUTO_MERGE_THRESHOLD = 0.85; // two extracted twins this close are auto-merged (keep longer content) without bothering the LLM
 const MAX_PAIRS_PER_USER = 10; // hard cap per LLM round — small so each call returns in <30s even on DeepSeek
 
 interface MemoryDedupData {
@@ -17,8 +18,9 @@ export interface DedupResult {
   totalRows: number;
   candidatePairs: number;
   askedLLM: number;
-  merged: number;
-  autoDeleted: number;
+  merged: number;       // LLM-approved merges
+  autoMerged: number;   // high-similarity pairs auto-merged without LLM
+  autoDeleted: number;  // locked-vs-extracted twins, extracted side auto-dropped
   rejected: number;
 }
 
@@ -98,6 +100,7 @@ export async function processMemoryDedup(
       candidatePairs: 0,
       askedLLM: 0,
       merged: 0,
+      autoMerged: 0,
       autoDeleted: 0,
       rejected: 0,
     };
@@ -121,6 +124,7 @@ export async function processMemoryDedup(
       candidatePairs: 0,
       askedLLM: 0,
       merged: 0,
+      autoMerged: 0,
       autoDeleted: 0,
       rejected: 0,
     };
@@ -130,10 +134,12 @@ export async function processMemoryDedup(
   const capped = candidates.slice(0, MAX_PAIRS_PER_USER);
 
   // Short-circuit cases that don't need the LLM
-  //   both locked → hands off
-  //   one locked + one extracted → user's version wins, soft-delete the extracted one
-  //   both extracted → LLM judges
-  const autoDelete: { id: string; twinContent: string }[] = [];
+  //   both locked                           → hands off entirely
+  //   locked + extracted                    → user's version wins, soft-delete the extracted one (autoDelete)
+  //   extracted + extracted, sim ≥ 0.85     → auto-merge: keep longer-content twin (autoMerge)
+  //   extracted + extracted, 0.35 ≤ sim < 0.85 → LLM judges
+  const autoDeleteIds: string[] = []; // locked-twin case
+  const autoMergeIds: string[] = []; // high-similarity auto-merge case
   const toAsk: { pairIndex: number; a: MemoryRow; b: MemoryRow; sim: number }[] =
     [];
   for (const p of capped) {
@@ -142,8 +148,14 @@ export async function processMemoryDedup(
     if (aLocked && bLocked) continue;
     if (aLocked !== bLocked) {
       const extracted = aLocked ? p.b : p.a;
-      const kept = aLocked ? p.a : p.b;
-      autoDelete.push({ id: extracted.id, twinContent: kept.content });
+      autoDeleteIds.push(extracted.id);
+      continue;
+    }
+    // Both extracted — tier by similarity
+    if (p.sim >= AUTO_MERGE_THRESHOLD) {
+      // Drop the shorter one; the longer one becomes the "merged" row as-is.
+      const shorter = p.a.content.length < p.b.content.length ? p.a : p.b;
+      autoMergeIds.push(shorter.id);
       continue;
     }
     toAsk.push({ pairIndex: toAsk.length, a: p.a, b: p.b, sim: p.sim });
@@ -187,23 +199,32 @@ export async function processMemoryDedup(
   // Apply
   let merged = 0;
   let autoDeleted = 0;
+  let autoMerged = 0;
   let rejected = 0;
 
-  await db.transaction(async (tx) => {
-    for (const d of autoDelete) {
-      const result = await tx
-        .update(userMemories)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(
-          and(
-            eq(userMemories.id, d.id),
-            eq(userMemories.userId, userId),
-            eq(userMemories.source, "extracted"),
-            isNull(userMemories.deletedAt)
-          )
+  const softDelete = async (tx: typeof db, id: string) => {
+    return tx
+      .update(userMemories)
+      .set({ deletedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(userMemories.id, id),
+          eq(userMemories.userId, userId),
+          eq(userMemories.source, "extracted"),
+          isNull(userMemories.deletedAt)
         )
-        .returning({ id: userMemories.id });
+      )
+      .returning({ id: userMemories.id });
+  };
+
+  await db.transaction(async (tx) => {
+    for (const id of autoDeleteIds) {
+      const result = await softDelete(tx as any, id);
       if (result.length > 0) autoDeleted++;
+    }
+    for (const id of autoMergeIds) {
+      const result = await softDelete(tx as any, id);
+      if (result.length > 0) autoMerged++;
     }
 
     for (const dec of decisions) {
@@ -259,6 +280,7 @@ export async function processMemoryDedup(
       candidatePairs: candidates.length,
       askedLLM: toAsk.length,
       autoDeleted,
+      autoMerged,
       merged,
       rejected,
     },
@@ -270,6 +292,7 @@ export async function processMemoryDedup(
     candidatePairs: candidates.length,
     askedLLM: toAsk.length,
     merged,
+    autoMerged,
     autoDeleted,
     rejected,
   };

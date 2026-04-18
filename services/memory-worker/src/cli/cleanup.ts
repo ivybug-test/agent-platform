@@ -54,19 +54,25 @@ async function cleanupUser(userId: string): Promise<void> {
   // Step 2: exhaustive dedup
   let pass = 0;
   let totalMerged = 0;
+  let totalAutoMerged = 0;
   let totalAutoDeleted = 0;
   while (pass < MAX_DEDUP_PASSES) {
     pass++;
     try {
       const r = await processMemoryDedup({ userId });
       totalMerged += r.merged;
+      totalAutoMerged += r.autoMerged;
       totalAutoDeleted += r.autoDeleted;
       console.log(
-        `  dedup pass ${pass}: rows=${r.totalRows} pairs=${r.candidatePairs} askedLLM=${r.askedLLM} merged=${r.merged} autoDeleted=${r.autoDeleted} rejected=${r.rejected}`
+        `  dedup pass ${pass}: rows=${r.totalRows} pairs=${r.candidatePairs} askedLLM=${r.askedLLM} merged=${r.merged} autoMerged=${r.autoMerged} autoDeleted=${r.autoDeleted} rejected=${r.rejected}`
       );
       // Stop when no progress possible
       if (r.candidatePairs === 0) break;
-      if (r.merged === 0 && r.autoDeleted === 0) {
+      if (
+        r.merged === 0 &&
+        r.autoMerged === 0 &&
+        r.autoDeleted === 0
+      ) {
         // Remaining candidates were all "keep_both" or rejected — stop
         break;
       }
@@ -80,7 +86,7 @@ async function cleanupUser(userId: string): Promise<void> {
     .from(userMemories)
     .where(and(eq(userMemories.userId, userId), isNull(userMemories.deletedAt)));
   console.log(
-    `  dedup summary: passes=${pass} merged=${totalMerged} autoDeleted=${totalAutoDeleted}`
+    `  dedup summary: passes=${pass} merged=${totalMerged} autoMerged=${totalAutoMerged} autoDeleted=${totalAutoDeleted}`
   );
   console.log(
     `  user done: ${activeBefore[0]?.n ?? 0} → ${activeAfter[0]?.n ?? 0} active · ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
