@@ -170,6 +170,29 @@ export const roomSummaries = pgTable("room_summaries", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// User relationships (Phase 4 of multi-user memory)
+// Bidirectional confirmed edges between two users. Canonical order
+// (a_user_id < b_user_id, lexical uuid compare) keeps one row per pair-kind.
+// Whichever side has confirmed_by_* first becomes the proposer; the other
+// side must accept. Only rows with BOTH sides confirmed feed the pinned
+// prompt's "Known relationships" layer.
+export const userRelationships = pgTable("user_relationships", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  aUserId: uuid("a_user_id")
+    .notNull()
+    .references(() => users.id),
+  bUserId: uuid("b_user_id")
+    .notNull()
+    .references(() => users.id),
+  kind: varchar("kind", { length: 40 }).notNull(),
+  content: text("content"),
+  confirmedByA: timestamp("confirmed_by_a"),
+  confirmedByB: timestamp("confirmed_by_b"),
+  deletedAt: timestamp("deleted_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 // Room-shared memories (Phase 3 of multi-user memory)
 // Facts that belong to the ROOM, not any single user. Project codenames,
 // group focus, shared agreements. Any room member can add / edit / delete.

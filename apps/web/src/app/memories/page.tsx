@@ -29,7 +29,32 @@ interface Memory {
   authoredByName?: string | null;
 }
 
-type Tab = "mine" | "pending";
+type Tab = "mine" | "pending" | "relationships";
+
+type RelationshipKind = "spouse" | "family" | "colleague" | "friend" | "custom";
+
+interface RelationshipRow {
+  id: string;
+  kind: RelationshipKind;
+  content: string | null;
+  createdAt: string;
+  other: { id: string; name: string; email: string };
+}
+
+interface FriendRow {
+  id: string;
+  status: string;
+  direction: "mutual" | "incoming" | "outgoing";
+  friend: { id: string; name: string; email: string };
+}
+
+const KIND_LABELS: Record<RelationshipKind, string> = {
+  spouse: "伴侣",
+  family: "家人",
+  colleague: "同事",
+  friend: "朋友",
+  custom: "其他",
+};
 
 const CATEGORY_ORDER: Category[] = [
   "identity",
@@ -67,7 +92,15 @@ export default function MemoriesPage() {
 
   const [mine, setMine] = useState<Memory[]>([]);
   const [pending, setPending] = useState<Memory[]>([]);
+  const [confirmedRels, setConfirmedRels] = useState<RelationshipRow[]>([]);
+  const [pendingRels, setPendingRels] = useState<RelationshipRow[]>([]);
+  const [outgoingRels, setOutgoingRels] = useState<RelationshipRow[]>([]);
+  const [friendList, setFriendList] = useState<FriendRow[]>([]);
   const [tab, setTab] = useState<Tab>("mine");
+  const [relAddOpen, setRelAddOpen] = useState(false);
+  const [relFriendId, setRelFriendId] = useState("");
+  const [relKind, setRelKind] = useState<RelationshipKind>("friend");
+  const [relContent, setRelContent] = useState("");
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Partial<Memory>>({});
@@ -85,11 +118,25 @@ export default function MemoriesPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/memories");
-      if (res.ok) {
-        const data = await res.json();
+      const [memRes, relRes, friRes] = await Promise.all([
+        fetch("/api/memories"),
+        fetch("/api/relationships"),
+        fetch("/api/friends"),
+      ]);
+      if (memRes.ok) {
+        const data = await memRes.json();
         setMine(data.mine || []);
         setPending(data.pending || []);
+      }
+      if (relRes.ok) {
+        const data = await relRes.json();
+        setConfirmedRels(data.confirmed || []);
+        setPendingRels(data.pending || []);
+        setOutgoingRels(data.outgoing || []);
+      }
+      if (friRes.ok) {
+        const raw: FriendRow[] = await friRes.json();
+        setFriendList(raw.filter((f) => f.direction === "mutual"));
       }
     } finally {
       setLoading(false);
@@ -176,6 +223,52 @@ export default function MemoriesPage() {
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Relationships actions
+  const proposeRelationship = async () => {
+    if (!relFriendId) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/relationships", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          otherUserId: relFriendId,
+          kind: relKind,
+          content: relContent.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        setRelFriendId("");
+        setRelContent("");
+        setRelAddOpen(false);
+        load();
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const acceptRel = async (id: string) => {
+    const res = await fetch(`/api/relationships/${id}/confirm`, {
+      method: "POST",
+    });
+    if (res.ok) {
+      const row = pendingRels.find((r) => r.id === id);
+      setPendingRels((prev) => prev.filter((r) => r.id !== id));
+      if (row) setConfirmedRels((prev) => [{ ...row }, ...prev]);
+    }
+  };
+
+  const removeRel = async (id: string) => {
+    if (!confirm("删除这条关系?")) return;
+    const res = await fetch(`/api/relationships/${id}`, { method: "DELETE" });
+    if (res.ok) {
+      setConfirmedRels((p) => p.filter((r) => r.id !== id));
+      setPendingRels((p) => p.filter((r) => r.id !== id));
+      setOutgoingRels((p) => p.filter((r) => r.id !== id));
     }
   };
 
@@ -268,6 +361,21 @@ export default function MemoriesPage() {
             </span>
           )}
         </button>
+        <button
+          className={`px-3 py-1.5 text-xs rounded-t-md border-b-2 flex items-center gap-1 ${
+            tab === "relationships"
+              ? "border-primary text-primary font-semibold"
+              : "border-transparent text-base-content/60"
+          }`}
+          onClick={() => setTab("relationships")}
+        >
+          关系
+          {pendingRels.length > 0 && (
+            <span className="badge badge-primary badge-xs">
+              {pendingRels.length}
+            </span>
+          )}
+        </button>
       </div>
 
       {/* Scrollable body */}
@@ -316,6 +424,187 @@ export default function MemoriesPage() {
               ))}
             </ul>
           )
+        )}
+
+        {/* Relationships tab */}
+        {tab === "relationships" && (
+          <div className="space-y-5">
+            {/* Add relationship */}
+            <div className="card bg-base-200 p-3 space-y-2">
+              <button
+                className="btn btn-primary btn-sm w-full"
+                onClick={() => setRelAddOpen((v) => !v)}
+              >
+                {relAddOpen ? "取消" : "+ 新增关系"}
+              </button>
+              {relAddOpen && (
+                friendList.length === 0 ? (
+                  <div className="text-xs text-base-content/50">
+                    先在"好友"里添加对方为好友,然后才能建立关系。
+                  </div>
+                ) : (
+                  <div className="space-y-2 pt-1">
+                    <select
+                      className="select select-bordered select-sm w-full"
+                      value={relFriendId}
+                      onChange={(e) => setRelFriendId(e.target.value)}
+                    >
+                      <option value="">选择好友...</option>
+                      {friendList.map((f) => (
+                        <option key={f.friend.id} value={f.friend.id}>
+                          {f.friend.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      className="select select-bordered select-sm w-full"
+                      value={relKind}
+                      onChange={(e) =>
+                        setRelKind(e.target.value as RelationshipKind)
+                      }
+                    >
+                      {(Object.keys(KIND_LABELS) as RelationshipKind[]).map((k) => (
+                        <option key={k} value={k}>
+                          {KIND_LABELS[k]}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="input input-bordered input-sm w-full"
+                      placeholder="附加说明(可选)例如:认识 10 年"
+                      value={relContent}
+                      onChange={(e) => setRelContent(e.target.value)}
+                    />
+                    <button
+                      className="btn btn-primary btn-sm w-full"
+                      disabled={saving || !relFriendId}
+                      onClick={proposeRelationship}
+                    >
+                      提议建立
+                    </button>
+                  </div>
+                )
+              )}
+            </div>
+
+            {/* Pending (incoming) */}
+            {pendingRels.length > 0 && (
+              <section>
+                <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
+                  待确认({pendingRels.length})
+                </h2>
+                <ul className="space-y-2">
+                  {pendingRels.map((r) => (
+                    <li
+                      key={r.id}
+                      className="card bg-base-200 px-3 py-2.5"
+                    >
+                      <div className="text-sm">
+                        <span className="font-medium">{r.other.name}</span>
+                        <span className="text-base-content/60"> 提议是你的 </span>
+                        <span className="badge badge-xs badge-ghost">
+                          {KIND_LABELS[r.kind]}
+                        </span>
+                      </div>
+                      {r.content && (
+                        <div className="text-xs text-base-content/60 mt-0.5">
+                          {r.content}
+                        </div>
+                      )}
+                      <div className="flex gap-1 justify-end mt-1.5">
+                        <button
+                          className="btn btn-primary btn-xs h-6 min-h-0 px-2"
+                          onClick={() => acceptRel(r.id)}
+                        >
+                          接受
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
+                          onClick={() => removeRel(r.id)}
+                        >
+                          拒绝
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {/* Confirmed */}
+            <section>
+              <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
+                已确认({confirmedRels.length})
+              </h2>
+              {confirmedRels.length === 0 ? (
+                <div className="text-center text-sm text-base-content/40 py-6">
+                  还没有已确认的关系。
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  {confirmedRels.map((r) => (
+                    <li
+                      key={r.id}
+                      className="card bg-base-200 px-3 py-2.5"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">{r.other.name}</span>
+                        <span className="badge badge-xs badge-info">
+                          {KIND_LABELS[r.kind]}
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error ml-auto"
+                          onClick={() => removeRel(r.id)}
+                        >
+                          解除
+                        </button>
+                      </div>
+                      {r.content && (
+                        <div className="text-xs text-base-content/60 mt-0.5">
+                          {r.content}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            {/* Outgoing (waiting for other) */}
+            {outgoingRels.length > 0 && (
+              <section>
+                <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
+                  已发出,等待对方确认({outgoingRels.length})
+                </h2>
+                <ul className="space-y-2">
+                  {outgoingRels.map((r) => (
+                    <li
+                      key={r.id}
+                      className="card bg-base-200 px-3 py-2.5 opacity-70"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm">{r.other.name}</span>
+                        <span className="badge badge-xs badge-ghost">
+                          {KIND_LABELS[r.kind]}
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error ml-auto"
+                          onClick={() => removeRel(r.id)}
+                        >
+                          撤回
+                        </button>
+                      </div>
+                      {r.content && (
+                        <div className="text-xs text-base-content/60 mt-0.5">
+                          {r.content}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </div>
         )}
 
         {/* Mine tab — existing UI */}

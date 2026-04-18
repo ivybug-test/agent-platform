@@ -1,5 +1,5 @@
-import { db, messages, roomMembers, users, roomSummaries, userMemories, roomMemories } from "@agent-platform/db";
-import { eq, and, inArray, desc, ne, isNull, or } from "drizzle-orm";
+import { db, messages, roomMembers, users, roomSummaries, userMemories, roomMemories, userRelationships } from "@agent-platform/db";
+import { eq, and, inArray, desc, ne, isNull, isNotNull, or } from "drizzle-orm";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { createLogger } from "@agent-platform/logger";
 
@@ -52,6 +52,63 @@ export async function getRoomMemberNames(roomId: string): Promise<string[]> {
     .from(users)
     .where(inArray(users.id, memberIds));
   return memberUsers.map((u) => u.name);
+}
+
+/**
+ * Active, both-sides-confirmed relationships that involve `userId` and land
+ * among the room's members. Formatted with the OTHER party's display name.
+ * Phase 4.
+ */
+export async function getConfirmedRelationshipsForUser(
+  userId: string,
+  roomMemberIds: string[]
+): Promise<{ otherName: string; kind: string; content: string | null }[]> {
+  if (roomMemberIds.length === 0) return [];
+  const rows = await db
+    .select({
+      aUserId: userRelationships.aUserId,
+      bUserId: userRelationships.bUserId,
+      kind: userRelationships.kind,
+      content: userRelationships.content,
+    })
+    .from(userRelationships)
+    .where(
+      and(
+        isNull(userRelationships.deletedAt),
+        isNotNull(userRelationships.confirmedByA),
+        isNotNull(userRelationships.confirmedByB),
+        or(
+          eq(userRelationships.aUserId, userId),
+          eq(userRelationships.bUserId, userId)
+        )
+      )
+    );
+
+  // Only keep rows where the other side is also present in this room.
+  const memberSet = new Set(roomMemberIds);
+  const filtered = rows.filter((r) => {
+    const other = r.aUserId === userId ? r.bUserId : r.aUserId;
+    return memberSet.has(other);
+  });
+  if (filtered.length === 0) return [];
+
+  const otherIds = [
+    ...new Set(
+      filtered.map((r) => (r.aUserId === userId ? r.bUserId : r.aUserId))
+    ),
+  ];
+  const nameRows = await db
+    .select({ id: users.id, name: users.name })
+    .from(users)
+    .where(inArray(users.id, otherIds));
+  const nameMap = new Map(nameRows.map((u) => [u.id, u.name]));
+
+  return filtered.map((r) => ({
+    otherName:
+      nameMap.get(r.aUserId === userId ? r.bUserId : r.aUserId) || "?",
+    kind: r.kind,
+    content: r.content,
+  }));
 }
 
 /** Get active room memories ordered by importance + recency (Phase 3). */
@@ -203,6 +260,7 @@ export function buildSystemPrompt(opts: {
   currentUserName: string;
   roomSummary: string | null;
   roomMemories?: { content: string; importance: string }[];
+  relationships?: { otherName: string; kind: string; content: string | null }[];
   allUsersMemories: Map<string, { category: string; content: string }[]>;
 }): string {
   // Layer 3: Pinned memory snapshot (identity + high-importance only).
@@ -244,6 +302,20 @@ Prefer not calling a tool if your current context is already sufficient.`;
           .join("\n")}`
       : null;
 
+  // Known relationships (Phase 4): only bidirectionally confirmed edges
+  // involving the current speaker and present room members.
+  const relationshipsSection =
+    opts.relationships && opts.relationships.length > 0
+      ? `Known relationships involving ${opts.currentUserName}:\n${opts.relationships
+          .map(
+            (r) =>
+              `- ${opts.currentUserName} 和 ${r.otherName} 是 ${r.kind}${
+                r.content ? `(${r.content})` : ""
+              }`
+          )
+          .join("\n")}`
+      : null;
+
   return [
     // Layer 1: Agent identity (system prompt)
     opts.agentPrompt || "You are a helpful assistant.",
@@ -256,6 +328,8 @@ Prefer not calling a tool if your current context is already sufficient.`;
       .join("\n"),
     // Layer 2b: Room context (shared facts)
     roomMemoriesSection,
+    // Layer 2c: Known relationships involving the speaker
+    relationshipsSection,
     // Layer 3: Pinned memory snapshot
     memorySection,
     // Layer 4: Room summary
