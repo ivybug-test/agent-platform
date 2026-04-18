@@ -1,4 +1,4 @@
-import { db, messages, roomMembers, users, roomSummaries, userMemories } from "@agent-platform/db";
+import { db, messages, roomMembers, users, roomSummaries, userMemories, roomMemories } from "@agent-platform/db";
 import { eq, and, inArray, desc, ne, isNull, or } from "drizzle-orm";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { createLogger } from "@agent-platform/logger";
@@ -52,6 +52,22 @@ export async function getRoomMemberNames(roomId: string): Promise<string[]> {
     .from(users)
     .where(inArray(users.id, memberIds));
   return memberUsers.map((u) => u.name);
+}
+
+/** Get active room memories ordered by importance + recency (Phase 3). */
+export async function getRoomMemories(
+  roomId: string
+): Promise<{ content: string; importance: string }[]> {
+  const rows = await db
+    .select({
+      content: roomMemories.content,
+      importance: roomMemories.importance,
+    })
+    .from(roomMemories)
+    .where(and(eq(roomMemories.roomId, roomId), isNull(roomMemories.deletedAt)))
+    .orderBy(desc(roomMemories.importance), desc(roomMemories.updatedAt))
+    .limit(10);
+  return rows;
 }
 
 /** Get latest room summary */
@@ -186,6 +202,7 @@ export function buildSystemPrompt(opts: {
   agentName: string;
   currentUserName: string;
   roomSummary: string | null;
+  roomMemories?: { content: string; importance: string }[];
   allUsersMemories: Map<string, { category: string; content: string }[]>;
 }): string {
   // Layer 3: Pinned memory snapshot (identity + high-importance only).
@@ -219,6 +236,14 @@ MEMORY WRITING IN GROUP CONVERSATIONS:
 
 Prefer not calling a tool if your current context is already sufficient.`;
 
+  // Room context (Phase 3): facts shared across all members of the room.
+  const roomMemoriesSection =
+    opts.roomMemories && opts.roomMemories.length > 0
+      ? `Room context (facts shared by all members of this room):\n${opts.roomMemories
+          .map((r) => `- ${r.content}`)
+          .join("\n")}`
+      : null;
+
   return [
     // Layer 1: Agent identity (system prompt)
     opts.agentPrompt || "You are a helpful assistant.",
@@ -229,6 +254,8 @@ Prefer not calling a tool if your current context is already sufficient.`;
     ]
       .filter(Boolean)
       .join("\n"),
+    // Layer 2b: Room context (shared facts)
+    roomMemoriesSection,
     // Layer 3: Pinned memory snapshot
     memorySection,
     // Layer 4: Room summary

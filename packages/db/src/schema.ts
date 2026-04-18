@@ -169,3 +169,23 @@ export const roomSummaries = pgTable("room_summaries", {
   messageCount: varchar("message_count", { length: 20 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+// Room-shared memories (Phase 3 of multi-user memory)
+// Facts that belong to the ROOM, not any single user. Project codenames,
+// group focus, shared agreements. Any room member can add / edit / delete.
+// Agent reads them through a Room context layer in buildSystemPrompt.
+export const roomMemories = pgTable("room_memories", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  roomId: uuid("room_id")
+    .notNull()
+    .references(() => rooms.id),
+  content: text("content").notNull(),
+  importance: memoryImportanceEnum("importance").notNull().default("medium"),
+  createdByUserId: uuid("created_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  source: memorySourceEnum("source").notNull().default("extracted"),
+  deletedAt: timestamp("deleted_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});

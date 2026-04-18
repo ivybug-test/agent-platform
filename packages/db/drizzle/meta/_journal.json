@@ -36,6 +36,13 @@
       "when": 1776528000000,
       "tag": "0004_memory_authorship",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1776528600000,
+      "tag": "0005_room_memories",
+      "breakpoints": true
     }
   ]
 }

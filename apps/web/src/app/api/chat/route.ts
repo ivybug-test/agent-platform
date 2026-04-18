@@ -10,6 +10,7 @@ import {
   getRoomMemberNames,
   getLatestSummary,
   getRoomUsersMemories,
+  getRoomMemories,
   buildSystemPrompt,
   buildLLMMessages,
 } from "@/lib/chat/context";
@@ -87,13 +88,19 @@ export async function POST(req: NextRequest) {
   log.info({ roomId, userId: user.id, contentPreview: cleanContent.slice(0, 80) }, "chat.request");
 
   // Load context + memory
-  const [{ recentMessages, nameMap }, memberNames, roomSummary, allUsersMemories] =
-    await Promise.all([
-      loadChatContext(roomId),
-      getRoomMemberNames(roomId),
-      getLatestSummary(roomId),
-      getRoomUsersMemories(roomId),
-    ]);
+  const [
+    { recentMessages, nameMap },
+    memberNames,
+    roomSummary,
+    allUsersMemories,
+    roomMems,
+  ] = await Promise.all([
+    loadChatContext(roomId),
+    getRoomMemberNames(roomId),
+    getLatestSummary(roomId),
+    getRoomUsersMemories(roomId),
+    getRoomMemories(roomId),
+  ]);
   const currentUserName = nameMap.get(user.id) || "User";
 
   // Build prompt (6 layers)
@@ -105,6 +112,7 @@ export async function POST(req: NextRequest) {
     agentName,
     currentUserName,
     roomSummary,
+    roomMemories: roomMems,
     allUsersMemories,
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);

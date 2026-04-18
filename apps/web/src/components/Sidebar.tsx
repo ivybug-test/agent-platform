@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useSession, signOut } from "next-auth/react";
 import FriendsPanel from "./FriendsPanel";
 import AnnouncementPanel from "./AnnouncementPanel";
+import RoomSettings from "./RoomSettings";
 
 interface Room {
   id: string;
@@ -33,6 +34,7 @@ export default function Sidebar({
   const [showFriends, setShowFriends] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [menuRoomId, setMenuRoomId] = useState<string | null>(null);
+  const [settingsRoom, setSettingsRoom] = useState<Room | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
 
   // Check admin status on load
@@ -144,6 +146,17 @@ export default function Sidebar({
                       </button>
                     </li>
                     <li>
+                      <button
+                        onClick={() => {
+                          setSettingsRoom(room);
+                          setMenuRoomId(null);
+                        }}
+                        className="text-xs rounded-md"
+                      >
+                        房间共享事实
+                      </button>
+                    </li>
+                    <li>
                       <button onClick={() => archiveRoom(room.id)} className="text-xs rounded-md">
                         归档
                       </button>
@@ -211,6 +224,13 @@ export default function Sidebar({
         </div>
       )}
       {showFriends && <FriendsPanel onClose={() => setShowFriends(false)} />}
+      {settingsRoom && (
+        <RoomSettings
+          roomId={settingsRoom.id}
+          roomName={settingsRoom.name}
+          onClose={() => setSettingsRoom(null)}
+        />
+      )}
     </div>
   );
 }
