@@ -1,12 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { RECENT_COMMITS, type CommitInfo } from "@/lib/build-info.generated";
 
-interface Commit {
-  sha: string;
-  subject: string;
-  date: string;
-}
+type Commit = CommitInfo;
 
 interface UpdatesResp {
   commits: Commit[];
@@ -17,14 +14,10 @@ interface UpdatesResp {
 
 const BANNER_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000; // auto-hide after 3 days
 
-// Baked at build time. Used only as an early hint so the banner can hide
-// before the API round-trip when commits are already stale.
-const rawBaked = process.env.NEXT_PUBLIC_RECENT_COMMITS || "[]";
-let BAKED: Commit[] = [];
-try {
-  const parsed = JSON.parse(rawBaked);
-  if (Array.isArray(parsed)) BAKED = parsed;
-} catch {}
+// Build-time baked list. Imported directly so it's bundle-inlined on both
+// client and server. Used as an early hint so the banner can hide before
+// the API round-trip when commits are already stale.
+const BAKED = RECENT_COMMITS;
 
 function timeAgo(iso: string): string {
   const t = new Date(iso).getTime();

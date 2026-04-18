@@ -2,14 +2,11 @@ import "@/lib/env";
 import { getRequiredUser } from "@/lib/session";
 import { getRedisClient } from "@/lib/redis";
 import { createLogger } from "@agent-platform/logger";
+import { RECENT_COMMITS, type CommitInfo } from "@/lib/build-info.generated";
 
 const log = createLogger("web");
 
-interface Commit {
-  sha: string;
-  subject: string;
-  date: string;
-}
+type Commit = CommitInfo;
 
 const AGENT_RUNTIME_URL = process.env.AGENT_RUNTIME_URL!;
 const BANNER_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
@@ -28,16 +25,10 @@ export async function GET() {
   const user = await getRequiredUser();
   if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const raw = process.env.NEXT_PUBLIC_RECENT_COMMITS || "[]";
-  let commits: Commit[] = [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) commits = parsed;
-  } catch {
-    return Response.json({ commits: [], summary: "" });
-  }
+  const commits: Commit[] = RECENT_COMMITS;
 
   if (commits.length === 0) {
+    log.info({ userId: user.id }, "updates.no-baked-commits");
     return Response.json({ commits: [], summary: "" });
   }
 
@@ -53,11 +44,17 @@ export async function GET() {
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
+      log.info({ userId: user.id, cacheKey }, "updates.cache-hit");
       return Response.json({ commits, summary: cached, fromCache: true });
     }
   } catch (err) {
     log.warn({ err }, "updates.cache-read-failed");
   }
+
+  log.info(
+    { userId: user.id, cacheKey, commitCount: commits.length },
+    "updates.cache-miss"
+  );
 
   const userPrompt = commits
     .map((c, i) => `${i + 1}. ${c.subject}`)
@@ -82,6 +79,7 @@ export async function GET() {
     if (summary) {
       try {
         await redis.set(cacheKey, summary, "EX", CACHE_TTL_SECONDS);
+        log.info({ cacheKey, length: summary.length }, "updates.cached");
       } catch (err) {
         log.warn({ err }, "updates.cache-write-failed");
       }
