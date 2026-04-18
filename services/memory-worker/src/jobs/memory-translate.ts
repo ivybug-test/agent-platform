@@ -92,15 +92,26 @@ export async function processMemoryTranslate(
   let translated = 0;
   let failed = 0;
 
+  const totalBatches = Math.ceil(targets.length / BATCH_SIZE);
+  console.log(
+    `    translate: ${targets.length} English memories in ${totalBatches} batch(es)`
+  );
+
   for (let i = 0; i < targets.length; i += BATCH_SIZE) {
     const batch = targets.slice(i, i + BATCH_SIZE);
+    const batchNo = Math.floor(i / BATCH_SIZE) + 1;
     const prompt = batch.map((m, idx) => `${idx + 1}. ${m.content}`).join("\n");
+    const startedAt = Date.now();
+    process.stdout.write(
+      `    translate batch ${batchNo}/${totalBatches}... `
+    );
 
     try {
       const result = await llmCompleteJSON<{ translations?: unknown[] }>(
         TRANSLATE_SYSTEM_PROMPT,
         prompt
       );
+      console.log(`${Date.now() - startedAt}ms`);
       const outputs = Array.isArray(result.translations)
         ? result.translations
         : [];
@@ -139,7 +150,10 @@ export async function processMemoryTranslate(
           if (updated.length > 0) translated++;
         }
       });
-    } catch (err) {
+    } catch (err: any) {
+      console.log(
+        `FAILED (${Date.now() - startedAt}ms): ${err?.message || "unknown"}`
+      );
       log.error({ userId, err }, "memory-translate.batch-failed");
       failed += batch.length;
     }

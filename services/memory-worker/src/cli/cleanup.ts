@@ -19,21 +19,28 @@ import { config } from "dotenv";
 import { resolve } from "path";
 config({ path: resolve(process.cwd(), "../../.env") });
 
-import { db, userMemories, sql as rawSql } from "@agent-platform/db";
-import { isNull } from "drizzle-orm";
+import { db, userMemories } from "@agent-platform/db";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { processMemoryTranslate } from "../jobs/memory-translate.js";
 import { processMemoryDedup } from "../jobs/memory-dedup.js";
 
 const MAX_DEDUP_PASSES = 50; // safety — should converge well before this
 
 async function cleanupUser(userId: string): Promise<void> {
-  console.log(`\n=== user ${userId} ===`);
+  const activeBefore = await db
+    .select({ n: sql<number>`count(*)`.mapWith(Number) })
+    .from(userMemories)
+    .where(and(eq(userMemories.userId, userId), isNull(userMemories.deletedAt)));
+  const startedAt = Date.now();
+  console.log(
+    `\n=== user ${userId} (active=${activeBefore[0]?.n ?? 0}) ===`
+  );
 
   // Step 1: translate English → Chinese (if user is Chinese)
   try {
     const tr = await processMemoryTranslate({ userId });
     console.log(
-      `  translate: lang=${tr.userLang} targets=${tr.targetCount} translated=${tr.translated} failed=${tr.failed}`
+      `  translate result: lang=${tr.userLang} targets=${tr.targetCount} translated=${tr.translated} failed=${tr.failed}`
     );
   } catch (err) {
     console.error(`  translate FAILED:`, err);
@@ -63,8 +70,15 @@ async function cleanupUser(userId: string): Promise<void> {
       break;
     }
   }
+  const activeAfter = await db
+    .select({ n: sql<number>`count(*)`.mapWith(Number) })
+    .from(userMemories)
+    .where(and(eq(userMemories.userId, userId), isNull(userMemories.deletedAt)));
   console.log(
     `  dedup summary: passes=${pass} merged=${totalMerged} autoDeleted=${totalAutoDeleted}`
+  );
+  console.log(
+    `  user done: ${activeBefore[0]?.n ?? 0} → ${activeAfter[0]?.n ?? 0} active · ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
   );
 }
 

@@ -2,11 +2,15 @@ import OpenAI from "openai";
 
 let _client: OpenAI | null = null;
 
+const DEFAULT_TIMEOUT_MS = 90_000; // per-request timeout — hung DeepSeek won't stall cleanup
+
 function getClient(): OpenAI {
   if (!_client) {
     _client = new OpenAI({
       apiKey: process.env.LLM_API_KEY,
       baseURL: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
+      timeout: DEFAULT_TIMEOUT_MS,
+      maxRetries: 1,
     });
   }
   return _client;

@@ -165,13 +165,21 @@ export async function processMemoryDedup(
           `Pair ${p.pairIndex} (similarity=${p.sim.toFixed(2)}):\n  A (id=${p.a.id}): ${p.a.content}\n  B (id=${p.b.id}): ${p.b.content}`
       )
       .join("\n\n");
+    const startedAt = Date.now();
+    process.stdout.write(
+      `    dedup: asking LLM on ${toAsk.length} pair(s)... `
+    );
     try {
       const res = await llmCompleteJSON<{ decisions?: Decision[] }>(
         DEDUP_SYSTEM_PROMPT,
         `Evaluate the following ${toAsk.length} candidate pair(s):\n\n${payload}`
       );
+      console.log(`${Date.now() - startedAt}ms`);
       decisions = Array.isArray(res.decisions) ? res.decisions : [];
-    } catch (err) {
+    } catch (err: any) {
+      console.log(
+        `FAILED (${Date.now() - startedAt}ms): ${err?.message || "unknown"}`
+      );
       log.error({ userId, err }, "memory-dedup.llm-error");
     }
   }
