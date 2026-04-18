@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
+    "sha": "96474d6",
+    "subject": "Move version-update notice from fixed banner to sidebar announcement",
+    "date": "2026-04-18T08:51:52+08:00"
+  },
+  {
     "sha": "d020b0d",
     "subject": "Make /api/updates public so the banner reaches anonymous visitors",
-    "date": "2026-04-18 08:44:50 +0800"
+    "date": "2026-04-18T08:44:50+08:00"
   },
   {
     "sha": "52dd111",
     "subject": "Fix banner: bake commits into a TS module instead of NEXT_PUBLIC env",
-    "date": "2026-04-18 08:05:51 +0800"
-  },
-  {
-    "sha": "34ddc1f",
-    "subject": "Summarize recent commits in the banner and cache the result per SHA list",
-    "date": "2026-04-18 07:59:12 +0800"
+    "date": "2026-04-18T08:05:51+08:00"
   }
 ];

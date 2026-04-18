@@ -12,8 +12,10 @@ interface CommitInfo {
 function gitRecent(n: number): CommitInfo[] {
   try {
     // \x1f = unit separator (between fields); \x1e = record separator (between commits)
+    // %cI = strict ISO 8601 (with T separator). %ci uses a space and
+    // Safari/some mobile browsers treat the result as Invalid Date.
     const out = execSync(
-      `git log -${n} --format=%h%x1f%s%x1f%ci%x1e`,
+      `git log -${n} --format=%h%x1f%s%x1f%cI%x1e`,
       { stdio: ["ignore", "pipe", "ignore"] }
     ).toString();
     return out
