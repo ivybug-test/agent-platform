@@ -1,5 +1,4 @@
 import "@/lib/env";
-import { getRequiredUser } from "@/lib/session";
 import { getRedisClient } from "@/lib/redis";
 import { createLogger } from "@agent-platform/logger";
 import { RECENT_COMMITS, type CommitInfo } from "@/lib/build-info.generated";
@@ -22,13 +21,13 @@ const SUMMARY_SYSTEM_PROMPT = `你是产品更新说明撰写助手,面向普通
 - 整个摘要不超过 100 字`;
 
 export async function GET() {
-  const user = await getRequiredUser();
-  if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
-
+  // Public endpoint: the cache key includes all commit shas, so a cold cache
+  // triggers at most one LLM summarization per deployment, regardless of
+  // how many visitors hit it. Anonymous traffic can't amplify LLM cost.
   const commits: Commit[] = RECENT_COMMITS;
 
   if (commits.length === 0) {
-    log.info({ userId: user.id }, "updates.no-baked-commits");
+    log.info({}, "updates.no-baked-commits");
     return Response.json({ commits: [], summary: "" });
   }
 
@@ -44,7 +43,7 @@ export async function GET() {
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
-      log.info({ userId: user.id, cacheKey }, "updates.cache-hit");
+      log.info({ cacheKey }, "updates.cache-hit");
       return Response.json({ commits, summary: cached, fromCache: true });
     }
   } catch (err) {
@@ -52,7 +51,7 @@ export async function GET() {
   }
 
   log.info(
-    { userId: user.id, cacheKey, commitCount: commits.length },
+    { cacheKey, commitCount: commits.length },
     "updates.cache-miss"
   );
 

@@ -9,6 +9,11 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
+    "sha": "52dd111",
+    "subject": "Fix banner: bake commits into a TS module instead of NEXT_PUBLIC env",
+    "date": "2026-04-18 08:05:51 +0800"
+  },
+  {
     "sha": "34ddc1f",
     "subject": "Summarize recent commits in the banner and cache the result per SHA list",
     "date": "2026-04-18 07:59:12 +0800"
@@ -17,10 +22,5 @@ export const RECENT_COMMITS: CommitInfo[] = [
     "sha": "bfc10cc",
     "subject": "Stop extractor from creating duplicate English memories",
     "date": "2026-04-18 07:51:49 +0800"
-  },
-  {
-    "sha": "02810b8",
-    "subject": "Localize UI to Chinese and add a deployment-version banner",
-    "date": "2026-04-18 02:05:28 +0800"
   }
 ];
