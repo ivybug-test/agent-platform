@@ -1,5 +1,6 @@
 import { db, messages, roomMembers, users, roomSummaries, userMemories } from "@agent-platform/db";
 import { eq, and, inArray, desc, ne, isNull, or } from "drizzle-orm";
+import { visibleToSubject } from "@/lib/memory-filters";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("web");
@@ -74,7 +75,7 @@ export async function getUserMemories(
       category: userMemories.category,
     })
     .from(userMemories)
-    .where(and(eq(userMemories.userId, userId), isNull(userMemories.deletedAt)))
+    .where(and(eq(userMemories.userId, userId), visibleToSubject()))
     .orderBy(desc(userMemories.importance), desc(userMemories.updatedAt))
     .limit(30);
   return rows;
@@ -105,6 +106,9 @@ export async function getRoomUsersMemories(
   // memories. Everything else is retrievable on-demand through the search_memories
   // tool so the prompt stays lean while the agent can still pull details when
   // they matter.
+  //
+  // Multi-user (Phase 2): visibleToSubject() filters out both tombstones and
+  // unconfirmed third-party writes.
   const allMemories = await db
     .select({
       userId: userMemories.userId,
@@ -115,7 +119,7 @@ export async function getRoomUsersMemories(
     .where(
       and(
         inArray(userMemories.userId, memberIds),
-        isNull(userMemories.deletedAt),
+        visibleToSubject(),
         or(
           eq(userMemories.category, "identity"),
           eq(userMemories.importance, "high")
@@ -207,10 +211,11 @@ export function buildSystemPrompt(opts: {
 
 LANGUAGE: When writing memory content (via remember / update_memory), write in the SAME LANGUAGE the user is using in the conversation. If the user writes in Chinese, store the fact in Chinese (e.g. "喜欢吃辣"). Do NOT translate.
 
-MEMORY WRITING RULES IN GROUP CONVERSATIONS (STRICT):
-- You MUST only call remember / update_memory / forget_memory for the current speaker (${opts.currentUserName}). Never for another room member.
-- If ${opts.currentUserName} describes another person (e.g. "B likes sweets" or "帮我记住 Bob 喜欢甜食"), DO NOT call any memory tool. You may acknowledge the information in your reply, but memory-writing for that other person has to wait until they themselves speak in the room.
-- search_memories is already scoped to the current speaker. Do not attempt to query other members' memories — the tool will return nothing useful.
+MEMORY WRITING IN GROUP CONVERSATIONS:
+- The default subject of remember / update_memory / forget_memory is the current speaker (${opts.currentUserName}).
+- If you decide a fact is genuinely about another room member and worth storing across sessions, call remember with subjectName set to that member's name. The write lands in a pending queue; the subject will see it in their /memories "待确认" tab and can accept or reject it. Prefer NOT doing this unless the fact is both specific and clearly useful — casual descriptions of others should just be acknowledged in your reply.
+- update_memory and forget_memory can only touch the current speaker's own memories (rows the tool returns as editable). Don't try to edit other members' rows.
+- search_memories is already scoped to the current speaker. Other members' memories are not retrievable here.
 
 Prefer not calling a tool if your current context is already sufficient.`;
 

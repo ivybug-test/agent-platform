@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { db, userMemories } from "@agent-platform/db";
 import { and, eq, isNull } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
+import { visibleToSubject } from "@/lib/memory-filters";
 
 const VALID_CATEGORIES = [
   "identity",
@@ -57,6 +58,9 @@ export async function PATCH(
     return Response.json({ error: "nothing to update" }, { status: 400 });
   }
 
+  // PATCH only applies to rows already visible to the subject; pending
+  // third-party rows must be confirmed (POST /:id/confirm) or rejected
+  // (DELETE) first — not silently edited as if the subject had agreed.
   const [row] = await db
     .update(userMemories)
     .set({
@@ -69,7 +73,7 @@ export async function PATCH(
       and(
         eq(userMemories.id, id),
         eq(userMemories.userId, user.id),
-        isNull(userMemories.deletedAt)
+        visibleToSubject()
       )
     )
     .returning();

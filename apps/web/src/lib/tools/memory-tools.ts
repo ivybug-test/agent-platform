@@ -1,6 +1,8 @@
 import { db, userMemories, messages, users } from "@agent-platform/db";
-import { and, eq, isNull, desc, ilike, or, lt, inArray } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, desc, ilike, or, lt, inArray, ne } from "drizzle-orm";
 import type { ToolHandler } from "./index";
+import { visibleToSubject } from "@/lib/memory-filters";
+import { resolveRoomMemberByName } from "./resolvers";
 
 const VALID_CATEGORIES = [
   "identity",
@@ -70,7 +72,7 @@ const searchMemories: ToolHandler = async (args, ctx) => {
 
   const conditions = [
     eq(userMemories.userId, ctx.userId),
-    isNull(userMemories.deletedAt),
+    visibleToSubject(),
   ];
   if (category) conditions.push(eq(userMemories.category, category));
   if (query) conditions.push(ilike(userMemories.content, `%${esc(query)}%`));
@@ -171,6 +173,8 @@ const remember: ToolHandler = async (args, ctx) => {
   const content = typeof args?.content === "string" ? args.content.trim() : "";
   const category = args?.category as Category;
   const importance = (args?.importance as Importance) || "medium";
+  const subjectName =
+    typeof args?.subjectName === "string" ? args.subjectName.trim() : "";
 
   if (!content) return { error: "content required" };
   if (!VALID_CATEGORIES.includes(category)) {
@@ -180,7 +184,23 @@ const remember: ToolHandler = async (args, ctx) => {
     return { error: "invalid importance" };
   }
 
-  // Scan existing active memories for near duplicates
+  // Resolve subject: default to the speaker, otherwise look up the named
+  // room member.
+  let subjectUserId = ctx.userId;
+  const isThirdParty = subjectName.length > 0;
+  if (isThirdParty) {
+    const resolved = await resolveRoomMemberByName(ctx.roomId, subjectName);
+    if (!resolved) {
+      return {
+        error: `no unique room member matches subjectName "${subjectName}"`,
+      };
+    }
+    subjectUserId = resolved;
+  }
+
+  // Near-dup guard: compare against the SUBJECT's existing active memories
+  // (including unconfirmed-but-same-author rows so a speaker can't queue the
+  // same pending fact twice). Deleted rows are still excluded.
   const existing = await db
     .select({
       id: userMemories.id,
@@ -190,7 +210,7 @@ const remember: ToolHandler = async (args, ctx) => {
     .from(userMemories)
     .where(
       and(
-        eq(userMemories.userId, ctx.userId),
+        eq(userMemories.userId, subjectUserId),
         isNull(userMemories.deletedAt)
       )
     );
@@ -212,15 +232,19 @@ const remember: ToolHandler = async (args, ctx) => {
     };
   }
 
+  // Third-party writes land pending (confirmed_at NULL + authored_by != user_id).
+  // Self-writes land auto-confirmed (authored_by NULL).
   const [row] = await db
     .insert(userMemories)
     .values({
-      userId: ctx.userId,
+      userId: subjectUserId,
       content,
       category,
       importance,
       source: "extracted",
       sourceRoomId: ctx.roomId,
+      authoredByUserId: isThirdParty ? ctx.userId : null,
+      confirmedAt: isThirdParty ? null : null,
     })
     .returning({
       id: userMemories.id,
@@ -229,6 +253,14 @@ const remember: ToolHandler = async (args, ctx) => {
       importance: userMemories.importance,
     });
 
+  if (isThirdParty) {
+    return {
+      ok: true,
+      pending: true,
+      note: `Saved as pending for ${subjectName}. They'll see it in their /memories "待确认" tab and can accept or reject.`,
+      memory: row,
+    };
+  }
   return { ok: true, memory: row };
 };
 
@@ -267,6 +299,9 @@ const updateMemory: ToolHandler = async (args, ctx) => {
     return { error: "nothing to update" };
   }
 
+  // Tools can only edit rows that are already visible to the subject —
+  // pending third-party rows must be confirmed (or rejected) first, not
+  // silently edited through this path.
   const [row] = await db
     .update(userMemories)
     .set({
@@ -279,7 +314,7 @@ const updateMemory: ToolHandler = async (args, ctx) => {
       and(
         eq(userMemories.id, memoryId),
         eq(userMemories.userId, ctx.userId),
-        isNull(userMemories.deletedAt)
+        visibleToSubject()
       )
     )
     .returning({
@@ -313,13 +348,44 @@ const forgetMemory: ToolHandler = async (args, ctx) => {
       and(
         eq(userMemories.id, memoryId),
         eq(userMemories.userId, ctx.userId),
-        isNull(userMemories.deletedAt)
+        visibleToSubject()
       )
     )
     .returning({ id: userMemories.id });
 
   if (!row) return { error: "memory not found" };
   return { ok: true };
+};
+
+// -----------------------------------------------------------------------------
+// confirm_memory — subject accepts a pending third-party write
+// -----------------------------------------------------------------------------
+
+const confirmMemory: ToolHandler = async (args, ctx) => {
+  const memoryId =
+    typeof args?.memoryId === "string" ? args.memoryId.trim() : "";
+  if (!memoryId) return { error: "memoryId required" };
+
+  const [row] = await db
+    .update(userMemories)
+    .set({ confirmedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(userMemories.id, memoryId),
+        eq(userMemories.userId, ctx.userId),
+        isNull(userMemories.deletedAt),
+        isNotNull(userMemories.authoredByUserId),
+        ne(userMemories.authoredByUserId, userMemories.userId),
+        isNull(userMemories.confirmedAt)
+      )
+    )
+    .returning({
+      id: userMemories.id,
+      content: userMemories.content,
+    });
+
+  if (!row) return { error: "pending memory not found" };
+  return { ok: true, memory: row };
 };
 
 // -----------------------------------------------------------------------------
@@ -332,6 +398,7 @@ export const memoryToolHandlers: Record<string, ToolHandler> = {
   remember,
   update_memory: updateMemory,
   forget_memory: forgetMemory,
+  confirm_memory: confirmMemory,
 };
 
 // OpenAI-shaped tool definitions — passed to agent-runtime in the /chat body.
@@ -395,11 +462,16 @@ export const memoryToolDefs = [
     function: {
       name: "remember",
       description:
-        "Store a new long-term fact about the current user. The tool checks for near-duplicates and will skip creation if a similar memory already exists. Use only for facts worth remembering across sessions (identity, preference, relationship, event, opinion, context).",
+        "Store a new long-term fact. Default subject is the current speaker; pass subjectName to record a fact about another room member (such writes land pending until the subject accepts them in their /memories tab). Near-duplicates of the subject's existing active memories are skipped.",
       parameters: {
         type: "object",
         required: ["content", "category", "importance"],
         properties: {
+          subjectName: {
+            type: "string",
+            description:
+              "Optional. The display name of another room member this fact is about. Omit to save against the current speaker. Use sparingly — the other user will need to accept or reject the pending entry.",
+          },
           content: {
             type: "string",
             description:
@@ -450,6 +522,21 @@ export const memoryToolDefs = [
             type: "string",
             description: "Optional reason for logging.",
           },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "confirm_memory",
+      description:
+        "Accept a pending third-party memory as true. Only works on rows authored by someone other than the current speaker that haven't been confirmed yet. Call this when the current speaker says something like '对,没错' / 'yes that's correct' in response to a fact the agent read out from their 待确认 queue.",
+      parameters: {
+        type: "object",
+        required: ["memoryId"],
+        properties: {
+          memoryId: { type: "string" },
         },
       },
     },

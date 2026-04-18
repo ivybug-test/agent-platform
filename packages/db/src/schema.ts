@@ -129,6 +129,18 @@ export const memorySourceEnum = pgEnum("memory_source", [
 ]);
 
 // User memories
+// NOTE on the multi-user model (Phase 2):
+//   user_id           = the SUBJECT (what/who the fact is about; the owner).
+//   authored_by_user_id = who wrote this row.
+//     NULL                  → self-authored or extracted from subject's own
+//                              messages. Treated as auto-confirmed.
+//     equals user_id        → explicit self-write. Same semantics as NULL.
+//     != user_id            → a third party wrote this about the subject.
+//                              Becomes "pending" until the subject accepts it.
+//   confirmed_at      = when the subject accepted a third-party write.
+//     NULL on third-party rows = pending; hide from pinned + tool reads.
+// Use `visibleToSubject` in apps/web/src/lib/memory-filters.ts everywhere
+// memories are read so the filter stays consistent.
 export const userMemories = pgTable("user_memories", {
   id: uuid("id").defaultRandom().primaryKey(),
   userId: uuid("user_id")
@@ -139,6 +151,8 @@ export const userMemories = pgTable("user_memories", {
   importance: memoryImportanceEnum("importance").notNull().default("medium"),
   source: memorySourceEnum("source").notNull().default("extracted"),
   sourceRoomId: uuid("source_room_id").references(() => rooms.id),
+  authoredByUserId: uuid("authored_by_user_id").references(() => users.id),
+  confirmedAt: timestamp("confirmed_at"),
   lastReinforcedAt: timestamp("last_reinforced_at"),
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),

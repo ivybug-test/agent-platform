@@ -42,6 +42,7 @@ RULES:
 HARD CONSTRAINTS (violating these will be rejected):
 - FORGOTTEN FACTS: The user has explicitly asked to forget some facts. They are listed under "Forgotten facts". NEVER re-create any fact that is semantically similar to a forgotten one, even if the conversation mentions it again. If unsure, skip.
 - LOCKED MEMORIES: Memories marked [LOCKED] were set or confirmed by the user directly. You MUST NOT output UPDATE or DELETE actions for locked memory ids. You may output CREATE for genuinely new facts that do not conflict.
+- PENDING MEMORIES: Memories marked [PENDING] were written by someone else about this user and are waiting for the user's confirmation. Treat them exactly like active memories for dedup purposes: if a new message would just restate a pending fact, SKIP (do not emit a duplicate CREATE). You MUST NOT output UPDATE or DELETE actions for pending memory ids either — the subject has to confirm or reject them through the UI.
 
 OUTPUT FORMAT (strict JSON):
 {
@@ -119,7 +120,10 @@ export async function processUserMemory(data: UserMemoryData) {
     return;
   }
 
-  // Get ALL active memories (tombstones loaded separately below)
+  // Get ALL active memories (tombstones loaded separately below). This
+  // includes both confirmed rows (what the agent sees today) AND pending
+  // third-party rows — we DON'T want the extractor to output a CREATE that
+  // would just duplicate a pending fact still awaiting confirmation.
   const activeMemories = await db
     .select()
     .from(userMemories)
@@ -135,8 +139,22 @@ export async function processUserMemory(data: UserMemoryData) {
   const lockedIds = new Set(
     activeMemories.filter((m) => m.source === "user_explicit").map((m) => m.id)
   );
+  const pendingIds = new Set(
+    activeMemories
+      .filter(
+        (m) =>
+          m.authoredByUserId !== null &&
+          m.authoredByUserId !== m.userId &&
+          m.confirmedAt === null
+      )
+      .map((m) => m.id)
+  );
 
-  const categorized = formatMemoriesByCategory(activeMemories, lockedIds);
+  const categorized = formatMemoriesByCategory(
+    activeMemories,
+    lockedIds,
+    pendingIds
+  );
   const tombstoneText =
     tombstones.length > 0
       ? tombstones.map((t) => `- ${t.content}`).join("\n")
@@ -225,6 +243,11 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
             rejected++;
             continue;
           }
+          if (pendingIds.has(a.memoryId)) {
+            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-update-on-pending");
+            rejected++;
+            continue;
+          }
           await tx
             .update(userMemories)
             .set({
@@ -244,6 +267,11 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
         } else if (a.action === "delete" && a.memoryId) {
           if (lockedIds.has(a.memoryId)) {
             log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-delete-on-locked");
+            rejected++;
+            continue;
+          }
+          if (pendingIds.has(a.memoryId)) {
+            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-delete-on-pending");
             rejected++;
             continue;
           }
@@ -274,12 +302,21 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
 
 function formatMemoriesByCategory(
   memories: { id: string; content: string; category: string }[],
-  lockedIds: Set<string>
+  lockedIds: Set<string>,
+  pendingIds: Set<string>
 ): string {
-  const groups = new Map<string, { id: string; content: string; locked: boolean }[]>();
+  const groups = new Map<
+    string,
+    { id: string; content: string; locked: boolean; pending: boolean }[]
+  >();
   for (const m of memories) {
     const list = groups.get(m.category) || [];
-    list.push({ id: m.id, content: m.content, locked: lockedIds.has(m.id) });
+    list.push({
+      id: m.id,
+      content: m.content,
+      locked: lockedIds.has(m.id),
+      pending: pendingIds.has(m.id),
+    });
     groups.set(m.category, list);
   }
 
@@ -291,10 +328,15 @@ function formatMemoriesByCategory(
     if (items && items.length > 0) {
       sections.push(
         `[${cat}]\n${items
-          .map(
-            (m) =>
-              `- ${m.locked ? "[LOCKED] " : ""}(id: ${m.id}) ${m.content}`
-          )
+          .map((m) => {
+            const tags = [
+              m.locked ? "[LOCKED]" : "",
+              m.pending ? "[PENDING]" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return `- ${tags ? tags + " " : ""}(id: ${m.id}) ${m.content}`;
+          })
           .join("\n")}`
       );
     }
