@@ -36,9 +36,14 @@ async function cleanupUser(userId: string): Promise<void> {
     `\n=== user ${userId} (active=${activeBefore[0]?.n ?? 0}) ===`
   );
 
-  // Step 1: translate English → Chinese (if user is Chinese)
+  // Step 1: translate English → Chinese. Force target=Chinese so admin-style
+  // users whose typed messages are mostly English still get their extracted
+  // memories translated (the language-auto-detect would otherwise skip them).
   try {
-    const tr = await processMemoryTranslate({ userId });
+    const tr = await processMemoryTranslate({
+      userId,
+      forceLanguage: "Chinese",
+    });
     console.log(
       `  translate result: lang=${tr.userLang} targets=${tr.targetCount} translated=${tr.translated} failed=${tr.failed}`
     );

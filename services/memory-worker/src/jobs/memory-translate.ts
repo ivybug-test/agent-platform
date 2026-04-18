@@ -10,6 +10,14 @@ const RECENT_MESSAGE_SAMPLE = 20;
 
 interface MemoryTranslateData {
   userId: string;
+  /**
+   * Force the translation target language. When omitted the job auto-detects
+   * from the user's recent messages (>30% CJK = Chinese). Pass "Chinese"
+   * explicitly from the bulk cleanup CLI so admin-style users whose typed
+   * messages are mostly English still get their extracted memories
+   * translated.
+   */
+  forceLanguage?: "Chinese";
 }
 
 export interface TranslateResult {
@@ -47,26 +55,35 @@ The translations array MUST have exactly the same length as the input list and b
 export async function processMemoryTranslate(
   data: MemoryTranslateData
 ): Promise<TranslateResult> {
-  const { userId } = data;
+  const { userId, forceLanguage } = data;
 
-  const recentMsgs = await db
-    .select({ content: messages.content })
-    .from(messages)
-    .where(and(eq(messages.senderId, userId), eq(messages.senderType, "user")))
-    .orderBy(desc(messages.createdAt))
-    .limit(RECENT_MESSAGE_SAMPLE);
+  let userLang: "Chinese" | "English" | "forced-Chinese" = "English";
+  if (forceLanguage === "Chinese") {
+    userLang = "forced-Chinese";
+  } else {
+    const recentMsgs = await db
+      .select({ content: messages.content })
+      .from(messages)
+      .where(
+        and(eq(messages.senderId, userId), eq(messages.senderType, "user"))
+      )
+      .orderBy(desc(messages.createdAt))
+      .limit(RECENT_MESSAGE_SAMPLE);
 
-  if (recentMsgs.length === 0) {
-    log.info({ userId }, "memory-translate.no-recent-messages");
-    return { userLang: "unknown", activeCount: 0, targetCount: 0, translated: 0, failed: 0 };
-  }
+    if (recentMsgs.length === 0) {
+      log.info({ userId }, "memory-translate.no-recent-messages");
+      return { userLang: "unknown", activeCount: 0, targetCount: 0, translated: 0, failed: 0 };
+    }
 
-  const userLang = detectLanguage(recentMsgs.map((m) => m.content).join("\n"));
-  if (userLang !== "Chinese") {
-    // Only handle the Chinese-user case for now; English-user memories are
-    // already fine.
-    log.info({ userId, userLang }, "memory-translate.skip-non-chinese-user");
-    return { userLang, activeCount: 0, targetCount: 0, translated: 0, failed: 0 };
+    const detected = detectLanguage(
+      recentMsgs.map((m) => m.content).join("\n")
+    );
+    if (detected !== "Chinese") {
+      // Auto-detect said English; skip unless caller forced Chinese.
+      log.info({ userId, userLang: detected }, "memory-translate.skip-non-chinese-user");
+      return { userLang: detected, activeCount: 0, targetCount: 0, translated: 0, failed: 0 };
+    }
+    userLang = detected;
   }
 
   const active = await db

@@ -52,8 +52,18 @@ export async function llmCompleteJSON<T = unknown>(
     ],
     temperature: 0.2,
     response_format: { type: "json_object" },
+    // DeepSeek and most providers default output to 4096 tokens, which
+    // gets clipped on large dedup batches and breaks JSON.parse. Push to
+    // 8192 so a full batch's output can finish.
+    max_tokens: 8192,
   });
 
-  const text = res.choices[0]?.message?.content || "{}";
+  const choice = res.choices[0];
+  const text = choice?.message?.content || "{}";
+  if (choice?.finish_reason === "length") {
+    throw new Error(
+      "LLM output hit max_tokens (finish_reason=length); the JSON is truncated. Reduce batch size."
+    );
+  }
   return JSON.parse(text);
 }
