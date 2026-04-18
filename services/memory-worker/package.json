@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "cleanup": "tsx src/cli/cleanup.ts"
   },
   "dependencies": {
     "@agent-platform/db": "workspace:*",

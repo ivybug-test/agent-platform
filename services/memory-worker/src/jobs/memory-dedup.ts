@@ -7,10 +7,19 @@ import type { Queue } from "bullmq";
 const log = createLogger("memory-worker");
 
 const CANDIDATE_THRESHOLD = 0.35; // pair survives to LLM if bigram-Jaccard ≥ this
-const MAX_PAIRS_PER_USER = 20; // hard cap on LLM payload per dedup run
+const MAX_PAIRS_PER_USER = 50; // hard cap on LLM payload per dedup run
 
 interface MemoryDedupData {
   userId: string;
+}
+
+export interface DedupResult {
+  totalRows: number;
+  candidatePairs: number;
+  askedLLM: number;
+  merged: number;
+  autoDeleted: number;
+  rejected: number;
 }
 
 interface MemoryRow {
@@ -63,7 +72,9 @@ function textSimilarity(a: string, b: string): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-export async function processMemoryDedup(data: MemoryDedupData) {
+export async function processMemoryDedup(
+  data: MemoryDedupData
+): Promise<DedupResult> {
   const { userId } = data;
 
   const rows: MemoryRow[] = await db
@@ -82,7 +93,14 @@ export async function processMemoryDedup(data: MemoryDedupData) {
 
   if (rows.length < 2) {
     log.info({ userId, rowCount: rows.length }, "memory-dedup.skip-sparse");
-    return;
+    return {
+      totalRows: rows.length,
+      candidatePairs: 0,
+      askedLLM: 0,
+      merged: 0,
+      autoDeleted: 0,
+      rejected: 0,
+    };
   }
 
   // Find candidate pairs
@@ -98,7 +116,14 @@ export async function processMemoryDedup(data: MemoryDedupData) {
 
   if (candidates.length === 0) {
     log.info({ userId, totalRows: rows.length }, "memory-dedup.no-candidates");
-    return;
+    return {
+      totalRows: rows.length,
+      candidatePairs: 0,
+      askedLLM: 0,
+      merged: 0,
+      autoDeleted: 0,
+      rejected: 0,
+    };
   }
 
   candidates.sort((x, y) => y.sim - x.sim);
@@ -231,6 +256,15 @@ export async function processMemoryDedup(data: MemoryDedupData) {
     },
     "memory-dedup.result"
   );
+
+  return {
+    totalRows: rows.length,
+    candidatePairs: candidates.length,
+    askedLLM: toAsk.length,
+    merged,
+    autoDeleted,
+    rejected,
+  };
 }
 
 /**
