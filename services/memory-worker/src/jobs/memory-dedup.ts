@@ -7,7 +7,7 @@ import type { Queue } from "bullmq";
 const log = createLogger("memory-worker");
 
 const CANDIDATE_THRESHOLD = 0.35; // pair survives to LLM if bigram-Jaccard ≥ this
-const MAX_PAIRS_PER_USER = 25; // hard cap on LLM payload per dedup run — kept conservative so response JSON fits in 8192 output tokens
+const MAX_PAIRS_PER_USER = 10; // hard cap per LLM round — small so each call returns in <30s even on DeepSeek
 
 interface MemoryDedupData {
   userId: string;
