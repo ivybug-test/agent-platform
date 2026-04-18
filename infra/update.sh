@@ -24,14 +24,21 @@ cd packages/db
 pnpm db:push
 cd ~/agent-platform
 
-# Apply raw-SQL migrations that db:push can't express (extensions, trigram indexes).
-# All statements are idempotent (IF NOT EXISTS), safe to re-run.
+# Apply raw-SQL migrations for things db:push can't express (extensions,
+# partial indexes, CHECK/UNIQUE constraints). All files are authored with
+# IF NOT EXISTS / DO blocks so re-running is safe.
 echo "=== Applying raw-SQL migrations (idempotent) ==="
 PG_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E 'postgres' | head -1)
 if [ -n "$PG_CONTAINER" ]; then
-  for sql in packages/db/drizzle/0003_messages_trgm_index.sql; do
-    echo "  $sql"
-    docker exec -i "$PG_CONTAINER" psql -U postgres -d agent_platform < "$sql" >/dev/null
+  for sql in \
+      packages/db/drizzle/0003_messages_trgm_index.sql \
+      packages/db/drizzle/0004_memory_authorship.sql \
+      packages/db/drizzle/0005_room_memories.sql \
+      packages/db/drizzle/0006_user_relationships.sql; do
+    if [ -f "$sql" ]; then
+      echo "  $sql"
+      docker exec -i "$PG_CONTAINER" psql -U postgres -d agent_platform < "$sql" >/dev/null
+    fi
   done
 else
   echo "  WARNING: no postgres container found; raw-SQL migrations skipped"
