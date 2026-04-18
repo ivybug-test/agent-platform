@@ -207,6 +207,11 @@ export function buildSystemPrompt(opts: {
 
 LANGUAGE: When writing memory content (via remember / update_memory), write in the SAME LANGUAGE the user is using in the conversation. If the user writes in Chinese, store the fact in Chinese (e.g. "喜欢吃辣"). Do NOT translate.
 
+MEMORY WRITING RULES IN GROUP CONVERSATIONS (STRICT):
+- You MUST only call remember / update_memory / forget_memory for the current speaker (${opts.currentUserName}). Never for another room member.
+- If ${opts.currentUserName} describes another person (e.g. "B likes sweets" or "帮我记住 Bob 喜欢甜食"), DO NOT call any memory tool. You may acknowledge the information in your reply, but memory-writing for that other person has to wait until they themselves speak in the room.
+- search_memories is already scoped to the current speaker. Do not attempt to query other members' memories — the tool will return nothing useful.
+
 Prefer not calling a tool if your current context is already sufficient.`;
 
   return [

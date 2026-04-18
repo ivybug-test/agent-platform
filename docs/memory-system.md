@@ -341,7 +341,50 @@ flowchart TD
 
 ---
 
-## 12. 关键风险与取舍
+## 12. 多用户场景的语义
+
+当前的记忆模型是按 1:1 对话设计的。把多个用户(A、B)和同一个 agent 放进一个房间时,各操作的 scope 并不一致,值得显式说明。
+
+### 12.1 当前 scope 矩阵
+
+| 操作 | 作用到谁的记忆 | 为什么 |
+|---|---|---|
+| **Pinned 常开注入** | **房间内全部成员** | `getRoomUsersMemories(roomId)` 查所有 user member 的 identity+high,按人分组标 "Pinned facts about {name}:" 一起塞进 prompt |
+| `search_memories` 工具 | **发话者** | JWT `sub=userId` 锁定,参数里任何身份字段都忽略 |
+| `remember` 工具 | **发话者** | 同上,写入 `ctx.userId` 的行 |
+| `update_memory` / `forget_memory` | **发话者** | 同上 |
+| `/memories` 页面 | **登录用户自己** | session 决定 |
+| worker 后台抽取 | **消息发送者** | job 参数 `{userId, roomId}`,抽那个人的最近消息产生其本人的 fact |
+
+关键不对称:**Pinned 注入是全员可见的**(agent 知道房间里都有谁、对每个人的大致印象),但**所有主动读写都是单用户**(只能操作发话者的)。
+
+### 12.2 严格 prompt 规则(当前生效)
+
+为避免 agent 被"A 说 B 喜欢甜食"这种话误导,`buildSystemPrompt` 的 tool guidance 里硬规定:
+
+```
+MEMORY WRITING RULES IN GROUP CONVERSATIONS (STRICT):
+- 只允许对发话者本人调用 remember / update_memory / forget_memory
+- 发话者描述他人时,口头确认,不碰记忆工具
+- search_memories 只能查发话者本人
+```
+
+实际效果:群聊里 A 说"记住 B 喜欢甜食"→ agent 回复"好的"但 `/api/agent/tool` 没有被调用。要真把这条 fact 存下,得等 B 自己下次发言时再说。
+
+### 12.3 这个模型的哲学含义
+
+当前 `user_memories.user_id` 同时表示 **归属方**(谁的记忆、谁能编辑)和 **主语**(事实是关于谁的)。两者永远相等是一个**简化假设**,群聊下开始不自然。
+
+演进方向(记录在案,不落地):
+- 拆出 `subject_user_id`(主语)与 `authored_by_user_id`(谁说的),并引入 subject 确认机制,使"代记"成为可能
+- 新增 `room_memories` 表承载房间级共享事实
+- 新增 `user_relationships` 表,双向确认的人际关系边
+
+落地路线和对应 schema 设计见顶层计划 `streamed-yawning-pancake` 及后续 CHANGELOG 条目。
+
+---
+
+## 13. 关键风险与取舍
 
 | 风险 | 现状 | 缓解 |
 |---|---|---|
@@ -355,7 +398,7 @@ flowchart TD
 
 ---
 
-## 13. 代码地图
+## 14. 代码地图
 
 | 模块 | 作用 |
 |---|---|
