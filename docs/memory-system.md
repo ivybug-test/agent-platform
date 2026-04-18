@@ -17,33 +17,78 @@
 
 ## 2. 数据模型
 
+### 2.1 `user_memories` — 每个"主语"(user)的长期记忆
+
 ```sql
 user_memories (
-  id                 uuid PK,
-  user_id            uuid FK users.id,
-  content            text,
-  category           memory_category,
-  importance         memory_importance,
-  source             memory_source         -- 'extracted' | 'user_explicit'
-  source_room_id     uuid FK rooms.id,
-  last_reinforced_at timestamp,
-  deleted_at         timestamp,            -- NULL = 活跃, 非 NULL = 墓碑
+  id                   uuid PK,
+  user_id              uuid FK users.id,            -- 主语/所有者(关于谁)
+  content              text,
+  category             memory_category,
+  importance           memory_importance,
+  source               memory_source,               -- 'extracted' | 'user_explicit'
+  source_room_id       uuid FK rooms.id,
+  authored_by_user_id  uuid FK users.id,            -- 写入者(NULL 或 = user_id → 自述)
+  confirmed_at         timestamp,                   -- subject 接受他人代写的时间
+  last_reinforced_at   timestamp,
+  deleted_at           timestamp,                   -- NULL = 活跃,非 NULL = 墓碑
   created_at, updated_at
 );
+-- Partial index 0004: user_memories_pending_idx
+--   WHERE deleted_at IS NULL AND authored_by_user_id IS NOT NULL AND confirmed_at IS NULL
+```
+
+### 2.2 `room_memories` — 房间级共享事实(Phase 3)
+
+```sql
+room_memories (
+  id                   uuid PK,
+  room_id              uuid FK rooms.id,
+  content              text,
+  importance           memory_importance,
+  created_by_user_id   uuid FK users.id,
+  source               memory_source,
+  deleted_at           timestamp,
+  created_at, updated_at
+);
+-- Partial index 0005: room_memories_active_idx
+--   ON (room_id, importance, updated_at DESC) WHERE deleted_at IS NULL
+```
+
+### 2.3 `user_relationships` — 双向确认的人际关系边(Phase 4)
+
+```sql
+user_relationships (
+  id                   uuid PK,
+  a_user_id            uuid FK users.id,            -- 规范序 a_user_id < b_user_id
+  b_user_id            uuid FK users.id,
+  kind                 varchar(40),                 -- spouse/family/colleague/friend/custom
+  content              text,
+  confirmed_by_a       timestamp,
+  confirmed_by_b       timestamp,
+  deleted_at           timestamp,
+  created_at, updated_at,
+  CHECK (a_user_id < b_user_id),
+  UNIQUE (a_user_id, b_user_id, kind)
+);
+-- Partial indexes 0006 on a_user_id 和 b_user_id(各自 WHERE deleted_at IS NULL)
 ```
 
 ### 枚举
 
 | 字段 | 取值 |
 |---|---|
-| `category` | `identity` / `preference` / `relationship` / `event` / `opinion` / `context` |
+| `category`(user_memories) | `identity` / `preference` / `relationship` / `event` / `opinion` / `context` |
 | `importance` | `high` / `medium` / `low` |
 | `source` | `extracted`(后台 / agent 产生,可被自动流程修改)/ `user_explicit`(用户明确意图,锁定) |
+| `kind`(user_relationships) | `spouse` / `family` / `colleague` / `friend` / `custom` |
 
-### 索引(0003 迁移)
+### 索引
 
-- `CREATE EXTENSION pg_trgm`
-- 局部 GIN 索引 `messages_content_trgm_idx ON messages USING GIN (content gin_trgm_ops) WHERE status='completed'` — 加速 `search_messages` 工具里的 ILIKE 查询。
+- `0003` — `CREATE EXTENSION pg_trgm`;GIN `messages_content_trgm_idx WHERE status='completed'` 加速消息检索
+- `0004` — user_memories "待确认" 部分索引
+- `0005` — room_memories 活跃部分索引
+- `0006` — user_relationships 两侧部分索引
 
 ---
 
@@ -341,46 +386,78 @@ flowchart TD
 
 ---
 
-## 12. 多用户场景的语义
+## 12. 多用户语义(Phase 1–4 全部落地)
 
-当前的记忆模型是按 1:1 对话设计的。把多个用户(A、B)和同一个 agent 放进一个房间时,各操作的 scope 并不一致,值得显式说明。
+多用户 + 单 agent 场景下,一条"记忆"实际有多个维度:**关于谁**(subject)、**由谁写入**(author)、**谁能看**(visibility)、**能被哪些自动流程动**(source)。当前系统把它们显式建模在三张表上。
 
-### 12.1 当前 scope 矩阵
+### 12.1 三张表,各管一件事
 
-| 操作 | 作用到谁的记忆 | 为什么 |
+| 表 | 关心什么 | 归属 | 谁能编辑 |
+|---|---|---|---|
+| `user_memories` | **关于某个用户的事实** | `user_id`(subject) | subject 本人 + 后台抽取器(受 locked/pending 限制) |
+| `room_memories` | **关于房间的事实** | `room_id` | 任一房间成员 |
+| `user_relationships` | **两个用户之间的边** | 规范序 `(a_user_id, b_user_id)` | 双方任一侧(但只有双方都 confirm 才生效) |
+
+### 12.2 权威性分级(user_memories)
+
+`authored_by_user_id` 和 `confirmed_at` 一起定义一条记忆的"状态":
+
+```
+authored_by_user_id IS NULL                       → self / 系统抽取,自动生效
+authored_by_user_id = user_id                     → 等价于上面
+authored_by_user_id != user_id,confirmed_at NULL → PENDING(代写,待 subject 接受)
+authored_by_user_id != user_id,confirmed_at 非空 → 已接受,与 self 等价
+```
+
+共用 WHERE 表达式 `visibleToSubject()`(`apps/web/src/lib/memory-filters.ts`)在所有读路径应用,使 pending 行对 pinned 注入、search_memories、"我的记忆"页面都不可见,直到 subject 接受。
+
+### 12.3 scope 矩阵(更新后)
+
+| 操作 | 作用域 | 说明 |
 |---|---|---|
-| **Pinned 常开注入** | **房间内全部成员** | `getRoomUsersMemories(roomId)` 查所有 user member 的 identity+high,按人分组标 "Pinned facts about {name}:" 一起塞进 prompt |
-| `search_memories` 工具 | **发话者** | JWT `sub=userId` 锁定,参数里任何身份字段都忽略 |
-| `remember` 工具 | **发话者** | 同上,写入 `ctx.userId` 的行 |
-| `update_memory` / `forget_memory` | **发话者** | 同上 |
-| `/memories` 页面 | **登录用户自己** | session 决定 |
-| worker 后台抽取 | **消息发送者** | job 参数 `{userId, roomId}`,抽那个人的最近消息产生其本人的 fact |
+| Pinned `user_memories` 注入 | 房间所有成员的活跃可见行 | 自动过滤 pending + 墓碑 |
+| Room context 注入 | 当前房间 | Phase 3 新增层 |
+| Known relationships 注入 | 发话者的双向已确认边 | Phase 4 新增层,且对方必须也在当前房间 |
+| `search_memories` | 发话者的可见行 | JWT 锁定 subject |
+| `remember`(默认) | 写 subject = 发话者 | 自述,自动生效 |
+| `remember({ subjectName })` | 写 subject = 房间成员 X | **pending**,X 需在 /memories 待确认 tab 接受 |
+| `update_memory` / `forget_memory` | 仅发话者的**可见**行 | pending 行用 confirm/DELETE,不走 update |
+| `confirm_memory` | 发话者作为 subject 的 pending 行 | 翻转 `confirmed_at = now()` |
+| `save_room_fact` | 当前房间 | 任一成员的 agent 均可调 |
+| `forget_room_fact` | `source='extracted'` 的房间事实 | UI 手动加的 `user_explicit` 不受影响,需从 UI 删 |
+| `relate({ otherUserName, kind })` | 规范排序后的 edge | 写当前说话者那一侧的 `confirmed_by_*`,另一侧空 |
+| `search_relationships` | 双向已确认且涉及发话者的边 | 对方不一定在当前房间也能搜到(但不注入 pinned) |
+| `unrelate` | 涉及发话者的任一边 | 双方任一侧均可删 |
 
-关键不对称:**Pinned 注入是全员可见的**(agent 知道房间里都有谁、对每个人的大致印象),但**所有主动读写都是单用户**(只能操作发话者的)。
+### 12.4 prompt 指导(当前版本)
 
-### 12.2 严格 prompt 规则(当前生效)
-
-为避免 agent 被"A 说 B 喜欢甜食"这种话误导,`buildSystemPrompt` 的 tool guidance 里硬规定:
+`buildSystemPrompt` 在 TOOLS 段加:
 
 ```
-MEMORY WRITING RULES IN GROUP CONVERSATIONS (STRICT):
-- 只允许对发话者本人调用 remember / update_memory / forget_memory
-- 发话者描述他人时,口头确认,不碰记忆工具
-- search_memories 只能查发话者本人
+MEMORY WRITING IN GROUP CONVERSATIONS:
+- The default subject of remember / update_memory / forget_memory is the
+  current speaker. If you decide a fact is genuinely about another room
+  member, call remember with subjectName set. The write goes into a
+  pending queue the subject can accept or reject. Prefer NOT doing this
+  unless clearly useful across sessions.
+- update_memory / forget_memory can only touch the speaker's own rows.
+- search_memories is scoped to the speaker.
 ```
 
-实际效果:群聊里 A 说"记住 B 喜欢甜食"→ agent 回复"好的"但 `/api/agent/tool` 没有被调用。要真把这条 fact 存下,得等 B 自己下次发言时再说。
+群聊中 A 说"记住 B 的生日是 12-25" 现在会:
+1. agent 决定调 `remember({ subjectName: "B", content: "生日 12-25", ... })`
+2. 代码层解析 "B" → userId,写入 `user_id=B, authored_by=A, confirmed_at=NULL`
+3. A 再聊天 pinned 里**不会**出现这条(未确认)
+4. B 登录 /memories → 待确认 tab 看到 → 接受 → 变成 B 的正式记忆,后续双方 pinned 都带
 
-### 12.3 这个模型的哲学含义
+### 12.5 隐私默认值
 
-当前 `user_memories.user_id` 同时表示 **归属方**(谁的记忆、谁能编辑)和 **主语**(事实是关于谁的)。两者永远相等是一个**简化假设**,群聊下开始不自然。
+- **自述 = 公开到房间**:pinned 注入把所有房间成员的 identity + high 记忆放进 prompt,agent 在对任何人讲话时都能引用
+- **他述 = 私有到 subject**:未确认的代写对 LLM 和其他成员完全不可见,subject 有 **接受 / 拒绝** 两种反应,拒绝 = 软删(成为墓碑,worker 也不会重建)
+- **room_memories = 公开到房间**:任何成员都能读/写/改/删
+- **user_relationships = 双向同意才生效**:只有 `confirmed_by_a IS NOT NULL AND confirmed_by_b IS NOT NULL` 才会被注入
 
-演进方向(记录在案,不落地):
-- 拆出 `subject_user_id`(主语)与 `authored_by_user_id`(谁说的),并引入 subject 确认机制,使"代记"成为可能
-- 新增 `room_memories` 表承载房间级共享事实
-- 新增 `user_relationships` 表,双向确认的人际关系边
-
-落地路线和对应 schema 设计见顶层计划 `streamed-yawning-pancake` 及后续 CHANGELOG 条目。
+核心约束:**不存在"某人能悄悄改别人记忆"的路径**。所有跨用户写入都要被写入对象明确接受。
 
 ---
 

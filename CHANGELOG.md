@@ -1,10 +1,10 @@
 # CHANGELOG.md
 
 ## Project status
-Phase 2 in progress — tool-calling loop, JWT-bound memory tools, user-facing memory management, always-on injection slimdown all landed. Remaining: message-search index (D1), vector-based memory dedup (D2), end-to-end smoke & docs for Phase 2 (E in progress).
+Phase 2 done (tool-calling agent + memory tools + UI). Multi-user memory rework (phases A–D of the `streamed-yawning-pancake` plan) also fully landed: subject/author split, pending confirmation flow, room-shared memories, bidirectional user relationships. Remaining: vector-based memory dedup (D2), MCP integration.
 
 ## Current phase
-Phase 2 — Agent architecture upgrade
+Phase 2 — Agent architecture upgrade (complete); multi-user rework (complete)
 
 ## Completed
 
@@ -153,6 +153,39 @@ Phase 2 — Agent architecture upgrade
 - C2 — `buildSystemPrompt` pins only `category='identity' OR importance='high'` memories (cap 8/user) plus the latest summary. Adds a TOOL USAGE section describing when each tool is appropriate and instructing the agent not to call a tool when current context is sufficient. `streamAgentResponse` signs a JWT per request and passes `tools: agentToolDefs`, `toolCallbackUrl`, `toolAuth` through to agent-runtime. Title-generation path kept tool-free.
 - End-to-end verified against real DeepSeek: user "请忘掉…我喜欢志龙哥" → agent emitted `search_memories({"query":"志龙哥"})` → `forget_memory({memoryId, reason})` → confirmed in Chinese. DB: row flipped to `deleted_at IS NOT NULL`, `source='user_explicit'`.
 
+## Multi-user memory rework (2026-04-18)
+
+Reshape the memory model from "always 1:1" to "multi-user + single agent". Previously `user_memories.user_id` served both "owner" and "subject" roles; in a group chat any fact the agent tried to remember about a non-speaker ended up attributed to the speaker. Four additive phases, zero destructive migrations.
+
+### Phase 1 — Strict prompt guardrail
+- `buildSystemPrompt` appended a STRICT section forbidding remember/update/forget for anyone other than the current speaker, and forbidding search against other members. Zero schema change, deployable immediately.
+- `docs/memory-system.md` §12 documents the scope matrix (pinned-vs-tool asymmetry) and the rule.
+
+### Phase 2 — Subject / author split + pending confirmation
+- Schema `0004_memory_authorship.sql`: `user_memories` gained `authored_by_user_id` (NULL or = user_id = self; otherwise third-party) and `confirmed_at` (NULL = pending when third-party). Partial index `user_memories_pending_idx` serves the "待确认" listing.
+- `apps/web/src/lib/memory-filters.ts` exposes `visibleToSubject()` — the single WHERE expression reused by pinned injection, `search_memories`, `GET /api/memories`, `PATCH /api/memories/:id`, and all the `update_memory` / `forget_memory` paths. Prevents pending rows from appearing anywhere until the subject accepts.
+- `apps/web/src/lib/tools/resolvers.ts` · `resolveRoomMemberByName` — case-insensitive exact-match name lookup in room members. Reused by `remember(subjectName)` and (later) `relate`.
+- Tools: `remember` gained optional `subjectName`; third-party writes land pending. `update_memory` / `forget_memory` use `visibleToSubject()` so pending rows aren't silently mutated. New `confirm_memory` tool lets the agent accept a pending fact on the subject's behalf mid-conversation.
+- API: `GET /api/memories` returns `{ mine, pending }` with author display names resolved. New `POST /api/memories/:id/confirm`. DELETE handles rejection of pending rows.
+- UI: `/memories` page gained a tab bar ("我的记忆" / "待确认") with a pending badge and 接受/拒绝 buttons.
+- Worker: extraction prompt treats `[PENDING]` rows like `[LOCKED]` (SKIP on duplicate content, forbid UPDATE/DELETE); `pendingIds` joins `lockedIds` as secondary rejection sets in the transaction.
+- Prompt: Phase 1's strict rule softened — remember with subjectName is now the right move for clearly useful cross-session facts, but is discouraged for casual mentions.
+
+### Phase 3 — Room-shared memories
+- Schema `0005_room_memories.sql`: new `room_memories(id, room_id, content, importance, created_by_user_id, source, deleted_at, ...)` with `room_memories_active_idx` partial index.
+- Tools: `search_room_memory`, `save_room_fact`, `forget_room_fact` — all JWT-room-scoped; `forget_room_fact` only touches `source='extracted'` so UI-authored entries are safe from tool-path deletions.
+- Injection: `getRoomMemories(roomId)` + `buildSystemPrompt` `roomMemories` field render a new "Room context: ..." layer between room rules and per-user pinned facts.
+- API: `GET/POST /api/rooms/:id/memories` + `PATCH/DELETE /api/rooms/:id/memories/:memId`, all gated by room-member check. UI writes → `source='user_explicit'`.
+- UI: new `RoomSettings.tsx` modal reached via the Sidebar room ⋯ menu item "房间共享事实". Add / inline-edit / delete.
+
+### Phase 4 — Bidirectional user relationships
+- Schema `0006_user_relationships.sql`: `user_relationships(a_user_id, b_user_id, kind, content, confirmed_by_a, confirmed_by_b, ...)`. CHECK `a_user_id < b_user_id` canonicalises pairs; UNIQUE `(a_user_id, b_user_id, kind)` prevents duplicates. Partial indexes on each side.
+- Tools: `relate({ otherUserName, kind, content? })` — upserts and fills the speaker's `confirmed_by_*` side only; `search_relationships({ withUserName? })` — returns fully-confirmed edges involving the speaker; `unrelate({ relationshipId })` — soft-delete from either side.
+- Injection: `getConfirmedRelationshipsForUser(userId, roomMemberIds)` returns edges where BOTH sides confirmed AND the other side is present in the current room. `buildSystemPrompt` renders "Known relationships involving {speaker}:" layer.
+- API: `GET /api/relationships` → `{ confirmed, pending, outgoing }`; `POST /api/relationships` (propose/confirm upsert); `POST /api/relationships/:id/confirm`; `DELETE /api/relationships/:id`.
+- UI: `/memories` gained a "关系" tab with three sections (待确认 incoming, 已确认, 已发出 outgoing) and an inline "+ 新增关系" form that picks a mutual friend via `/api/friends`.
+- Docs (`docs/memory-system.md`): §2 data model expanded to 3 tables; §12 rewritten to describe the current scope matrix + privacy defaults (自述 public to room, 他述 private to subject, room memory public, relationships bidirectional-consent).
+
 ## Not started
 - Phase 2 D1 — pg_trgm GIN index on `messages.content` so `search_messages` stays fast past a few thousand rows.
 - Phase 2 D2 — systematic memory dedup (pgvector + cosine, or periodic cron merge). C1's `remember` has only the bigram quickdup.
@@ -167,7 +200,7 @@ Phase 2 — Agent architecture upgrade
 - Phase 2 risk — memory-worker still uses synchronous OpenAI calls with no mock path. Background jobs will fail loudly if `LLM_API_KEY` is empty.
 
 ## Next step
-Finish Phase 2: D1 (message-search index), then D2 (vector dedup with pgvector + embedding generation), then evaluate MCP integration timing.
+D2 (semantic memory dedup via pgvector + embedding) is the biggest remaining item — bigram dedup plus the new auto-merge tier cover lexically-similar cases but still miss paraphrases. After that, evaluate MCP integration timing and whether multi-user chat usage warrants a further authorization model (e.g. subject-muting of specific authors).
 
 ## Update rule
 After each meaningful implementation step, append:
