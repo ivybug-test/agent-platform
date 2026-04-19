@@ -2,6 +2,7 @@ import { db, messages, rooms } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
 import { publishRoomEvent } from "@/lib/redis";
+import { publishRoomActivity } from "@/lib/chat/room-activity";
 import { createLogger } from "@agent-platform/logger";
 import { signToolToken } from "@/lib/tool-token";
 import { agentToolDefs } from "@/lib/tools";
@@ -95,6 +96,9 @@ export async function streamAgentResponse(
             status: "completed",
           },
         });
+
+        // Bubble this room to the top of every member's sidebar.
+        publishRoomActivity(roomId);
 
         // Auto-generate room title (fire and forget)
         maybeGenerateRoomTitle(roomId, userContent, fullContent);

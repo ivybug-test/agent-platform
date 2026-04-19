@@ -17,6 +17,7 @@ import {
 } from "@/lib/chat/context";
 import { streamAgentResponse } from "@/lib/chat/stream";
 import { publishRoomEvent } from "@/lib/redis";
+import { publishRoomActivity } from "@/lib/chat/room-activity";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("web");
@@ -80,6 +81,10 @@ export async function POST(req: NextRequest) {
       status: "completed",
     },
   });
+
+  // Notify every member's sidebar that this room just had activity, so it
+  // bubbles up in their room list. Fire-and-forget.
+  publishRoomActivity(roomId, userMsg.createdAt);
 
   // Check if agent should respond
   if (room?.autoReply === false && !hasMention) {

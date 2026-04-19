@@ -42,6 +42,62 @@ function colorForUser(id: string): string {
   return bubbleColors[Math.abs(hash) % bubbleColors.length];
 }
 
+/** Asia/Shanghai-localised parts of a timestamp, used for both the per-message
+ *  HH:mm label and the cross-day divider text. */
+const SH_FMT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  weekday: "short",
+  hour12: false,
+});
+
+function fmtTime(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const parts = SH_FMT.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("hour")}:${get("minute")}`;
+}
+
+function dayKey(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const parts = SH_FMT.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function dayDividerLabel(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const parts = SH_FMT.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+
+  // "Today" / "Yesterday" shortcuts if applicable.
+  const now = new Date();
+  const today = dayKey(now.toISOString());
+  const yesterday = new Date(now.getTime() - 24 * 3600 * 1000);
+  const key = `${get("year")}-${get("month")}-${get("day")}`;
+  if (key === today) return "今天";
+  if (key === dayKey(yesterday.toISOString())) return "昨天";
+
+  // Same year → "MM月DD日 周X"; otherwise "YYYY年MM月DD日 周X"
+  const curYear = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+  }).format(now);
+  const inCurYear = get("year") === curYear;
+  const base = `${get("month")}月${get("day")}日 ${get("weekday")}`;
+  return inCurYear ? base : `${get("year")}年${base}`;
+}
+
 export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const { data: session } = useSession();
   const currentUserId = session?.user?.id;
@@ -303,6 +359,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       senderId: currentUserId || null,
       senderName: session?.user?.name || "You",
       content: text,
+      createdAt: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
@@ -321,7 +378,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
       setMessages((prev) => [
         ...prev,
-        { senderType: "agent", senderId: null, senderName: "Agent", content: "" },
+        {
+          senderType: "agent",
+          senderId: null,
+          senderName: "Agent",
+          content: "",
+          createdAt: new Date().toISOString(),
+        },
       ]);
 
       const reader = res.body.getReader();
@@ -436,25 +499,47 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               ? "chat-bubble-primary"
               : colorForUser(msg.senderId || "unknown");
 
+          // Day divider: inserted whenever this message crosses to a new
+          // calendar day in Asia/Shanghai compared to the previous message.
+          const prev = i > 0 ? messages[i - 1] : null;
+          const showDayDivider =
+            msg.createdAt && (!prev || dayKey(prev.createdAt) !== dayKey(msg.createdAt));
+
+          const timeLabel = fmtTime(msg.createdAt);
+
           return (
-            <div key={i} className={`chat ${isMe ? "chat-end" : "chat-start"}`}>
-              <div className="chat-header text-xs opacity-60 mb-0.5">
-                {displayName}
-              </div>
-              <div className={`chat-bubble ${bubbleColor} text-sm`}>
-                {isImageMessage(msg) ? (
-                  <a href={msg.content} target="_blank" rel="noopener noreferrer">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={msg.content}
-                      alt="sent image"
-                      className="max-w-[240px] max-h-[320px] rounded object-contain"
-                      loading="lazy"
-                    />
-                  </a>
-                ) : (
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
-                )}
+            <div key={i}>
+              {showDayDivider && (
+                <div className="flex justify-center my-3">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-base-300/60 text-base-content/50">
+                    {dayDividerLabel(msg.createdAt)}
+                  </span>
+                </div>
+              )}
+              <div className={`chat ${isMe ? "chat-end" : "chat-start"}`}>
+                <div className="chat-header text-xs opacity-60 mb-0.5">
+                  {displayName}
+                  {timeLabel && (
+                    <time className="ml-1.5 opacity-60 text-[10px]">
+                      {timeLabel}
+                    </time>
+                  )}
+                </div>
+                <div className={`chat-bubble ${bubbleColor} text-sm`}>
+                  {isImageMessage(msg) ? (
+                    <a href={msg.content} target="_blank" rel="noopener noreferrer">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={msg.content}
+                        alt="sent image"
+                        className="max-w-[240px] max-h-[320px] rounded object-contain"
+                        loading="lazy"
+                      />
+                    </a>
+                  ) : (
+                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                  )}
+                </div>
               </div>
             </div>
           );

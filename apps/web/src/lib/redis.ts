@@ -38,9 +38,12 @@ export function publishRoomEvent(event: RoomEvent) {
 }
 
 interface UserEvent {
-  type: "room-added" | "room-updated" | "room-removed";
+  type: "room-added" | "room-updated" | "room-removed" | "room-activity";
   room?: { id: string; name: string };
   roomId?: string;
+  // For `room-activity`: the ISO timestamp of the activity. Clients use it to
+  // update the room's lastActivityAt and re-sort the sidebar.
+  at?: string;
 }
 
 export function publishUserEvent(userId: string, event: UserEvent) {

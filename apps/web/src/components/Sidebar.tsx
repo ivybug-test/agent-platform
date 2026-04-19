@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { useSession, signOut } from "next-auth/react";
 import FriendsPanel from "./FriendsPanel";
 import AnnouncementPanel from "./AnnouncementPanel";
@@ -11,6 +11,10 @@ interface Room {
   name: string;
   autoReply?: boolean;
 }
+
+// FLIP animation parameters — tweak these if the reorder feels too fast/slow.
+const FLIP_DURATION_MS = 260;
+const FLIP_EASING = "cubic-bezier(0.4, 0.0, 0.2, 1)";
 
 interface SidebarProps {
   rooms: Room[];
@@ -36,6 +40,39 @@ export default function Sidebar({
   const [menuRoomId, setMenuRoomId] = useState<string | null>(null);
   const [settingsRoom, setSettingsRoom] = useState<Room | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+
+  // FLIP animation on reorder. We snapshot each row's top offset before the
+  // rooms prop triggers a re-render; after layout, we measure the new offsets
+  // and, for any row that moved, apply an inverting translateY + transition
+  // it back to zero. Plain DOM — no animation lib.
+  const rowRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const prevOffsets = useRef<Map<string, number>>(new Map());
+
+  useLayoutEffect(() => {
+    const newOffsets = new Map<string, number>();
+    for (const [id, el] of rowRefs.current) {
+      if (el) newOffsets.set(id, el.offsetTop);
+    }
+
+    for (const [id, el] of rowRefs.current) {
+      if (!el) continue;
+      const prev = prevOffsets.current.get(id);
+      const curr = newOffsets.get(id);
+      if (prev === undefined || curr === undefined || prev === curr) continue;
+
+      const delta = prev - curr;
+      // Jump back to old spot without animation...
+      el.style.transition = "none";
+      el.style.transform = `translateY(${delta}px)`;
+      // ...then on the next frame, transition back to zero.
+      requestAnimationFrame(() => {
+        el.style.transition = `transform ${FLIP_DURATION_MS}ms ${FLIP_EASING}`;
+        el.style.transform = "translateY(0)";
+      });
+    }
+
+    prevOffsets.current = newOffsets;
+  }, [rooms]);
 
   // Check admin status on load
   useEffect(() => {
@@ -112,6 +149,10 @@ export default function Sidebar({
         {rooms.map((room) => (
           <div
             key={room.id}
+            ref={(el) => {
+              if (el) rowRefs.current.set(room.id, el);
+              else rowRefs.current.delete(room.id);
+            }}
             className={`group flex items-center rounded-lg cursor-pointer transition-colors ${
               room.id === activeRoomId
                 ? "bg-primary/20 text-primary-content"

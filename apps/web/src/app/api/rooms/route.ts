@@ -1,6 +1,6 @@
 import "@/lib/env";
-import { db, rooms, roomMembers, agents } from "@agent-platform/db";
-import { eq, and, inArray, ne } from "drizzle-orm";
+import { db, rooms, roomMembers, agents, messages } from "@agent-platform/db";
+import { eq, and, inArray, ne, sql, desc } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
 import { getAcceptedFriendIds } from "@/lib/friends";
 import { publishUserEvent } from "@/lib/redis";
@@ -23,11 +23,32 @@ export async function GET() {
   const roomIds = memberships.map((m) => m.roomId);
   if (roomIds.length === 0) return Response.json([]);
 
+  // Correlated subquery for the most recent completed message in each room.
+  // Fall back to the room's own createdAt so an empty room still sorts
+  // coherently relative to active ones.
+  const lastMessageAt = sql<Date | null>`(
+    SELECT max(${messages.createdAt})
+    FROM ${messages}
+    WHERE ${messages.roomId} = ${rooms.id}
+      AND ${messages.status} = 'completed'
+  )`;
+  const lastActivityAt = sql<Date>`COALESCE(${lastMessageAt}, ${rooms.createdAt})`;
+
   const rows = await db
-    .select()
+    .select({
+      id: rooms.id,
+      name: rooms.name,
+      systemPrompt: rooms.systemPrompt,
+      status: rooms.status,
+      autoReply: rooms.autoReply,
+      createdBy: rooms.createdBy,
+      createdAt: rooms.createdAt,
+      updatedAt: rooms.updatedAt,
+      lastActivityAt: lastActivityAt.as("last_activity_at"),
+    })
     .from(rooms)
     .where(and(inArray(rooms.id, roomIds), ne(rooms.status, "archived")))
-    .orderBy(rooms.createdAt)
+    .orderBy(desc(lastActivityAt))
     .limit(50);
 
   return Response.json(rows);

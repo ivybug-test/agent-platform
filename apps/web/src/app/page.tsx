@@ -11,6 +11,17 @@ interface Room {
   id: string;
   name: string;
   autoReply?: boolean;
+  lastActivityAt?: string;
+}
+
+/** Sort rooms by lastActivityAt DESC so the most recently-active room is
+ *  always at the top. Rooms with no activity fall back to createdAt. */
+function sortRooms(list: Room[]): Room[] {
+  return [...list].sort((a, b) => {
+    const ta = new Date(a.lastActivityAt || 0).getTime();
+    const tb = new Date(b.lastActivityAt || 0).getTime();
+    return tb - ta;
+  });
 }
 
 export default function Home() {
@@ -52,7 +63,7 @@ export default function Home() {
   const refreshRooms = useCallback(async () => {
     const res = await fetch("/api/rooms");
     if (!res.ok) return;
-    setRooms(await res.json());
+    setRooms(sortRooms(await res.json()));
   }, []);
 
   const currentUserId = session?.user?.id;
@@ -62,7 +73,7 @@ export default function Home() {
     (async () => {
       const res = await fetch("/api/rooms");
       if (!res.ok) return;
-      const data = await res.json();
+      const data = sortRooms(await res.json());
       setRooms(data);
       if (data.length > 0) {
         const key = `lastRoomId:${currentUserId}`;
@@ -90,7 +101,9 @@ export default function Home() {
   };
 
   const handleRoomCreated = (room: Room) => {
-    setRooms((prev) => [...prev, room]);
+    // New rooms carry no lastActivityAt yet; stamp one so they sort at the top.
+    const stamped = { ...room, lastActivityAt: new Date().toISOString() };
+    setRooms((prev) => sortRooms([...prev, stamped]));
     setActiveRoomId(room.id);
     closeDrawer();
   };
@@ -101,7 +114,7 @@ export default function Home() {
   };
 
   const handleRoomUpdated = (room: Room) => {
-    setRooms((prev) => prev.map((r) => (r.id === room.id ? room : r)));
+    setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, ...room } : r)));
   };
 
   const handleChatComplete = useCallback(() => {
@@ -124,13 +137,28 @@ export default function Home() {
       if (event.type === "room-added" && event.room) {
         setRooms((prev) => {
           if (prev.some((r) => r.id === event.room.id)) return prev;
-          return [...prev, event.room];
+          return sortRooms([
+            ...prev,
+            { ...event.room, lastActivityAt: new Date().toISOString() },
+          ]);
         });
       } else if (event.type === "room-removed" && event.roomId) {
         setRooms((prev) => prev.filter((r) => r.id !== event.roomId));
         setActiveRoomId((cur) => (cur === event.roomId ? null : cur));
       } else if (event.type === "room-updated" && event.room) {
-        setRooms((prev) => prev.map((r) => (r.id === event.room.id ? { ...r, ...event.room } : r)));
+        setRooms((prev) =>
+          sortRooms(
+            prev.map((r) => (r.id === event.room.id ? { ...r, ...event.room } : r))
+          )
+        );
+      } else if (event.type === "room-activity" && event.roomId && event.at) {
+        setRooms((prev) =>
+          sortRooms(
+            prev.map((r) =>
+              r.id === event.roomId ? { ...r, lastActivityAt: event.at } : r
+            )
+          )
+        );
       }
     });
 
