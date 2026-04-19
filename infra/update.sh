@@ -5,8 +5,17 @@ set -e
 
 cd ~/agent-platform
 
-echo "=== Pulling latest code ==="
-git pull
+# Self-modifying-script guard: git pull may rewrite this very file, which
+# confuses the bash stream reader and can cause random line-offset errors
+# later in the run. Do the pull first, then re-exec the fresh script so the
+# rest of the work executes against the updated file from byte 0. The
+# env var flag prevents an infinite loop.
+if [ -z "$AGENT_UPDATE_RESTARTED" ]; then
+  echo "=== Pulling latest code ==="
+  git pull
+  export AGENT_UPDATE_RESTARTED=1
+  exec "$0" "$@"
+fi
 
 echo "=== Installing dependencies ==="
 pnpm install
