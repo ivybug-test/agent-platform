@@ -170,17 +170,25 @@ Goal: give memory a time dimension and let it evolve — episodic facts get abso
 - [x] `infra/update.sh` picks up 0007 idempotently
 - [x] Docs: `CHANGELOG.md` section + `docs/memory-system.md` §15
 
+### Phase A follow-ups ✅ (2026-04-19)
+- [x] Per-message `[YYYY-MM-DD HH:mm]` prefix on recent user messages in `buildLLMMessages`; >6h gap note appended to system prompt. Assistant messages intentionally NOT prefixed (avoids LLM mimicking the pattern and echoing `[ts]` in replies).
+- [x] `search_memories` retrieval reinforcement: non-blocking `UPDATE user_memories SET last_reinforced_at = now()` on returned row ids. `strength` intentionally untouched — retrieval only moves the decay anchor.
+- [x] UI: chat timestamps + day dividers; sidebar sorts by `lastActivityAt` (API correlated subquery + `room-activity` UserEvent); FLIP animation on reorder.
+- [x] Cross-browser compat: oklch fallback in `globals.css` under `@supports not`, `data-theme="dark"` on `<html>`, `colorScheme: "dark"` on Viewport — fixes white sidebar on HarmonyOS / older Chromium.
+- [x] Legacy data CLIs: `pnpm backfill-event-at` (LLM-assisted event_at populator) and `pnpm strip-numbered-prefix` (regex cleanup of old numbered list artifacts).
+- [x] `update.sh`: POSIX `.` instead of `source`; self-modifying-script guard via `exec "$0"` after `git pull`.
+
 ### Phase B — Consolidation (recurring episodic → semantic)
 - [ ] Periodic worker job: cluster same-user `category='event'` rows with similar content and spread `event_at` (≥3 occurrences over a tunable window)
 - [ ] LLM judges whether a cluster represents a pattern; if yes, emit a semantic fact ("经常不吃午饭") with `importance='medium'`, preserve originals as evidence
 - [ ] Gate: wait until Phase A has produced ≥2 weeks of real reinforcement data so the clustering threshold can be calibrated, not guessed
 
-### Phase C — Decay threshold + retrieval boost
+### Phase C — Decay threshold + parameter tuning
+- [x] Reading a memory via `search_memories` bumps `last_reinforced_at` (Park et al. original semantics — retrieval boosts recency)
 - [ ] Hard score threshold on pinned injection (currently only ordered, not cut)
-- [ ] Reading a memory via `search_memories` bumps `last_reinforced_at` (Park et al. original semantics — retrieval boosts recency)
 - [ ] Tune `DECAY_HALFLIFE_DAYS` + importance weights on observed data
 
 ---
 
 ## Immediate next task
-Let dynamic memory Phase A bake for ~2 weeks, then tackle D2 (pgvector semantic dedup) or dynamic memory Phase B (consolidation) — whichever surfaces a clearer need from real traffic. D1 (pg_trgm index for `search_messages`) is pre-landed in migration 0003.
+D2 (pgvector semantic dedup) is the next major piece — without it Phase A's reinforce signal scatters across paraphrased duplicates ("喜欢甜食" vs "爱吃蛋糕") instead of concentrating on one row, and it's a prerequisite for Phase B (consolidation needs a clean base). Phase B itself waits on ≥2 weeks of real reinforcement data.

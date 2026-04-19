@@ -207,6 +207,39 @@ Generative Agents (recency × importance × relevance) and MemoryBank
 
 Note: `memory-worker` log key renamed `dupSkipped → reinforced`. Grafana/log consumers filtering on the old key need to be updated.
 
+## Post-Phase-A follow-ups (2026-04-19)
+
+Shipped the same day Phase A landed, once live usage surfaced gaps.
+
+### Temporal awareness in the recent-message window
+- `buildLLMMessages`: every user message line is now prefixed with `[YYYY-MM-DD HH:mm]` in Asia/Shanghai, so the agent sees time flow across the 50-message window rather than just the single "Current time" anchor. Cost: ~18 tokens/line, negligible at 8k ctx.
+- If the most recent message is >6h old, a one-line gap note is appended to the system prompt ("about 3 days have passed since the last message in this room") so the agent can open with "好久不见" naturally rather than acting like no time passed.
+- Important fix: timestamps are NOT prefixed to assistant messages. An earlier iteration prefixed both, and the LLM mimicked the pattern — every reply started with `[2026-04-19 13:56] ...`. System prompt rule #2 additionally spells out that the bracketed stamp is metadata to be read, not echoed.
+
+### Retrieval reinforces recency (Park et al. other half)
+- `search_memories`: after the select, fires a non-blocking `UPDATE user_memories SET last_reinforced_at = now()` on the returned row ids. `strength` is intentionally untouched — that tracks how often a fact was claimed; retrieval is a different signal that only moves the decay anchor.
+- Closes a real gap: facts heavily USED by the agent (e.g. "住在深圳" queried every restaurant-recommendation turn) used to decay out of pinned if the user never re-stated them. Now stay fresh as long as they're being looked up.
+- Applies to both `source='extracted'` and `user_explicit` rows — no content/category/deletion mutation, so user-locked facts are safe.
+
+### Chat UI
+- ChatPanel: each message now shows `HH:mm` next to the sender name; a day-divider pill appears whenever the day boundary crosses (`今天` / `昨天` / `MM月DD日 周X`, adds year if >365d old). Asia/Shanghai formatting.
+- Sidebar: rooms now sort by most recent activity. `GET /api/rooms` returns `lastActivityAt` via a correlated subquery `MAX(messages.created_at WHERE status='completed')`, falling back to `rooms.created_at`. A new `UserEvent: room-activity {roomId, at}` is published by the user-message save path and the agent-message completion path (`publishRoomActivity` helper) to every room member; the client updates the matching row and re-sorts.
+- FLIP animation: when `rooms` reorders, `useLayoutEffect` snapshots each row's `offsetTop`, measures again after layout, applies an inverting translateY for moved rows, then transitions back to zero with 260ms cubic-bezier. No animation library — plain DOM.
+
+### Cross-browser compat: "white sidebar" on older Huawei / HarmonyOS / Quark
+Root cause: DaisyUI v5 declares every theme color as `oklch()`. Browsers older than Chromium 111 reject the whole `--color-base-*` declaration as invalid, leaving the variable unset; `bg-base-200` / `bg-base-300` paint white. Three-part fix:
+- `globals.css`: `@supports not (color: oklch(0% 0 0)) { [data-theme="dark"], :root { --color-base-100: #1d232a; ... } }` — only triggers on browsers without oklch support; modern browsers keep DaisyUI's oklch intact.
+- `layout.tsx`: moved `data-theme="dark"` onto `<html>` so the attribute selector resolves at the root and every descendant inherits. Nested copies in sub-components left in place as belt-and-suspenders.
+- Added `colorScheme: "dark"` + `themeColor: "#111111"` to the Next `Viewport` export so mobile scrollbars / form controls / address bar render in dark mode too.
+
+### Legacy data cleanup CLIs
+- `services/memory-worker` · `pnpm backfill-event-at [--dry-run]` — replays `source='extracted'` rows through the LLM to populate `event_at` from their content. Anchors relative phrases (`今天` / `昨天` / `刚才`) against the row's own `created_at` (≈ when the user message was sent). Source-locked SQL predicate guards user_explicit rows. Idempotent.
+- `services/memory-worker` · `pnpm strip-numbered-prefix [--dry-run]` — pure regex cleanup of `^\s*\d+\.\s+` prefixes that an earlier extractor accidentally stored as memory content. No LLM.
+
+### update.sh robustness
+- Replaced bash-only `source` with POSIX `.` for dash compatibility.
+- Self-modifying-script guard: pulls first, then `exec "$0" "$@"` so the rest of the run executes against the freshly-pulled file (prevents line-offset corruption when `git pull` rewrites `update.sh` itself mid-run).
+
 ## Not started
 - Phase 2 D1 — pg_trgm GIN index on `messages.content` so `search_messages` stays fast past a few thousand rows.
 - Phase 2 D2 — systematic memory dedup (pgvector + cosine, or periodic cron merge). C1's `remember` has only the bigram quickdup.
@@ -222,7 +255,7 @@ Note: `memory-worker` log key renamed `dupSkipped → reinforced`. Grafana/log c
 - Phase 2 risk — memory-worker still uses synchronous OpenAI calls with no mock path. Background jobs will fail loudly if `LLM_API_KEY` is empty.
 
 ## Next step
-Dynamic memory Phase B (consolidation from recurring events → semantic facts) is the natural follow-up to Phase A; needs a few weeks of real reinforcement data before the clustering rule can be tuned. D2 (semantic memory dedup via pgvector + embedding) remains the other major item — bigram dedup plus the reinforcement tier cover lexically-similar cases but still miss paraphrases. After that, evaluate MCP integration timing and whether multi-user chat usage warrants a further authorization model (e.g. subject-muting of specific authors).
+Phase A is now feature-complete including retrieval-side reinforcement. D2 (semantic memory dedup via pgvector + embedding) is the next major piece — without it the Phase A reinforce signal scatters across paraphrased duplicates ("喜欢甜食" vs "爱吃蛋糕") instead of concentrating on one row. D2 is also a prerequisite for Phase B: consolidation needs a clean base to cluster events. Phase B itself (recurring episodic → semantic facts) still waits on ≥2 weeks of real reinforcement data before its clustering thresholds can be calibrated. After D2/Phase B, evaluate MCP and authorization-model (e.g. subject-muting of specific authors) needs.
 
 ## Update rule
 After each meaningful implementation step, append:
