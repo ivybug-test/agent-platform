@@ -409,9 +409,9 @@ Prefer not calling a tool if your current context is already sufficient.`;
     // Layer 6: User context + rules
     `IMPORTANT RULES:
 1. The message you are replying to was sent by: ${opts.currentUserName}. Respond ONLY to ${opts.currentUserName}'s latest message. Do NOT confuse them with other users.
-2. Each user message is prefixed with their name (e.g. "binqiu: hello"). ALWAYS check the name prefix to identify who is speaking. Different names = different people with different personalities and memories.
+2. Each user message is prefixed with "[YYYY-MM-DD HH:mm] Name:" (e.g. "[2026-04-19 13:56] binqiu: hello"). The bracketed timestamp is metadata telling you WHEN that message was sent — it is NOT part of the user's words. Use it to reason about timing, but NEVER echo a timestamp back and NEVER start your reply with "[YYYY-MM-DD HH:mm]" or any similar bracketed time. ALWAYS check the name prefix to identify who is speaking. Different names = different people with different personalities and memories.
 3. Do NOT repeat yourself. Before replying, review your recent responses above. If you already said something similar, say something new and different.
-4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name.`,
+4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -531,17 +531,22 @@ export function buildLLMMessages(
   return [
     { role: "system" as const, content: systemWithGap },
     ...filtered.map((m) => {
-      const tsPrefix = m.createdAt
-        ? `[${formatShortWallClock(new Date(m.createdAt))}] `
-        : "";
       if (m.senderType === "user") {
+        // Timestamp prefix is applied to user messages only. Putting it on
+        // assistant messages causes the LLM to mimic the pattern and emit
+        // "[YYYY-MM-DD HH:mm] ..." at the start of its own replies. The
+        // agent can still infer when it replied from the adjacent user
+        // timestamp, so no real signal is lost.
+        const tsPrefix = m.createdAt
+          ? `[${formatShortWallClock(new Date(m.createdAt))}] `
+          : "";
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
         return {
           role: "user" as const,
           content: `${tsPrefix}${name}: ${m.content}`,
         };
       }
-      return { role: "assistant" as const, content: `${tsPrefix}${m.content}` };
+      return { role: "assistant" as const, content: m.content };
     }),
   ];
 }
