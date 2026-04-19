@@ -8,7 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "cleanup": "tsx src/cli/cleanup.ts",
-    "backfill-event-at": "tsx src/cli/backfill-event-at.ts"
+    "backfill-event-at": "tsx src/cli/backfill-event-at.ts",
+    "strip-numbered-prefix": "tsx src/cli/strip-numbered-prefix.ts"
   },
   "dependencies": {
     "@agent-platform/db": "workspace:*",
