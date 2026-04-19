@@ -47,8 +47,11 @@ fi
 
 echo "=== Restarting services ==="
 # Reload env into ecosystem config
+# Use POSIX `.` rather than bash-only `source` so this line works even when
+# the script is invoked via `sh ./infra/update.sh` on a host where /bin/sh
+# is dash (Ubuntu/Debian default).
 set -a
-source infra/.env.prod
+. infra/.env.prod
 export AUTH_TRUST_HOST=true
 set +a
 
