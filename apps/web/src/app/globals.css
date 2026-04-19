@@ -13,6 +13,41 @@
   --color-danger: #f44;
 }
 
+/* Fallback for browsers that don't support oklch() (Huawei HarmonyOS browser,
+   older Quark / UC, many Chromium <111 WebViews). DaisyUI v5 declares every
+   theme color as `--color-base-*: oklch(...)`, and when the parser rejects
+   oklch() the ENTIRE declaration is discarded — the variable reverts to
+   unset and `bg-base-200` / `bg-base-300` paint white. We redeclare the
+   critical base vars with hex under a `@supports not` guard so modern
+   browsers keep DaisyUI's oklch values, and legacy browsers get a dark
+   approximation. Keep values close to DaisyUI's "dark" theme so the visual
+   deltas on modern vs. legacy browsers stay minimal. */
+@supports not (color: oklch(0% 0 0)) {
+  :root,
+  [data-theme="dark"] {
+    --color-base-100: #1d232a;
+    --color-base-200: #191d24;
+    --color-base-300: #15191e;
+    --color-base-content: #a6adba;
+    --color-neutral: #2a323c;
+    --color-neutral-content: #a6adba;
+    --color-primary: #605dff;
+    --color-primary-content: #ffffff;
+    --color-secondary: #f6339a;
+    --color-secondary-content: #ffffff;
+    --color-accent: #00d3bb;
+    --color-accent-content: #00110c;
+    --color-info: #00bafe;
+    --color-info-content: #001924;
+    --color-success: #00d390;
+    --color-success-content: #001208;
+    --color-warning: #fcb700;
+    --color-warning-content: #180800;
+    --color-error: #ff627b;
+    --color-error-content: #280609;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
