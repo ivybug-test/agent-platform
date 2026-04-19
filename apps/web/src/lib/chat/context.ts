@@ -272,6 +272,25 @@ function formatUserMemories(
   return sections.join("\n");
 }
 
+/** Compact "YYYY-MM-DD HH:mm" in Asia/Shanghai — used as the per-message
+ *  timestamp prefix so the agent sees when each recent message was sent. */
+function formatShortWallClock(d: Date): string {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get(
+    "minute"
+  )}`;
+}
+
 /** Format current wall-clock time for injection into the system prompt. */
 function formatCurrentTime(now: Date = new Date()): string {
   // Render in Asia/Shanghai — this is a CN-user product and the LLM handling
@@ -427,14 +446,19 @@ function textSimilarity(a: string, b: string): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+interface ContextMessage {
+  senderType: string;
+  senderId: string | null;
+  content: string;
+  createdAt?: Date | string | null;
+}
+
 /**
  * Deduplicate context messages: when multiple agent responses are highly similar,
  * keep only the most recent one. This prevents the LLM from seeing repetitive
  * context and producing repetitive output.
  */
-function deduplicateContext(
-  msgs: { senderType: string; senderId: string | null; content: string }[]
-): { senderType: string; senderId: string | null; content: string }[] {
+function deduplicateContext(msgs: ContextMessage[]): ContextMessage[] {
   // Collect all agent message contents (with index) for similarity checking
   const agentEntries = msgs
     .map((m, i) => ({ index: i, content: m.content }))
@@ -469,22 +493,55 @@ function deduplicateContext(
   return result;
 }
 
-/** Build messages array for LLM */
+/** Build messages array for LLM.
+ *
+ *  Each user/assistant line is prefixed with a compact [YYYY-MM-DD HH:mm]
+ *  timestamp so the agent sees time flow in the recent window — not just
+ *  the one "Current time" anchor in the system prompt. If more than 6 hours
+ *  have elapsed between the most recent message and now, we append a short
+ *  note to the system prompt so the agent can acknowledge the gap naturally
+ *  ("好久不见" etc) rather than responding as if no time passed.
+ */
 export function buildLLMMessages(
   systemContent: string,
-  recentMessages: { senderType: string; senderId: string | null; content: string }[],
+  recentMessages: ContextMessage[],
   nameMap: Map<string, string>
 ) {
   const filtered = deduplicateContext(recentMessages);
 
+  // Gap-since-last-message note. Threshold of 6h catches overnight / days-apart
+  // sessions without triggering on normal back-and-forth chatting.
+  let systemWithGap = systemContent;
+  if (filtered.length > 0) {
+    const last = filtered[filtered.length - 1];
+    const lastTs = last.createdAt ? new Date(last.createdAt).getTime() : NaN;
+    if (!isNaN(lastTs)) {
+      const gapMs = Date.now() - lastTs;
+      if (gapMs > 6 * 3600 * 1000) {
+        const hours = gapMs / 3600000;
+        const note =
+          hours < 48
+            ? `Note: about ${Math.round(hours)} hours have passed since the last message in this room.`
+            : `Note: about ${Math.round(hours / 24)} days have passed since the last message in this room.`;
+        systemWithGap = `${systemContent}\n\n${note}`;
+      }
+    }
+  }
+
   return [
-    { role: "system" as const, content: systemContent },
+    { role: "system" as const, content: systemWithGap },
     ...filtered.map((m) => {
+      const tsPrefix = m.createdAt
+        ? `[${formatShortWallClock(new Date(m.createdAt))}] `
+        : "";
       if (m.senderType === "user") {
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
-        return { role: "user" as const, content: `${name}: ${m.content}` };
+        return {
+          role: "user" as const,
+          content: `${tsPrefix}${name}: ${m.content}`,
+        };
       }
-      return { role: "assistant" as const, content: m.content };
+      return { role: "assistant" as const, content: `${tsPrefix}${m.content}` };
     }),
   ];
 }
