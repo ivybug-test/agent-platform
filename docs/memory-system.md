@@ -522,11 +522,20 @@ score =   strength
 
 `search_messages` 也补了 `after` 参数,与 `before` 对称组成时间窗。
 
-### 15.5 未落地(Phase B 规划)
+### 15.5 Retrieve reinforces recency
+
+Phase A 落地之初只有写侧强化(用户/agent 重新提到时 `strength += 1`)。Park 原论文还有另一半:**读(retrieve)也 reset recency**。现已补上(2026-04-19):
+
+- `search_memories` 返回结果后,对命中的每条记忆 fire-and-forget `UPDATE ... SET last_reinforced_at = now()`
+- 只刷 `last_reinforced_at`,**不碰 `strength`**:strength 计"被声明过几次",retrieval 是另一种信号,只影响 decay 锚点
+- 也覆盖 `source='user_explicit'` 行 —— 读取不改 content,刷 timestamp 让用户锁定的重要 fact 也不至于因为"agent 频繁用但用户没再重复"而衰减
+
+效果:agent 频繁查到的 fact(哪怕用户很久不再主动提)在 pinned 排序里自动保持靠前。
+
+### 15.6 未落地(Phase B+ 规划)
 
 - **Consolidation**:定期扫同 user / `category='event'` / content 相似 / event_at 分散的记忆簇(≥3 条),LLM 判是否能提炼出更高阶语义 fact("经常不吃午饭"),原 event 保留作证据
 - **Pinned 阈值硬截断**:score < 阈值时不注入(现在只是排序靠后,受上限 8 保护)
-- **Retrieve reinforces recency**:Park 原文里读一次也会 bump recency;目前我们只有 write-side 强化
 - **Tune 参数**:30 天半衰期 / importance_weight {3,2,1} 都是 MVP 拍脑袋,跑一段时间收真实数据再调
 
 ---

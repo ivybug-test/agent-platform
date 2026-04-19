@@ -122,6 +122,24 @@ const searchMemories: ToolHandler = async (args, ctx) => {
     )
     .limit(limit);
 
+  // Retrieval reinforcement (Park et al. 2023): accessing a memory resets its
+  // recency, so heavily-USED facts don't decay out of the pinned window just
+  // because the user didn't re-state them. We bump last_reinforced_at but
+  // deliberately DO NOT bump strength — strength counts how often the fact
+  // was claimed, retrieval is a different signal and should only affect the
+  // decay anchor. Fire-and-forget; the tool response is already composed.
+  if (rows.length > 0) {
+    const ids = rows.map((r) => r.id);
+    void (async () => {
+      try {
+        await db
+          .update(userMemories)
+          .set({ lastReinforcedAt: new Date() })
+          .where(inArray(userMemories.id, ids));
+      } catch {}
+    })();
+  }
+
   return { results: rows };
 };
 
