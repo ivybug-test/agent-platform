@@ -1,265 +1,263 @@
 # CHANGELOG.md
 
-## Project status
-Phase 2 done (tool-calling agent + memory tools + UI). Multi-user memory rework (phases A–D of the `streamed-yawning-pancake` plan) also fully landed: subject/author split, pending confirmation flow, room-shared memories, bidirectional user relationships. Dynamic memory Phase A landed 2026-04-19: temporal + strength columns, time-range retrieval, Generative-Agents-style decay scoring, reinforce-over-skip on near-duplicates. Remaining: dynamic memory Phase B (consolidation from recurring events → semantic facts), vector-based memory dedup (D2), MCP integration.
+## 项目状态
+Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地:时间列 + 强度列、时间范围检索、Generative-Agents 风格衰减评分、近似重复改为强化而非跳过。剩余项:动态记忆 Phase B(由反复出现的事件聚合成语义 fact)、向量语义去重(D2)、MCP 集成。
 
-## Current phase
-Phase 2 — Agent architecture upgrade (complete); multi-user rework (complete)
+## 当前阶段
+Phase 2 — Agent 架构升级(已完成);多用户重构(已完成)
 
-## Completed
+## 已完成
 
-### Milestone 0: Planning (2026-04-05)
-- Defined product direction and phased roadmap
-- Reviewed CLAUDE.md for ambiguities and risks
-- Confirmed all architecture decisions:
-  - TypeScript everywhere
-  - agent-runtime as independent Fastify HTTP service
-  - OpenAI Node.js SDK with self-built agent orchestration
-  - SSE for Phase 1 streaming (WebSocket added in Phase 3/4)
-  - Auth.js with credentials provider
+### Milestone 0:规划(2026-04-05)
+- 明确产品方向和分阶段路线
+- 审阅 CLAUDE.md,标出模糊点和风险
+- 确认所有架构决策:
+  - 全栈 TypeScript
+  - agent-runtime 作为独立 Fastify HTTP 服务
+  - OpenAI Node.js SDK,自建 agent 编排
+  - Phase 1 用 SSE 流式(Phase 3/4 再加 WebSocket)
+  - Auth.js + credentials provider
   - Drizzle ORM
-  - BullMQ for task queue
-  - agent-runtime does NOT connect to database; context passed via HTTP body
-  - Next.js triggers memory-worker jobs after chat completion
-  - MCP support deferred to Phase 2
-- Simplified repo structure: removed packages/config, packages/prompts, packages/sdk from MVP
-- Added data model details: rooms.system_prompt, room_members.member_type, messages.status, nullable sender_id for system messages
-- Defined incremental milestone path (M0→M6)
-- Identified and documented development/testing/maintenance risks
+  - BullMQ 做任务队列
+  - agent-runtime **不**连数据库;context 通过 HTTP body 传入
+  - Next.js 在聊天结束后触发 memory-worker 任务
+  - MCP 支持延到 Phase 2
+- 精简 repo 结构:从 MVP 里去掉 packages/config、packages/prompts、packages/sdk
+- 补齐数据模型细节:rooms.system_prompt、room_members.member_type、messages.status、系统消息允许 sender_id 为 null
+- 定义了渐进式 milestone 路径(M0→M6)
+- 识别并记录开发 / 测试 / 维护风险
 
-## Decisions
-- TypeScript everywhere (evaluated Python Agents SDK, chose TS for MVP simplicity)
-- Fastify for agent-runtime (independent HTTP service)
-- OpenAI Node.js SDK (self-built orchestration to learn agent patterns)
-- SSE for streaming in Phase 1
-- Auth.js (credentials provider first)
+## 决策
+- 全栈 TypeScript(权衡过 Python Agents SDK,MVP 阶段选 TS 更简单)
+- agent-runtime 用 Fastify(独立 HTTP 服务)
+- OpenAI Node.js SDK(自建编排,顺便学 agent 模式)
+- Phase 1 用 SSE 流式
+- Auth.js(先 credentials provider)
 - Drizzle ORM
-- BullMQ for async task queue
-- Docker Compose for local dev (PostgreSQL + Redis)
-- agent-runtime mock mode for UI development
-- Streaming message persistence: create with status=streaming, update to completed
+- BullMQ 做异步任务队列
+- 本地开发用 Docker Compose(PostgreSQL + Redis)
+- agent-runtime 带 mock mode 方便 UI 开发
+- 流式消息持久化:先写入 `status=streaming`,完成后更新为 `completed`
 
-### Milestone 1: Monorepo skeleton (2026-04-05)
-- Initialized pnpm workspace (pnpm@9.15.4) + Turborepo
-- Created root configs: package.json, turbo.json, tsconfig.base.json, .gitignore, .env.example
-- Scaffolded apps/web with minimal Next.js App Router setup
-- Scaffolded packages/types and packages/db with placeholder exports
-- Scaffolded services/agent-runtime with Fastify health endpoint
-- Scaffolded services/memory-worker with placeholder
-- Created infra/ and docs/ directories
-- Verified: `pnpm install` and `pnpm -r build` both succeed
+### Milestone 1:Monorepo 骨架(2026-04-05)
+- 初始化 pnpm workspace(pnpm@9.15.4)+ Turborepo
+- 搭好 root 配置:package.json、turbo.json、tsconfig.base.json、.gitignore、.env.example
+- 搭 apps/web,最小 Next.js App Router
+- 搭 packages/types 和 packages/db,先放占位导出
+- 搭 services/agent-runtime,带 Fastify health 端点
+- 搭 services/memory-worker,占位
+- 建 infra/ 和 docs/ 目录
+- 验证:`pnpm install` 和 `pnpm -r build` 都成功
 
-### Milestone 2: Minimal chat chain (2026-04-05)
-- agent-runtime: POST /chat endpoint with SSE streaming via OpenAI SDK
-- LLM client uses lazy initialization (getClient/getModel) to work with dotenv
-- Supports configurable provider via LLM_BASE_URL / LLM_API_KEY / LLM_MODEL env vars
-- Mock mode (MOCK_LLM=true) returns fake streaming for UI dev
-- apps/web: API route at /api/chat proxies to agent-runtime, streams SSE back
-- apps/web: Chat UI with message list, input box, streaming display
-- Verified end-to-end: DeepSeek API streaming through Next.js → agent-runtime → browser
-- D1 risk resolved: Next.js SSE proxy works correctly via Response body passthrough
+### Milestone 2:最简聊天链路(2026-04-05)
+- agent-runtime:POST /chat 端点,用 OpenAI SDK 做 SSE 流
+- LLM client 用惰性初始化(getClient/getModel),配合 dotenv 能正常工作
+- 支持通过 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 配置 provider
+- Mock 模式(MOCK_LLM=true)返回假的流式响应,给 UI 开发用
+- apps/web:/api/chat 路由转发到 agent-runtime,把 SSE 原样流回前端
+- apps/web:聊天 UI,消息列表 + 输入框 + 流式显示
+- 端到端验证:DeepSeek API 的流能经 Next.js → agent-runtime → 浏览器跑通
+- D1 风险解除:Next.js 用 Response body passthrough 做 SSE 代理是可行的
 
-### Milestone 3: Database + message persistence (2026-04-05)
-- Docker Compose: PostgreSQL 16 + Redis 7 (infra/docker-compose.yml)
-- Drizzle schema: users, agents, rooms, room_members, messages, user_memories, room_summaries
+### Milestone 3:数据库 + 消息持久化(2026-04-05)
+- Docker Compose:PostgreSQL 16 + Redis 7(infra/docker-compose.yml)
+- Drizzle schema:users、agents、rooms、room_members、messages、user_memories、room_summaries
 - drizzle-kit push + generate migration
-- Seed script: demo user + assistant agent + General room
-- apps/web: /api/chat now persists user message, creates streaming agent message, updates to completed
-- apps/web: /api/messages returns room history, /api/rooms returns room list
-- apps/web: page loads history from DB on mount
-- Next.js env loading via dotenv (root .env from apps/web)
-- Next.js serverExternalPackages for postgres driver
-- Verified: messages persist across page refresh
+- Seed 脚本:demo 用户 + assistant agent + General 房间
+- apps/web:/api/chat 现在会持久化用户消息、新建 streaming 状态的 agent 消息、完成后更新
+- apps/web:/api/messages 返回房间历史,/api/rooms 返回房间列表
+- apps/web:页面挂载时从 DB 加载历史
+- Next.js env 通过 dotenv 加载(从 apps/web 读 root .env)
+- Next.js 的 serverExternalPackages 配置了 postgres 驱动
+- 验证:刷新后消息仍在
 
-### Milestone 4: Rooms (2026-04-05)
-- Refactored page into sidebar + chat panel layout
-- Extracted ChatPanel and Sidebar components
-- POST /api/rooms creates room and auto-binds default agent
-- GET /api/rooms returns all rooms ordered by creation time
-- Room switching loads messages per room (ChatPanel re-mounts via key)
-- Verified: two rooms with completely isolated message histories
+### Milestone 4:房间(2026-04-05)
+- 把页面重构成 sidebar + chat panel 两栏布局
+- 抽出 ChatPanel 和 Sidebar 组件
+- POST /api/rooms 创建房间并自动绑定默认 agent
+- GET /api/rooms 按创建时间返回所有房间
+- 切换房间时按房间加载消息(ChatPanel 靠 key 重新挂载)
+- 验证:两个房间,消息历史完全隔离
 
-### Milestone 5: Auth (2026-04-05)
-- Auth.js (next-auth beta) with credentials provider + JWT strategy
-- Register API (/api/register) with bcryptjs password hashing
-- Login page + Register page with form validation
-- SessionProvider in layout for client-side session access
-- Middleware redirects unauthenticated users to /login
-- All API routes protected via getRequiredUser() session check
-- Rooms associated with users via room_members (membership-based, not owner-only)
-- rooms.createdBy field added to schema
-- Sidebar shows current user name + logout button
-- apps/web/.env.local for Next.js native env loading (AUTH_SECRET, DATABASE_URL)
-- Fixed rooms query: two-step query (memberships → rooms) instead of innerJoin
+### Milestone 5:认证(2026-04-05)
+- Auth.js(next-auth beta)+ credentials provider + JWT 策略
+- 注册 API(/api/register)用 bcryptjs 做 password hash
+- 登录页 + 注册页,表单校验
+- layout 里放 SessionProvider,客户端可读 session
+- Middleware 把未登录用户重定向到 /login
+- 所有 API 路由通过 getRequiredUser() 做 session 校验
+- 房间通过 room_members 关联用户(基于成员资格,不是 owner 独占)
+- schema 加 rooms.createdBy 字段
+- Sidebar 显示当前用户名 + 登出按钮
+- apps/web/.env.local 给 Next.js 原生 env 读(AUTH_SECRET、DATABASE_URL)
+- 修 rooms 查询:改成两步查(memberships → rooms)而非 innerJoin
 
-### Milestone 6: Room summaries + User memory (2026-04-10)
-- services/memory-worker: BullMQ `memory` queue consumer, dispatching by job name
-- apps/web: `lib/queue.ts` `pushMemoryJobs(roomId, userId)` called from `lib/chat/stream.ts` after streaming completes
+### Milestone 6:房间摘要 + 用户记忆(2026-04-10)
+- services/memory-worker:BullMQ `memory` 队列消费者,按 job name 分发
+- apps/web:`lib/queue.ts` 的 `pushMemoryJobs(roomId, userId)` 在 `lib/chat/stream.ts` 流式结束后调用
 - Job 1 — room-summary:
-  - Triggered every chat turn; skips unless ≥20 new messages since last summary (`SUMMARY_THRESHOLD`)
-  - Reads latest 100 messages, resolves real user names, feeds previous summary + transcript to LLM
-  - Writes new row into `room_summaries` (append-only; latest row wins at read time)
+  - 每轮聊天都触发;除非自上次摘要以来新增消息 ≥20 条(`SUMMARY_THRESHOLD`)才真跑
+  - 读最近 100 条消息,解析真实用户名,把上一版摘要 + transcript 喂给 LLM
+  - 新行 append 进 `room_summaries`(append-only,读时取最新一行)
 - Job 2 — user-memory:
-  - Deduped per user via `jobId = user-memory-{userId}-{5min-bucket}` (max one extraction per 5 min per user)
-  - Skipped if user has <3 messages in room
-  - Loads ALL existing memories for the user, groups by category with ids, passes to LLM
-  - LLM returns strict JSON `{actions: [create|update|delete]}` via `response_format: json_object`
-  - Actions applied in a single DB transaction; validates category/importance enums before write
-  - Categories: identity | preference | relationship | event | opinion | context
-  - Importance: high | medium | low (drives read-side ordering)
+  - 按用户去重:`jobId = user-memory-{userId}-{5min-bucket}`(同一用户 5 分钟最多一次抽取)
+  - 用户在房间内消息数 <3 就跳过
+  - 加载该用户的**全部**活跃记忆,按 category 分组带 id,喂给 LLM
+  - LLM 用 `response_format: json_object` 返回严格 JSON `{actions: [create|update|delete]}`
+  - Actions 在单个 DB 事务里应用;写入前校验 category / importance 枚举
+  - Category:identity | preference | relationship | event | opinion | context
+  - Importance:high | medium | low(影响读侧排序)
 - Schema:
-  - `user_memories`: content, category (enum), importance (enum), sourceRoomId, userId, timestamps
-  - `room_summaries`: content, messageCount (string), roomId, createdAt (append log)
-- Read path (apps/web `lib/chat/context.ts`):
-  - `getLatestSummary(roomId)` — most recent summary row
-  - `getRoomUsersMemories(roomId)` — memories for ALL user members (max 15/user), ordered by importance then recency, grouped by user name → category
-  - `buildSystemPrompt` injects memory section ("What you remember about {name}:") and summary section into the 6-layer prompt
-  - Context assembly stays in Next.js per architecture rule; agent-runtime receives fully-built messages array
-- Context dedup: bigram-based similarity filter removes near-duplicate agent replies from the window before sending to LLM (CJK-safe)
+  - `user_memories`:content、category(enum)、importance(enum)、sourceRoomId、userId、时间戳
+  - `room_summaries`:content、messageCount(string)、roomId、createdAt(append log)
+- 读路径(apps/web `lib/chat/context.ts`):
+  - `getLatestSummary(roomId)` —— 最新一条 summary
+  - `getRoomUsersMemories(roomId)` —— 房间所有用户成员的记忆(每人最多 15 条),按 importance + recency 排序,按用户名 → category 分组
+  - `buildSystemPrompt` 把 memory 段("What you remember about {name}:")和 summary 段注入六层 prompt
+  - 按架构规则,context 组装留在 Next.js 侧;agent-runtime 只收到构造好的 messages 数组
+- Context dedup:bigram 相似度过滤,把窗口里的近重复 agent 回复剔掉再喂给 LLM(对 CJK 安全)
 
-### Image messages (2026-04-12)
-- Users can send images in rooms; images broadcast to other members like text messages, but do not trigger LLM calls
-- Storage: Tencent Cloud COS (bucket `agentimage-1411620332`, region `ap-guangzhou`, public-read / private-write)
-- Upload path: browser → COS direct, Next.js only signs STS temp credentials
-- Compression: browser-side canvas, long edge ≤1600px, JPEG quality 0.8 (via `apps/web/src/lib/upload-image.ts`)
-- New route `POST /api/upload/sts` — verifies room membership, issues STS credential scoped to a single key `rooms/{roomId}/{userId}/{yyyymm}/{uuid}.jpg`, 10-minute TTL
-- New route `POST /api/messages/image` — validates URL host (`*.myqcloud.com`), persists with `contentType="image"`, `content=publicUrl`, publishes `user-message` Redis event
-- `RoomEvent.message` gained optional `contentType` field; ChatPanel renders `<img>` when `contentType === "image"`, otherwise falls back to text
-- ChatPanel: new image button uses `<input type="file">`, optimistic local append + seenIds dedup against Socket.IO echo
-- Schema unchanged — existing `messages.contentType` varchar(50) was already in place from M3
-- Deps added: `qcloud-cos-sts` (server STS signing), `cos-js-sdk-v5` (browser PUT with temp credentials)
-- Env: `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`, `TENCENT_COS_BUCKET`, `TENCENT_COS_REGION`
+### 图片消息(2026-04-12)
+- 用户可以在房间里发图片;图片像文本消息一样广播到其他成员,但**不**触发 LLM
+- 存储:腾讯云 COS(bucket `agentimage-1411620332`,region `ap-guangzhou`,公共读 / 私有写)
+- 上传路径:浏览器 → COS 直传,Next.js 只负责签 STS 临时凭证
+- 压缩:浏览器端 canvas,长边 ≤1600px,JPEG quality 0.8(`apps/web/src/lib/upload-image.ts`)
+- 新路由 `POST /api/upload/sts` —— 校验房间成员身份,签发范围限定到单 key `rooms/{roomId}/{userId}/{yyyymm}/{uuid}.jpg` 的 STS,10 分钟 TTL
+- 新路由 `POST /api/messages/image` —— 校验 URL 主机名(`*.myqcloud.com`),以 `contentType="image"`、`content=publicUrl` 持久化,发 `user-message` Redis 事件
+- `RoomEvent.message` 增加可选 `contentType` 字段;ChatPanel 在 `contentType === "image"` 时渲染 `<img>`,否则回退文本
+- ChatPanel:新增图片按钮用 `<input type="file">`,本地乐观 append + seenIds 对 Socket.IO echo 做去重
+- Schema 无变化 —— M3 就已经有 `messages.contentType` varchar(50)
+- 新依赖:`qcloud-cos-sts`(服务端 STS 签名)、`cos-js-sdk-v5`(浏览器端带临时凭证的 PUT)
+- 环境变量:`TENCENT_SECRET_ID`、`TENCENT_SECRET_KEY`、`TENCENT_COS_BUCKET`、`TENCENT_COS_REGION`
 
 ## Phase 2 milestones
 
-### A: Memory safety foundation (2026-04-17)
-- A1 — schema: `user_memories` gained `source` (enum `extracted | user_explicit`), `deleted_at`, `last_reinforced_at`. Migration `0002_nifty_matthew_murdock.sql`.
-- A2 — `getUserMemories` / `getRoomUsersMemories` filter `isNull(deletedAt)` so soft-deletes disappear from the prompt.
-- A3 — memory-worker now loads active + tombstoned memories, passes tombstones as "DO NOT RECREATE" in the prompt. Three-layer lock on `source='user_explicit'`: extraction prompt, in-code `lockedIds` guard, SQL `source='extracted'` predicate. Worker DELETE changed from hard to soft (becomes a tombstone) so agent/worker cannot loop create→delete.
-- A4 — `/memories` page (list / add / edit / forget) + `GET/POST/PATCH/DELETE /api/memories[/:id]`. All user-UI writes flip `source='user_explicit'`, locking the row against automated overwrite.
+### A:记忆安全基础(2026-04-17)
+- A1 — schema:`user_memories` 增加 `source`(enum `extracted | user_explicit`)、`deleted_at`、`last_reinforced_at`。Migration `0002_nifty_matthew_murdock.sql`
+- A2 — `getUserMemories` / `getRoomUsersMemories` 加 `isNull(deletedAt)`,软删除不再出现在 prompt 里
+- A3 — memory-worker 现在同时加载活跃记忆 + 墓碑,prompt 里用 "DO NOT RECREATE" 标墓碑。`source='user_explicit'` 做三层锁:抽取 prompt 标注、代码里 `lockedIds` 拦截、SQL `source='extracted'` 谓词。worker 的 DELETE 从硬删改成软删(变成墓碑),这样 agent/worker 不会陷入 create→delete 循环
+- A4 — `/memories` 页面(列表 / 新增 / 编辑 / 遗忘)+ `GET/POST/PATCH/DELETE /api/memories[/:id]`。所有 UI 写操作都把 `source` 翻到 `user_explicit`,把行锁死不被自动流程覆盖
 
-### B: Tool-calling infrastructure (2026-04-17)
-- B1 — `services/agent-runtime/src/index.ts` runs a tool loop: stream tool_call deltas by `index`, accumulate `id/name/args`, stop on `finish_reason=tool_calls`, POST to `toolCallbackUrl` with `Authorization: Bearer <jwt>`, feed `role:"tool"` results back, continue up to `maxToolRounds` (default 5, hard cap 10). SSE extended with `{tool_call}` + `{tool_result}` events alongside `{content}`. Mock mode gains `mockToolStream` so loop is verifiable without a real key.
-- B2 — `apps/web/src/lib/tool-token.ts` signs HS256 JWT via `jose` (`sub=userId`, `roomId`, 10-min TTL). `apps/web/src/app/api/agent/tool/route.ts` verifies and dispatches through `toolRegistry`. Ownership of side effects is derived from the token, never from request args.
-- Fix — `packages/logger` read `LOG_DIR` at module-load time, before dotenv ran. Moved the read into `getLogger()` so non-root deployments can override the default `/root/agent-platform/logs`.
+### B:Tool-calling 基础设施(2026-04-17)
+- B1 — `services/agent-runtime/src/index.ts` 跑工具循环:按 `index` 流式累积 tool_call 的 `id/name/args`,遇到 `finish_reason=tool_calls` 停下,带 `Authorization: Bearer <jwt>` POST 到 `toolCallbackUrl`,把 `role:"tool"` 结果回喂,最多 `maxToolRounds` 轮(默认 5,硬上限 10)。SSE 协议扩展出 `{tool_call}` + `{tool_result}` 事件,和原有 `{content}` 并列。Mock 模式加了 `mockToolStream`,无真实 key 也能验证循环
+- B2 — `apps/web/src/lib/tool-token.ts` 用 `jose` 签 HS256 JWT(`sub=userId`、`roomId`、10 分钟 TTL)。`apps/web/src/app/api/agent/tool/route.ts` 验签后分发到 `toolRegistry`。副作用的所有权由 token 决定,**不**信任请求 args
+- 顺手修 — `packages/logger` 之前在模块加载时读 `LOG_DIR`,早于 dotenv。改成 `getLogger()` 内读取,非 root 部署就能覆盖默认的 `/root/agent-platform/logs`
 
-### C: On-demand retrieval (2026-04-17)
-- C1 — five tools registered in `apps/web/src/lib/tools/memory-tools.ts`:
-  - `search_memories({query?, category?, limit})` — ILIKE substring, soft-deletes excluded.
-  - `search_messages({query, limit, before?})` — completed messages in the caller's room; ILIKE with `\ % _` escape; sender-name resolution.
-  - `remember({content, category, importance})` — writes `source='extracted'` so worker can still correct; bigram-Jaccard near-dup guard (threshold 0.55) short-circuits and returns the similar memory instead of creating.
-  - `update_memory({memoryId, content?, category?, importance?})` — stamps `source='user_explicit'` + `lastReinforcedAt=now`.
-  - `forget_memory({memoryId, reason?})` — soft delete + `source='user_explicit'`.
-- C2 — `buildSystemPrompt` pins only `category='identity' OR importance='high'` memories (cap 8/user) plus the latest summary. Adds a TOOL USAGE section describing when each tool is appropriate and instructing the agent not to call a tool when current context is sufficient. `streamAgentResponse` signs a JWT per request and passes `tools: agentToolDefs`, `toolCallbackUrl`, `toolAuth` through to agent-runtime. Title-generation path kept tool-free.
-- End-to-end verified against real DeepSeek: user "请忘掉…我喜欢志龙哥" → agent emitted `search_memories({"query":"志龙哥"})` → `forget_memory({memoryId, reason})` → confirmed in Chinese. DB: row flipped to `deleted_at IS NOT NULL`, `source='user_explicit'`.
+### C:按需检索(2026-04-17)
+- C1 — `apps/web/src/lib/tools/memory-tools.ts` 注册 5 个工具:
+  - `search_memories({query?, category?, limit})` —— ILIKE 子串,软删除排除
+  - `search_messages({query, limit, before?})` —— caller 房间内的 completed 消息;ILIKE 带 `\ % _` 转义;resolve 发送人名字
+  - `remember({content, category, importance})` —— 写 `source='extracted'` 让 worker 仍能修正;bigram-Jaccard 近似重复保护(阈值 0.55)短路返回相似记忆而不新建
+  - `update_memory({memoryId, content?, category?, importance?})` —— 盖上 `source='user_explicit'` + `lastReinforcedAt=now`
+  - `forget_memory({memoryId, reason?})` —— 软删 + `source='user_explicit'`
+- C2 — `buildSystemPrompt` 只 pin `category='identity' OR importance='high'` 的记忆(每用户 8 条上限)加最新 summary。新增 TOOL USAGE 段,讲清楚每个工具的用法,并叮嘱 agent 在当前 context 已足够时别调工具。`streamAgentResponse` 每次请求签一个 JWT,把 `tools: agentToolDefs`、`toolCallbackUrl`、`toolAuth` 一起传给 agent-runtime。生成房间标题的路径仍然不带工具
+- 真实 DeepSeek 端到端验证过:用户 "请忘掉…我喜欢志龙哥" → agent 发出 `search_memories({"query":"志龙哥"})` → `forget_memory({memoryId, reason})` → 中文确认。DB 层:那行翻到 `deleted_at IS NOT NULL`、`source='user_explicit'`
 
-## Multi-user memory rework (2026-04-18)
+## 多用户记忆重构(2026-04-18)
 
-Reshape the memory model from "always 1:1" to "multi-user + single agent". Previously `user_memories.user_id` served both "owner" and "subject" roles; in a group chat any fact the agent tried to remember about a non-speaker ended up attributed to the speaker. Four additive phases, zero destructive migrations.
+把记忆模型从"永远 1:1"改成"多用户 + 单 agent"。之前 `user_memories.user_id` 身兼"owner"和"subject"两职,群聊里 agent 想记"A 说的关于 B 的事"最后都变成了 A 自己的记忆。四个增量阶段,零破坏性迁移。
 
-### Phase 1 — Strict prompt guardrail
-- `buildSystemPrompt` appended a STRICT section forbidding remember/update/forget for anyone other than the current speaker, and forbidding search against other members. Zero schema change, deployable immediately.
-- `docs/memory-system.md` §12 documents the scope matrix (pinned-vs-tool asymmetry) and the rule.
+### Phase 1 — 严格 prompt 护栏
+- `buildSystemPrompt` 追加 STRICT 段,禁止对说话者以外的人调 remember/update/forget,也禁止对其他成员做 search。零 schema 改动,可以立刻部署
+- `docs/memory-system.md` §12 记录作用域矩阵(pinned vs tool 的非对称)和这条规则
 
-### Phase 2 — Subject / author split + pending confirmation
-- Schema `0004_memory_authorship.sql`: `user_memories` gained `authored_by_user_id` (NULL or = user_id = self; otherwise third-party) and `confirmed_at` (NULL = pending when third-party). Partial index `user_memories_pending_idx` serves the "待确认" listing.
-- `apps/web/src/lib/memory-filters.ts` exposes `visibleToSubject()` — the single WHERE expression reused by pinned injection, `search_memories`, `GET /api/memories`, `PATCH /api/memories/:id`, and all the `update_memory` / `forget_memory` paths. Prevents pending rows from appearing anywhere until the subject accepts.
-- `apps/web/src/lib/tools/resolvers.ts` · `resolveRoomMemberByName` — case-insensitive exact-match name lookup in room members. Reused by `remember(subjectName)` and (later) `relate`.
-- Tools: `remember` gained optional `subjectName`; third-party writes land pending. `update_memory` / `forget_memory` use `visibleToSubject()` so pending rows aren't silently mutated. New `confirm_memory` tool lets the agent accept a pending fact on the subject's behalf mid-conversation.
-- API: `GET /api/memories` returns `{ mine, pending }` with author display names resolved. New `POST /api/memories/:id/confirm`. DELETE handles rejection of pending rows.
-- UI: `/memories` page gained a tab bar ("我的记忆" / "待确认") with a pending badge and 接受/拒绝 buttons.
-- Worker: extraction prompt treats `[PENDING]` rows like `[LOCKED]` (SKIP on duplicate content, forbid UPDATE/DELETE); `pendingIds` joins `lockedIds` as secondary rejection sets in the transaction.
-- Prompt: Phase 1's strict rule softened — remember with subjectName is now the right move for clearly useful cross-session facts, but is discouraged for casual mentions.
+### Phase 2 — subject/author 拆分 + 待确认代写
+- Schema `0004_memory_authorship.sql`:`user_memories` 新增 `authored_by_user_id`(NULL 或 = user_id 代表自述;否则第三方)和 `confirmed_at`(第三方代写时 NULL = pending)。部分索引 `user_memories_pending_idx` 服务于"待确认"列表
+- `apps/web/src/lib/memory-filters.ts` 暴露 `visibleToSubject()` —— 统一的 WHERE 表达式,pinned 注入、`search_memories`、`GET /api/memories`、`PATCH /api/memories/:id`、`update_memory` / `forget_memory` 都复用。保证 pending 行在 subject 接受前不会出现在任何地方
+- `apps/web/src/lib/tools/resolvers.ts` · `resolveRoomMemberByName` —— 按房间成员列表做大小写不敏感的精确匹配。`remember(subjectName)` 和后续的 `relate` 复用
+- 工具层:`remember` 新增可选 `subjectName`,第三方写入落 pending。`update_memory` / `forget_memory` 用 `visibleToSubject()`,pending 行不会被悄悄改。新增 `confirm_memory` 工具,agent 可以在对话里帮 subject 代收 pending fact
+- API:`GET /api/memories` 返回 `{ mine, pending }`,带作者显示名。新增 `POST /api/memories/:id/confirm`。DELETE 处理 pending 行的"拒绝"
+- UI:`/memories` 页面加 tab bar("我的记忆" / "待确认"),待确认 tab 带红点 + 接受/拒绝按钮
+- Worker:抽取 prompt 对 `[PENDING]` 行的处理跟 `[LOCKED]` 一样(内容重复则 SKIP,禁止 UPDATE/DELETE);`pendingIds` 和 `lockedIds` 一起构成事务层面的第二道拒绝集
+- Prompt:Phase 1 的强硬规则放宽 —— 对他人明显有跨会话价值的 fact,带 subjectName 调 remember 是对的,只是不鼓励为"顺口一提"的细节这么做
 
-### Phase 3 — Room-shared memories
-- Schema `0005_room_memories.sql`: new `room_memories(id, room_id, content, importance, created_by_user_id, source, deleted_at, ...)` with `room_memories_active_idx` partial index.
-- Tools: `search_room_memory`, `save_room_fact`, `forget_room_fact` — all JWT-room-scoped; `forget_room_fact` only touches `source='extracted'` so UI-authored entries are safe from tool-path deletions.
-- Injection: `getRoomMemories(roomId)` + `buildSystemPrompt` `roomMemories` field render a new "Room context: ..." layer between room rules and per-user pinned facts.
-- API: `GET/POST /api/rooms/:id/memories` + `PATCH/DELETE /api/rooms/:id/memories/:memId`, all gated by room-member check. UI writes → `source='user_explicit'`.
-- UI: new `RoomSettings.tsx` modal reached via the Sidebar room ⋯ menu item "房间共享事实". Add / inline-edit / delete.
+### Phase 3 — 房间共享记忆
+- Schema `0005_room_memories.sql`:新表 `room_memories(id, room_id, content, importance, created_by_user_id, source, deleted_at, ...)`,带 `room_memories_active_idx` 部分索引
+- 工具:`search_room_memory`、`save_room_fact`、`forget_room_fact` —— 都按 JWT 的房间范围锁;`forget_room_fact` 只动 `source='extracted'` 的行,UI 加的 `user_explicit` 行不会被工具路径删掉
+- 注入:`getRoomMemories(roomId)` + `buildSystemPrompt` 的 `roomMemories` 字段,在房间规则和每用户 pinned fact 之间渲染新的 "Room context: ..." 层
+- API:`GET/POST /api/rooms/:id/memories` + `PATCH/DELETE /api/rooms/:id/memories/:memId`,全部过房间成员校验。UI 写入 → `source='user_explicit'`
+- UI:新 `RoomSettings.tsx` modal,从 Sidebar 房间 ⋯ 菜单的"房间共享事实"进入。支持新增 / 行内编辑 / 删除
 
-### Phase 4 — Bidirectional user relationships
-- Schema `0006_user_relationships.sql`: `user_relationships(a_user_id, b_user_id, kind, content, confirmed_by_a, confirmed_by_b, ...)`. CHECK `a_user_id < b_user_id` canonicalises pairs; UNIQUE `(a_user_id, b_user_id, kind)` prevents duplicates. Partial indexes on each side.
-- Tools: `relate({ otherUserName, kind, content? })` — upserts and fills the speaker's `confirmed_by_*` side only; `search_relationships({ withUserName? })` — returns fully-confirmed edges involving the speaker; `unrelate({ relationshipId })` — soft-delete from either side.
-- Injection: `getConfirmedRelationshipsForUser(userId, roomMemberIds)` returns edges where BOTH sides confirmed AND the other side is present in the current room. `buildSystemPrompt` renders "Known relationships involving {speaker}:" layer.
-- API: `GET /api/relationships` → `{ confirmed, pending, outgoing }`; `POST /api/relationships` (propose/confirm upsert); `POST /api/relationships/:id/confirm`; `DELETE /api/relationships/:id`.
-- UI: `/memories` gained a "关系" tab with three sections (待确认 incoming, 已确认, 已发出 outgoing) and an inline "+ 新增关系" form that picks a mutual friend via `/api/friends`.
-- Docs (`docs/memory-system.md`): §2 data model expanded to 3 tables; §12 rewritten to describe the current scope matrix + privacy defaults (自述 public to room, 他述 private to subject, room memory public, relationships bidirectional-consent).
+### Phase 4 — 双向确认的用户关系
+- Schema `0006_user_relationships.sql`:`user_relationships(a_user_id, b_user_id, kind, content, confirmed_by_a, confirmed_by_b, ...)`。CHECK `a_user_id < b_user_id` 规范化 pair 顺序;UNIQUE `(a_user_id, b_user_id, kind)` 防重复。两侧各有部分索引
+- 工具:`relate({ otherUserName, kind, content? })` —— upsert,只填说话方那一侧的 `confirmed_by_*`;`search_relationships({ withUserName? })` —— 返回已双向确认、涉及说话者的边;`unrelate({ relationshipId })` —— 任一侧可软删
+- 注入:`getConfirmedRelationshipsForUser(userId, roomMemberIds)` 返回**两侧都已确认**且另一方也在当前房间的边。`buildSystemPrompt` 渲染 "Known relationships involving {speaker}:" 层
+- API:`GET /api/relationships` → `{ confirmed, pending, outgoing }`;`POST /api/relationships`(propose/confirm upsert);`POST /api/relationships/:id/confirm`;`DELETE /api/relationships/:id`
+- UI:`/memories` 页面加"关系"tab,三段(待确认收件、已确认、已发出),以及一个行内"+ 新增关系"表单,候选人走 `/api/friends`
+- 文档(`docs/memory-system.md`):§2 数据模型扩到 3 张表;§12 重写,描述现在的作用域矩阵 + 隐私默认值(自述公开到房间、他述私有到 subject、房间记忆公开、关系双向同意才生效)
 
-## Dynamic memory, Phase A (2026-04-19)
+## 动态记忆,Phase A(2026-04-19)
 
-Give memory a time dimension and let it evolve. Inspired by Park et al.'s
-Generative Agents (recency × importance × relevance) and MemoryBank
-(Ebbinghaus-style decay).
+给记忆加一个时间维度,让它可以演化。设计源自 Park et al. 的 Generative Agents(recency × importance × relevance)和 MemoryBank(Ebbinghaus 遗忘曲线)。
 
-- Schema `0007_memory_temporal.sql`: `user_memories` gained `event_at timestamptz` and `strength real NOT NULL DEFAULT 1.0`. Partial index `user_memories_event_at_idx (user_id, event_at DESC) WHERE deleted_at IS NULL AND event_at IS NOT NULL` to serve time-range retrieval.
-- Agent prompt (`buildSystemPrompt`): new Layer 1b injects `Current time: YYYY-MM-DD HH:mm Weekday (Asia/Shanghai)` so the LLM resolves "今天" / "昨天" / "刚才" against a concrete anchor before any memory write.
-- Extraction worker (`services/memory-worker/src/jobs/user-memory.ts`):
-  - Messages now fed to the LLM with per-line `[YYYY-MM-DD HH:mm]` timestamps plus a "Current time" banner. Prompt forbids storing relative phrases and requires `eventAt` on CREATE actions for time-bound facts.
-  - Transient facts ("我现在饿了") must be SKIPPED — recurring behaviours surface via reinforcement, not seed rows.
-  - **Near-duplicate ≥0.55 Jaccard → REINFORCE, not skip.** Existing row's `strength += 1` and `last_reinforced_at = now()`. Locked / pending rows fall through to the old skip path. This is the core dynamic-memory signal: repeated mentions grow strength; never-mentioned rows decay on read.
-- `remember` tool (`memory-tools.ts`): accepts optional `eventAt` ISO string; on near-dup hit, reinforces the existing memory instead of returning `skipped`. Locked / pending rows still short-circuit to skip.
-- `search_memories` tool: new optional `from` / `to` ISO params. When a time filter is present, result set is restricted to rows with non-NULL `event_at` and ordered by `event_at DESC` (chronological retrieval). `event_at` is included in the result rows so the agent can read it back.
-- `search_messages` tool: symmetric `after` param added (mirrors existing `before`); chronological ASC ordering when `after` is set.
-- Read-path ranking (`context.ts`): `MEMORY_SCORE_SQL = strength × importance_weight × exp(-age_days / 30)` where age is measured against `COALESCE(last_reinforced_at, updated_at)`. Used by both `getUserMemories` and `getRoomUsersMemories` pinned injection. 30-day half-life chosen as a tunable MVP constant.
-- `infra/update.sh`: adds 0007 to the idempotent raw-SQL migration list.
-- Docs: `docs/memory-system.md` updated — §2 data model +3 columns, §4 writes note reinforcement, new §15 dynamic-memory section covering score formula + time-range tool usage.
+- Schema `0007_memory_temporal.sql`:`user_memories` 增加 `event_at timestamptz` 和 `strength real NOT NULL DEFAULT 1.0`。部分索引 `user_memories_event_at_idx (user_id, event_at DESC) WHERE deleted_at IS NULL AND event_at IS NOT NULL` 服务时间范围检索
+- Agent prompt(`buildSystemPrompt`):新增 Layer 1b,注入 `Current time: YYYY-MM-DD HH:mm Weekday (Asia/Shanghai)`,让 LLM 在写记忆前把"今天"/"昨天"/"刚才"解析到一个具体锚点
+- 抽取 worker(`services/memory-worker/src/jobs/user-memory.ts`):
+  - 喂给 LLM 的消息现在每行都有 `[YYYY-MM-DD HH:mm]` 前缀 + 一个"Current time"banner。Prompt 禁止存相对时间短语,要求对时间敏感的 CREATE action 带 `eventAt`
+  - 瞬时状态("我现在饿了")必须 SKIP —— 重复出现的行为靠 reinforcement 自然涌现,不要在数据里塞种子
+  - **近似重复 ≥0.55 Jaccard → REINFORCE,不是 skip**。现有行 `strength += 1`、`last_reinforced_at = now()`。locked / pending 行仍走旧的 skip 路径。这是动态记忆的核心信号:反复提及的变强,从没人提的在读侧自然衰减
+- `remember` 工具(`memory-tools.ts`):接受可选 `eventAt` ISO 字符串;命中近似重复时强化已有记忆而不是返回 `skipped`。locked / pending 行仍然短路到 skip
+- `search_memories` 工具:新增可选 `from` / `to` ISO 参数。带时间过滤时,结果集限定在 `event_at` 非空的行,并按 `event_at DESC` 时间倒序排列。返回行里包含 `event_at`,agent 能读回用
+- `search_messages` 工具:补对称的 `after` 参数(与已有 `before` 对应);带 `after` 时用时间正序排列
+- 读路径排序(`context.ts`):`MEMORY_SCORE_SQL = strength × importance_weight × exp(-age_days / 30)`,age 以 `COALESCE(last_reinforced_at, updated_at)` 为基准。`getUserMemories` 和 `getRoomUsersMemories` pinned 注入都用这个排序。30 天半衰期是可调的 MVP 值
+- `infra/update.sh`:把 0007 加入幂等原生 SQL 迁移列表
+- 文档:`docs/memory-system.md` 更新 —— §2 数据模型加 3 列,§4 写入章节标注强化行为,新增 §15 动态记忆章节,覆盖评分公式和时间范围工具用法
 
-Note: `memory-worker` log key renamed `dupSkipped → reinforced`. Grafana/log consumers filtering on the old key need to be updated.
+注意:`memory-worker` 日志 key 从 `dupSkipped` 改成 `reinforced`。Grafana / 日志消费者之前过滤旧 key 的要改
 
-## Post-Phase-A follow-ups (2026-04-19)
+## Phase A 后续补丁(2026-04-19)
 
-Shipped the same day Phase A landed, once live usage surfaced gaps.
+Phase A 上线当天,真实使用暴露的几个缺口立刻补上。
 
-### Temporal awareness in the recent-message window
-- `buildLLMMessages`: every user message line is now prefixed with `[YYYY-MM-DD HH:mm]` in Asia/Shanghai, so the agent sees time flow across the 50-message window rather than just the single "Current time" anchor. Cost: ~18 tokens/line, negligible at 8k ctx.
-- If the most recent message is >6h old, a one-line gap note is appended to the system prompt ("about 3 days have passed since the last message in this room") so the agent can open with "好久不见" naturally rather than acting like no time passed.
-- Important fix: timestamps are NOT prefixed to assistant messages. An earlier iteration prefixed both, and the LLM mimicked the pattern — every reply started with `[2026-04-19 13:56] ...`. System prompt rule #2 additionally spells out that the bracketed stamp is metadata to be read, not echoed.
+### 最近消息窗口的时间感知
+- `buildLLMMessages`:每条 user 消息现在都有 `[YYYY-MM-DD HH:mm]`(Asia/Shanghai)前缀,agent 能看到整个 50 条窗口的时间流,不是只有 system prompt 里一个"Current time"锚点。成本:每行约多 18 token,在 8k 上下文里可忽略
+- 若最近一条消息距离现在 >6 小时,在 system prompt 末尾附一行 gap note("about 3 days have passed since the last message in this room"),agent 能自然地开场"好久不见",不再像刚聊过一样回复
+- 关键修复:assistant 消息**不**加时间戳前缀。早期版本两边都加,结果 LLM 模仿格式,每次回复都以 `[2026-04-19 13:56] ...` 开头。system prompt 规则 #2 也明确告诉模型方括号时间戳是 metadata,只读不复述
 
-### Retrieval reinforces recency (Park et al. other half)
-- `search_memories`: after the select, fires a non-blocking `UPDATE user_memories SET last_reinforced_at = now()` on the returned row ids. `strength` is intentionally untouched — that tracks how often a fact was claimed; retrieval is a different signal that only moves the decay anchor.
-- Closes a real gap: facts heavily USED by the agent (e.g. "住在深圳" queried every restaurant-recommendation turn) used to decay out of pinned if the user never re-stated them. Now stay fresh as long as they're being looked up.
-- Applies to both `source='extracted'` and `user_explicit` rows — no content/category/deletion mutation, so user-locked facts are safe.
+### 检索强化 recency(Park et al. 的另一半)
+- `search_memories`:select 完后对返回行 id 列表异步 fire-and-forget `UPDATE user_memories SET last_reinforced_at = now()`。`strength` 故意不碰 —— 那个字段计"fact 被声明过几次",检索是另一种信号,只影响衰减锚点
+- 补上真实缺口:被 agent 频繁**使用**的 fact(比如"住在深圳"在每次推荐餐厅时被查)以前会因为用户没再重复而衰减出 pinned。现在只要还被调用就保持新鲜
+- 对 `source='extracted'` 和 `user_explicit` 一视同仁 —— 不改 content/category/deletion,user-locked 记忆也只是保持排名靠前,安全
 
-### Chat UI
-- ChatPanel: each message now shows `HH:mm` next to the sender name; a day-divider pill appears whenever the day boundary crosses (`今天` / `昨天` / `MM月DD日 周X`, adds year if >365d old). Asia/Shanghai formatting.
-- Sidebar: rooms now sort by most recent activity. `GET /api/rooms` returns `lastActivityAt` via a correlated subquery `MAX(messages.created_at WHERE status='completed')`, falling back to `rooms.created_at`. A new `UserEvent: room-activity {roomId, at}` is published by the user-message save path and the agent-message completion path (`publishRoomActivity` helper) to every room member; the client updates the matching row and re-sorts.
-- FLIP animation: when `rooms` reorders, `useLayoutEffect` snapshots each row's `offsetTop`, measures again after layout, applies an inverting translateY for moved rows, then transitions back to zero with 260ms cubic-bezier. No animation library — plain DOM.
+### 聊天 UI
+- ChatPanel:每条消息在 sender 名旁多了 `HH:mm`;跨天时插入居中的日期分隔胶囊(`今天` / `昨天` / `MM月DD日 周X`,超过一年加年份前缀)。Asia/Shanghai 格式
+- Sidebar:房间按最近活跃时间排序。`GET /api/rooms` 通过相关子查询 `MAX(messages.created_at WHERE status='completed')` 返回 `lastActivityAt`,空房间 fallback 到 `rooms.created_at`。新的 `UserEvent: room-activity {roomId, at}` 由用户消息保存路径和 agent 消息完成路径(`publishRoomActivity` helper)广播给所有房间成员;客户端更新对应行并重新排序
+- FLIP 动画:`rooms` 重排时,`useLayoutEffect` 拍下每行 `offsetTop`,layout 后再次测量,对位置变化的行应用反向 `translateY`,下一帧用 260ms cubic-bezier transition 回零。没用动画库,纯 DOM
 
-### Cross-browser compat: "white sidebar" on older Huawei / HarmonyOS / Quark
-Root cause: DaisyUI v5 declares every theme color as `oklch()`. Browsers older than Chromium 111 reject the whole `--color-base-*` declaration as invalid, leaving the variable unset; `bg-base-200` / `bg-base-300` paint white. Three-part fix:
-- `globals.css`: `@supports not (color: oklch(0% 0 0)) { [data-theme="dark"], :root { --color-base-100: #1d232a; ... } }` — only triggers on browsers without oklch support; modern browsers keep DaisyUI's oklch intact.
-- `layout.tsx`: moved `data-theme="dark"` onto `<html>` so the attribute selector resolves at the root and every descendant inherits. Nested copies in sub-components left in place as belt-and-suspenders.
-- Added `colorScheme: "dark"` + `themeColor: "#111111"` to the Next `Viewport` export so mobile scrollbars / form controls / address bar render in dark mode too.
+### 跨浏览器兼容:旧款华为 / HarmonyOS / Quark 的"白侧栏"
+根因:DaisyUI v5 所有主题色都用 `oklch()` 声明。Chromium <111 的浏览器把整条 `--color-base-*` 声明当作非法丢弃,变量变 unset,`bg-base-200` / `bg-base-300` 绘成白色。三步修复:
+- `globals.css`:`@supports not (color: oklch(0% 0 0)) { [data-theme="dark"], :root { --color-base-100: #1d232a; ... } }` —— 只在不支持 oklch 的浏览器触发,现代浏览器保持 DaisyUI 原生 oklch 不变
+- `layout.tsx`:把 `data-theme="dark"` 提到 `<html>`,让属性选择器从根解析,所有子节点都能继承。子组件里的散落副本保留当双保险
+- Next `Viewport` 里加 `colorScheme: "dark"` + `themeColor: "#111111"`,移动端滚动条 / 表单控件 / 地址栏也走暗色
 
-### Legacy data cleanup CLIs
-- `services/memory-worker` · `pnpm backfill-event-at [--dry-run]` — replays `source='extracted'` rows through the LLM to populate `event_at` from their content. Anchors relative phrases (`今天` / `昨天` / `刚才`) against the row's own `created_at` (≈ when the user message was sent). Source-locked SQL predicate guards user_explicit rows. Idempotent.
-- `services/memory-worker` · `pnpm strip-numbered-prefix [--dry-run]` — pure regex cleanup of `^\s*\d+\.\s+` prefixes that an earlier extractor accidentally stored as memory content. No LLM.
+### 存量数据清理 CLI
+- `services/memory-worker` · `pnpm backfill-event-at [--dry-run]` —— 把 `source='extracted'` 的历史记忆过 LLM 再跑一次,用 content 推导 `event_at`。相对时间短语(`今天` / `昨天` / `刚才`)以该行自己的 `created_at`(≈ 用户消息时间)作锚点。SQL 谓词双重锁 source,user_explicit 行绝对不动。幂等
+- `services/memory-worker` · `pnpm strip-numbered-prefix [--dry-run]` —— 纯正则清理早期 extractor 意外把 `^\s*\d+\.\s+` 编号前缀存进 content 的脏数据。不调 LLM
 
-### update.sh robustness
-- Replaced bash-only `source` with POSIX `.` for dash compatibility.
-- Self-modifying-script guard: pulls first, then `exec "$0" "$@"` so the rest of the run executes against the freshly-pulled file (prevents line-offset corruption when `git pull` rewrites `update.sh` itself mid-run).
+### update.sh 健壮性
+- 把 bash 专有的 `source` 换成 POSIX 的 `.`,dash 也能跑
+- 自我修改脚本的护栏:先 git pull,再 `exec "$0" "$@"` 让后续逻辑跑在新拉下来的文件上(避免 `git pull` 在运行中重写 `update.sh` 导致的 line-offset 错乱)
 
-## Not started
-- Phase 2 D1 — pg_trgm GIN index on `messages.content` so `search_messages` stays fast past a few thousand rows.
-- Phase 2 D2 — systematic memory dedup (pgvector + cosine, or periodic cron merge). C1's `remember` has only the bigram quickdup.
-- Dynamic memory Phase B — periodic consolidation: cluster recurring `category='event'` memories with similar content + different `event_at` → LLM emits a higher-level semantic fact ("经常不吃午饭"), original events kept as evidence, stale ones decay out.
-- Phase 2 MCP support — third-party tool integration via Model Context Protocol.
-- Phase 2 prompt versioning (`packages/prompts` extraction).
+## 尚未开始
+- Phase 2 D1 — `messages.content` 的 pg_trgm GIN 索引,让 `search_messages` 在超过几千行后还能快
+- Phase 2 D2 — 系统化的记忆去重(pgvector + cosine,或定期 cron 合并)。C1 的 `remember` 现在只有 bigram 快查
+- 动态记忆 Phase B — 周期性聚合:对同一用户、相似 content、分散 event_at 的 `category='event'` 记忆聚类 → LLM 提炼成更高阶语义 fact("经常不吃午饭"),原 event 保留作证据,陈旧的自然 decay 出去
+- Phase 2 MCP 支持 —— 通过 Model Context Protocol 接第三方工具
+- Phase 2 prompt versioning(抽到 `packages/prompts`)
 
-## Risks / notes
-- D1 historical: Next.js SSE proxy — resolved in M2.
-- D3 historical: mock mode for UI dev — done.
-- Phase 2 risk — mock mode only emits one synthetic tool_call path (always the first tool in the defs list). Real-LLM behavior (tool choice, repeated rounds, argument shape variance) must be exercised with a live key; do not rely on mock-mode coverage for C1/C2.
-- Phase 2 risk — `remember`'s similarity threshold (0.55 bigram Jaccard) blocks obvious rewrites but not paraphrases; semantic dedup waits on D2.
-- Phase 2 risk — memory-worker still uses synchronous OpenAI calls with no mock path. Background jobs will fail loudly if `LLM_API_KEY` is empty.
+## 风险 / 备注
+- D1 历史遗留:Next.js SSE proxy —— 已在 M2 解决
+- D3 历史遗留:mock 模式 UI 开发 —— 已完成
+- Phase 2 风险 —— mock 模式只会合成一个 tool_call 路径(永远是 defs 列表第一个工具)。真实 LLM 的 tool choice / 多轮 / 参数形状差异,必须用真 key 跑过才算;别用 mock 覆盖度去验证 C1/C2
+- Phase 2 风险 —— `remember` 的相似度阈值(0.55 bigram Jaccard)能拦明显的改写,拦不住同义改写,语义去重等 D2
+- Phase 2 风险 —— memory-worker 仍然同步调 OpenAI,没有 mock 路径。`LLM_API_KEY` 空时后台任务会明确报错
 
-## Next step
-Phase A is now feature-complete including retrieval-side reinforcement. D2 (semantic memory dedup via pgvector + embedding) is the next major piece — without it the Phase A reinforce signal scatters across paraphrased duplicates ("喜欢甜食" vs "爱吃蛋糕") instead of concentrating on one row. D2 is also a prerequisite for Phase B: consolidation needs a clean base to cluster events. Phase B itself (recurring episodic → semantic facts) still waits on ≥2 weeks of real reinforcement data before its clustering thresholds can be calibrated. After D2/Phase B, evaluate MCP and authorization-model (e.g. subject-muting of specific authors) needs.
+## 下一步
+Phase A 现在已特性完整,包括读侧强化。**D2(基于 pgvector + embedding 的语义去重)是下一个主阵地** —— 不做的话,Phase A 的 reinforce 信号会被"喜欢甜食" vs "爱吃蛋糕"这类近义改写打散到多行而不是集中到一行。D2 同时是 Phase B 的前置条件:consolidation 需要干净的基础来聚类事件。Phase B 本身(反复事件 → 语义 fact)仍然要等 Phase A 跑 ≥2 周、有真实强化数据再校准聚类阈值。之后再评估 MCP 和授权模型(比如 subject 屏蔽特定作者)
 
-## Update rule
-After each meaningful implementation step, append:
-- what was completed
-- any design decisions made
-- any failed approach worth remembering
-- the next recommended step
+## 更新规则
+每次有意义的实现步骤后,追加:
+- 完成了什么
+- 做了哪些设计决策
+- 哪些走不通的方案值得留记录
+- 建议下一步做什么
