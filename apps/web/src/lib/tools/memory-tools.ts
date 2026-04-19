@@ -1,5 +1,5 @@
 import { db, userMemories, messages, users, roomMemories, userRelationships } from "@agent-platform/db";
-import { and, eq, isNull, isNotNull, desc, ilike, or, lt, inArray, ne } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, desc, asc, ilike, or, lt, gte, lte, inArray, ne, sql } from "drizzle-orm";
 import type { ToolHandler } from "./index";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { resolveRoomMemberByName } from "./resolvers";
@@ -59,6 +59,20 @@ function esc(s: string): string {
   return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
+/** Accepts "YYYY-MM-DD", "YYYY-MM-DDTHH:mm", or a full ISO string. Bare dates
+ *  anchor to Asia/Shanghai noon so timezone drift doesn't push them off-day. */
+function parseEventAt(raw: unknown): Date | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const d = new Date(`${s}T04:00:00Z`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // -----------------------------------------------------------------------------
 // search_memories
 // -----------------------------------------------------------------------------
@@ -69,6 +83,9 @@ const searchMemories: ToolHandler = async (args, ctx) => {
     ? (args.category as Category)
     : null;
   const limit = clampLimit(args?.limit, 10, 30);
+  const from = parseEventAt(args?.from);
+  const to = parseEventAt(args?.to);
+  const hasTimeFilter = from !== null || to !== null;
 
   const conditions = [
     eq(userMemories.userId, ctx.userId),
@@ -76,6 +93,13 @@ const searchMemories: ToolHandler = async (args, ctx) => {
   ];
   if (category) conditions.push(eq(userMemories.category, category));
   if (query) conditions.push(ilike(userMemories.content, `%${esc(query)}%`));
+  if (hasTimeFilter) {
+    // Restrict to rows that actually carry an event_at when the caller asked
+    // for a time window — timeless facts (identity, preferences) never match.
+    conditions.push(isNotNull(userMemories.eventAt));
+    if (from) conditions.push(gte(userMemories.eventAt, from));
+    if (to) conditions.push(lte(userMemories.eventAt, to));
+  }
 
   const rows = await db
     .select({
@@ -84,11 +108,18 @@ const searchMemories: ToolHandler = async (args, ctx) => {
       category: userMemories.category,
       importance: userMemories.importance,
       source: userMemories.source,
+      eventAt: userMemories.eventAt,
       updatedAt: userMemories.updatedAt,
     })
     .from(userMemories)
     .where(and(...conditions))
-    .orderBy(desc(userMemories.importance), desc(userMemories.updatedAt))
+    .orderBy(
+      // When the caller filtered by time, chronological order is the useful
+      // one. Otherwise keep the default importance+recency rank.
+      ...(hasTimeFilter
+        ? [desc(userMemories.eventAt)]
+        : [desc(userMemories.importance), desc(userMemories.updatedAt)])
+    )
     .limit(limit);
 
   return { results: rows };
@@ -104,19 +135,16 @@ const searchMessages: ToolHandler = async (args, ctx) => {
     return { error: "query is required", results: [] };
   }
   const limit = clampLimit(args?.limit, 10, 30);
-  const before =
-    typeof args?.before === "string" && args.before
-      ? new Date(args.before)
-      : null;
+  const before = parseEventAt(args?.before);
+  const after = parseEventAt(args?.after);
 
   const conditions = [
     eq(messages.roomId, ctx.roomId),
     eq(messages.status, "completed"),
     ilike(messages.content, `%${esc(query)}%`),
   ];
-  if (before && !isNaN(before.getTime())) {
-    conditions.push(lt(messages.createdAt, before));
-  }
+  if (before) conditions.push(lt(messages.createdAt, before));
+  if (after) conditions.push(gte(messages.createdAt, after));
 
   const rows = await db
     .select({
@@ -128,7 +156,9 @@ const searchMessages: ToolHandler = async (args, ctx) => {
     })
     .from(messages)
     .where(and(...conditions))
-    .orderBy(desc(messages.createdAt))
+    // With an `after` bound (usually a narrow window) chronological ASC is
+    // more useful; otherwise keep newest-first.
+    .orderBy(after ? asc(messages.createdAt) : desc(messages.createdAt))
     .limit(limit);
 
   // Resolve sender display names (user name, or "Agent" for agent messages)
@@ -167,6 +197,9 @@ const searchMessages: ToolHandler = async (args, ctx) => {
 // remember (with built-in near-dup guard — simplified D2)
 // -----------------------------------------------------------------------------
 
+// Phase A: on a near-duplicate, REINFORCE the existing memory (bump strength +
+// last_reinforced_at) instead of skipping silently. The threshold name stays
+// the same to avoid churn; the action is different.
 const SIMILARITY_SKIP_THRESHOLD = 0.55;
 
 const remember: ToolHandler = async (args, ctx) => {
@@ -175,6 +208,7 @@ const remember: ToolHandler = async (args, ctx) => {
   const importance = (args?.importance as Importance) || "medium";
   const subjectName =
     typeof args?.subjectName === "string" ? args.subjectName.trim() : "";
+  const eventAt = parseEventAt(args?.eventAt);
 
   if (!content) return { error: "content required" };
   if (!VALID_CATEGORIES.includes(category)) {
@@ -206,6 +240,9 @@ const remember: ToolHandler = async (args, ctx) => {
       id: userMemories.id,
       content: userMemories.content,
       source: userMemories.source,
+      authoredByUserId: userMemories.authoredByUserId,
+      userId: userMemories.userId,
+      confirmedAt: userMemories.confirmedAt,
     })
     .from(userMemories)
     .where(
@@ -215,20 +252,72 @@ const remember: ToolHandler = async (args, ctx) => {
       )
     );
 
-  let best: { id: string; content: string; sim: number; source: string } | null =
-    null;
+  let best: {
+    id: string;
+    content: string;
+    sim: number;
+    source: string;
+    locked: boolean;
+    pending: boolean;
+  } | null = null;
   for (const m of existing) {
     const sim = textSimilarity(content, m.content);
+    const locked = m.source === "user_explicit";
+    const pending =
+      m.authoredByUserId !== null &&
+      m.authoredByUserId !== m.userId &&
+      m.confirmedAt === null;
     if (!best || sim > best.sim) {
-      best = { id: m.id, content: m.content, sim, source: m.source };
+      best = {
+        id: m.id,
+        content: m.content,
+        sim,
+        source: m.source,
+        locked,
+        pending,
+      };
     }
   }
 
   if (best && best.sim >= SIMILARITY_SKIP_THRESHOLD) {
+    // Locked / pending rows can't be reinforced silently — fall back to the
+    // old "skipped + surface similar" behaviour so the agent can react (e.g.
+    // confirm the pending row, or tell the user the locked fact is already
+    // there).
+    if (best.locked || best.pending) {
+      return {
+        skipped: true,
+        reason: best.pending
+          ? "near-duplicate of a pending memory"
+          : "near-duplicate of a user-locked memory",
+        similar: { id: best.id, content: best.content, similarity: best.sim },
+      };
+    }
+    const [row] = await db
+      .update(userMemories)
+      .set({
+        strength: sql`${userMemories.strength} + 1`,
+        lastReinforcedAt: new Date(),
+        updatedAt: new Date(),
+        // If the caller now provides an eventAt and the existing row had none,
+        // fill it in — extra signal is strictly better than no signal.
+        ...(eventAt ? { eventAt } : {}),
+      })
+      .where(eq(userMemories.id, best.id))
+      .returning({
+        id: userMemories.id,
+        content: userMemories.content,
+        category: userMemories.category,
+        importance: userMemories.importance,
+        strength: userMemories.strength,
+        eventAt: userMemories.eventAt,
+      });
     return {
-      skipped: true,
-      reason: "near-duplicate of an existing memory",
-      similar: { id: best.id, content: best.content, similarity: best.sim },
+      ok: true,
+      reinforced: true,
+      note: "Near-duplicate of an existing memory — reinforced instead of creating a new row.",
+      memory: row,
+      similarity: best.sim,
     };
   }
 
@@ -245,12 +334,15 @@ const remember: ToolHandler = async (args, ctx) => {
       sourceRoomId: ctx.roomId,
       authoredByUserId: isThirdParty ? ctx.userId : null,
       confirmedAt: isThirdParty ? null : null,
+      eventAt: eventAt ?? undefined,
+      lastReinforcedAt: new Date(),
     })
     .returning({
       id: userMemories.id,
       content: userMemories.content,
       category: userMemories.category,
       importance: userMemories.importance,
+      eventAt: userMemories.eventAt,
     });
 
   if (isThirdParty) {
@@ -709,19 +801,29 @@ export const memoryToolDefs = [
     function: {
       name: "search_memories",
       description:
-        "Search the current user's stored long-term memories (facts, preferences, relationships, etc.). Use when you suspect there's a relevant fact you weren't told in the current system prompt.",
+        "Search the current user's stored long-term memories (facts, preferences, relationships, events, etc.). Use when you suspect there's a relevant fact not in the pinned list. Pass from/to to retrieve memories whose event_at falls in a specific window — great for 'what happened last week' style questions.",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
             description:
-              "Substring to match against memory content (case-insensitive). Leave empty to list by category.",
+              "Substring to match against memory content (case-insensitive). Leave empty to list by other filters alone.",
           },
           category: {
             type: "string",
             enum: [...VALID_CATEGORIES],
             description: "Restrict to one category.",
+          },
+          from: {
+            type: "string",
+            description:
+              "ISO8601 date or datetime — inclusive lower bound on the memory's event_at. Use with/without `to`. Implicitly filters out timeless memories (those without event_at).",
+          },
+          to: {
+            type: "string",
+            description:
+              "ISO8601 date or datetime — inclusive upper bound on the memory's event_at.",
           },
           limit: {
             type: "integer",
@@ -754,6 +856,11 @@ export const memoryToolDefs = [
             description:
               "ISO timestamp — only return messages strictly earlier than this.",
           },
+          after: {
+            type: "string",
+            description:
+              "ISO timestamp — only return messages at or after this. Combine with `before` for a time window.",
+          },
         },
       },
     },
@@ -763,7 +870,7 @@ export const memoryToolDefs = [
     function: {
       name: "remember",
       description:
-        "Store a new long-term fact. Default subject is the current speaker; pass subjectName to record a fact about another room member (such writes land pending until the subject accepts them in their /memories tab). Near-duplicates of the subject's existing active memories are skipped.",
+        "Store a new long-term fact. Default subject is the current speaker; pass subjectName to record a fact about another room member (such writes land pending until the subject accepts them in their /memories tab). Near-duplicates of the subject's existing active memories REINFORCE the existing row (bump strength) instead of creating a new one.",
       parameters: {
         type: "object",
         required: ["content", "category", "importance"],
@@ -776,7 +883,7 @@ export const memoryToolDefs = [
           content: {
             type: "string",
             description:
-              'Third-person single-sentence fact, written in the SAME LANGUAGE the user is speaking (Chinese input → Chinese fact, English input → English fact, do not translate). Example: "住在深圳" / "Lives in Shenzhen".',
+              'Third-person single-sentence fact, written in the SAME LANGUAGE the user is speaking (Chinese input → Chinese fact, English input → English fact, do not translate). MUST NOT contain relative time phrases like "今天" / "刚才" / "yesterday" — always resolve them to absolute dates using the Current time layer in the system prompt. Example: "住在深圳" / "Lives in Shenzhen" / "2026-04-19 没吃午饭".',
           },
           category: {
             type: "string",
@@ -785,6 +892,11 @@ export const memoryToolDefs = [
           importance: {
             type: "string",
             enum: [...VALID_IMPORTANCES],
+          },
+          eventAt: {
+            type: "string",
+            description:
+              'Optional ISO8601 date/datetime of when the event happened. Pass this whenever the fact describes a specific point in time (events, "skipped lunch today", "went to Shanghai", etc). Omit for timeless facts (identity, general preferences, relationships). Example: "2026-04-19" or "2026-04-19T12:30+08:00".',
           },
         },
       },

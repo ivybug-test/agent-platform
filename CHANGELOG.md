@@ -1,7 +1,7 @@
 # CHANGELOG.md
 
 ## Project status
-Phase 2 done (tool-calling agent + memory tools + UI). Multi-user memory rework (phases A–D of the `streamed-yawning-pancake` plan) also fully landed: subject/author split, pending confirmation flow, room-shared memories, bidirectional user relationships. Remaining: vector-based memory dedup (D2), MCP integration.
+Phase 2 done (tool-calling agent + memory tools + UI). Multi-user memory rework (phases A–D of the `streamed-yawning-pancake` plan) also fully landed: subject/author split, pending confirmation flow, room-shared memories, bidirectional user relationships. Dynamic memory Phase A landed 2026-04-19: temporal + strength columns, time-range retrieval, Generative-Agents-style decay scoring, reinforce-over-skip on near-duplicates. Remaining: dynamic memory Phase B (consolidation from recurring events → semantic facts), vector-based memory dedup (D2), MCP integration.
 
 ## Current phase
 Phase 2 — Agent architecture upgrade (complete); multi-user rework (complete)
@@ -186,9 +186,31 @@ Reshape the memory model from "always 1:1" to "multi-user + single agent". Previ
 - UI: `/memories` gained a "关系" tab with three sections (待确认 incoming, 已确认, 已发出 outgoing) and an inline "+ 新增关系" form that picks a mutual friend via `/api/friends`.
 - Docs (`docs/memory-system.md`): §2 data model expanded to 3 tables; §12 rewritten to describe the current scope matrix + privacy defaults (自述 public to room, 他述 private to subject, room memory public, relationships bidirectional-consent).
 
+## Dynamic memory, Phase A (2026-04-19)
+
+Give memory a time dimension and let it evolve. Inspired by Park et al.'s
+Generative Agents (recency × importance × relevance) and MemoryBank
+(Ebbinghaus-style decay).
+
+- Schema `0007_memory_temporal.sql`: `user_memories` gained `event_at timestamptz` and `strength real NOT NULL DEFAULT 1.0`. Partial index `user_memories_event_at_idx (user_id, event_at DESC) WHERE deleted_at IS NULL AND event_at IS NOT NULL` to serve time-range retrieval.
+- Agent prompt (`buildSystemPrompt`): new Layer 1b injects `Current time: YYYY-MM-DD HH:mm Weekday (Asia/Shanghai)` so the LLM resolves "今天" / "昨天" / "刚才" against a concrete anchor before any memory write.
+- Extraction worker (`services/memory-worker/src/jobs/user-memory.ts`):
+  - Messages now fed to the LLM with per-line `[YYYY-MM-DD HH:mm]` timestamps plus a "Current time" banner. Prompt forbids storing relative phrases and requires `eventAt` on CREATE actions for time-bound facts.
+  - Transient facts ("我现在饿了") must be SKIPPED — recurring behaviours surface via reinforcement, not seed rows.
+  - **Near-duplicate ≥0.55 Jaccard → REINFORCE, not skip.** Existing row's `strength += 1` and `last_reinforced_at = now()`. Locked / pending rows fall through to the old skip path. This is the core dynamic-memory signal: repeated mentions grow strength; never-mentioned rows decay on read.
+- `remember` tool (`memory-tools.ts`): accepts optional `eventAt` ISO string; on near-dup hit, reinforces the existing memory instead of returning `skipped`. Locked / pending rows still short-circuit to skip.
+- `search_memories` tool: new optional `from` / `to` ISO params. When a time filter is present, result set is restricted to rows with non-NULL `event_at` and ordered by `event_at DESC` (chronological retrieval). `event_at` is included in the result rows so the agent can read it back.
+- `search_messages` tool: symmetric `after` param added (mirrors existing `before`); chronological ASC ordering when `after` is set.
+- Read-path ranking (`context.ts`): `MEMORY_SCORE_SQL = strength × importance_weight × exp(-age_days / 30)` where age is measured against `COALESCE(last_reinforced_at, updated_at)`. Used by both `getUserMemories` and `getRoomUsersMemories` pinned injection. 30-day half-life chosen as a tunable MVP constant.
+- `infra/update.sh`: adds 0007 to the idempotent raw-SQL migration list.
+- Docs: `docs/memory-system.md` updated — §2 data model +3 columns, §4 writes note reinforcement, new §15 dynamic-memory section covering score formula + time-range tool usage.
+
+Note: `memory-worker` log key renamed `dupSkipped → reinforced`. Grafana/log consumers filtering on the old key need to be updated.
+
 ## Not started
 - Phase 2 D1 — pg_trgm GIN index on `messages.content` so `search_messages` stays fast past a few thousand rows.
 - Phase 2 D2 — systematic memory dedup (pgvector + cosine, or periodic cron merge). C1's `remember` has only the bigram quickdup.
+- Dynamic memory Phase B — periodic consolidation: cluster recurring `category='event'` memories with similar content + different `event_at` → LLM emits a higher-level semantic fact ("经常不吃午饭"), original events kept as evidence, stale ones decay out.
 - Phase 2 MCP support — third-party tool integration via Model Context Protocol.
 - Phase 2 prompt versioning (`packages/prompts` extraction).
 
@@ -200,7 +222,7 @@ Reshape the memory model from "always 1:1" to "multi-user + single agent". Previ
 - Phase 2 risk — memory-worker still uses synchronous OpenAI calls with no mock path. Background jobs will fail loudly if `LLM_API_KEY` is empty.
 
 ## Next step
-D2 (semantic memory dedup via pgvector + embedding) is the biggest remaining item — bigram dedup plus the new auto-merge tier cover lexically-similar cases but still miss paraphrases. After that, evaluate MCP integration timing and whether multi-user chat usage warrants a further authorization model (e.g. subject-muting of specific authors).
+Dynamic memory Phase B (consolidation from recurring events → semantic facts) is the natural follow-up to Phase A; needs a few weeks of real reinforcement data before the clustering rule can be tuned. D2 (semantic memory dedup via pgvector + embedding) remains the other major item — bigram dedup plus the reinforcement tier cover lexically-similar cases but still miss paraphrases. After that, evaluate MCP integration timing and whether multi-user chat usage warrants a further authorization model (e.g. subject-muting of specific authors).
 
 ## Update rule
 After each meaningful implementation step, append:

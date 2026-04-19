@@ -30,12 +30,16 @@ user_memories (
   source_room_id       uuid FK rooms.id,
   authored_by_user_id  uuid FK users.id,            -- 写入者(NULL 或 = user_id → 自述)
   confirmed_at         timestamp,                   -- subject 接受他人代写的时间
-  last_reinforced_at   timestamp,
+  last_reinforced_at   timestamp,                   -- 最近一次强化/更新时间(decay 的锚)
+  event_at             timestamptz,                 -- 事件发生时间(相对时间在写入时解析成绝对时间)
+  strength             real NOT NULL DEFAULT 1.0,   -- 强化计数:重复提及 +1
   deleted_at           timestamp,                   -- NULL = 活跃,非 NULL = 墓碑
   created_at, updated_at
 );
 -- Partial index 0004: user_memories_pending_idx
 --   WHERE deleted_at IS NULL AND authored_by_user_id IS NOT NULL AND confirmed_at IS NULL
+-- Partial index 0007: user_memories_event_at_idx (user_id, event_at DESC)
+--   WHERE deleted_at IS NULL AND event_at IS NOT NULL  -- 时间范围检索
 ```
 
 ### 2.2 `room_memories` — 房间级共享事实(Phase 3)
@@ -89,6 +93,7 @@ user_relationships (
 - `0004` — user_memories "待确认" 部分索引
 - `0005` — room_memories 活跃部分索引
 - `0006` — user_relationships 两侧部分索引
+- `0007` — user_memories 增加 `event_at` / `strength` 列 + `user_memories_event_at_idx` 部分索引(时间范围检索)
 
 ---
 
@@ -161,9 +166,9 @@ sequenceDiagram
       alt action = create
         MW->>MW: bigram Jaccard 与活跃记忆比较
         alt 相似度 ≥ 0.55
-          MW-->>MW: skip, 记 memory.skip-near-dup
+          MW->>DB: UPDATE strength += 1, last_reinforced_at = now<br/>(即 REINFORCE,不是 skip)
         else
-          MW->>DB: INSERT source='extracted'
+          MW->>DB: INSERT source='extracted', event_at?=...
         end
       else action = update
         MW->>DB: UPDATE(三层锁保护,见 §9)
@@ -173,6 +178,10 @@ sequenceDiagram
     end
   end
 ```
+
+**Phase A 关键变化**:
+- 抽取 prompt 顶部注入当前时间 + 每条消息带 `[YYYY-MM-DD HH:mm]`,LLM 必须把相对时间(今天/昨天/刚才/上周)解析成绝对日期才能写进 content,且对时间敏感的 fact 同时输出 `eventAt`
+- 近似重复触发 REINFORCE 而非 skip,是 §15 动态记忆的核心信号
 
 ### 4.3 B — agent 调 `remember` 工具
 
@@ -237,19 +246,23 @@ flowchart TD
 ### 5.1 Pinned 常开注入(每轮对话)
 
 - 入口:`apps/web/src/lib/chat/context.ts` · `getRoomUsersMemories(roomId)`
-- 筛选:`deleted_at IS NULL AND (category='identity' OR importance='high')`,**每用户上限 8 条**,按 `importance DESC, updated_at DESC`
+- 筛选:`deleted_at IS NULL AND (category='identity' OR importance='high')`,**每用户上限 8 条**
+- **排序**(Phase A):按 `strength × importance_weight × exp(-age_days/30)` 动态分数(详见 §15),而不是静态 importance+recency
 - 位置:`buildSystemPrompt` 的 Layer 3 — `"Pinned facts about {name}:"`
 - 理由:把最关键的 fact 永远带上;其余靠工具按需查,避免 prompt 膨胀
 
 ### 5.2 agent 按需 `search_memories`
 
 ```
-search_memories({ query?, category?, limit ≤ 30 })
+search_memories({ query?, category?, from?, to?, limit ≤ 30 })
   → ILIKE '%{esc(query)}%' + 可选 category 等值
-  → ORDER BY importance DESC, updated_at DESC
+  → 若提供 from/to:WHERE event_at BETWEEN ... AND event_at IS NOT NULL
+                   ORDER BY event_at DESC
+  → 否则:ORDER BY importance DESC, updated_at DESC
 ```
 
 - JWT 里的 `userId` 决定 scope,参数里任何身份字段**一律忽略**
+- `from` / `to` 是 ISO8601(日期或完整时间戳都行)。带时间参数时只命中有 `event_at` 的行,用 §2 的 `user_memories_event_at_idx` 部分索引
 - pg_trgm GIN 索引加速短字符串匹配;中文按三 n-gram,够用,分词升级是后续工作
 
 ### 5.3 UI 列表
@@ -461,6 +474,63 @@ MEMORY WRITING IN GROUP CONVERSATIONS:
 
 ---
 
+## 15. 动态记忆(Phase A)
+
+**动机**:单次事件类信息("今天没吃午饭")不应该原样存成静态 fact —— 今天的"今天",一周后就是噪声。同时,反复出现的行为应该自然变强(→ "经常不吃午饭"),很久不再提及的应该自然褪色。
+
+**设计来源**:
+- Park et al. 2023 *Generative Agents*:`score = recency × importance × relevance`,retrieve 本身会重置 recency
+- MemoryBank (2023):把 Ebbinghaus 遗忘曲线套进 LLM 记忆,`S(t) = exp(-t/strength)`
+
+**当前实现的三条骨架**:
+
+### 15.1 绝对时间化
+
+- 每轮对话 `buildSystemPrompt` 注入 Layer 1b: `Current time: YYYY-MM-DD HH:mm Weekday (Asia/Shanghai)`
+- 后台抽取 prompt 顶部注入"当前时间 + 每条消息 `[YYYY-MM-DD HH:mm]` 前缀"
+- 硬性规则:content 里**永远不写相对时间**,解析成绝对日期后存储;事件类 fact 同时输出 `eventAt`(ISO,可日可时)
+
+### 15.2 强化(reinforce)替代跳过
+
+| 场景 | 旧行为 | Phase A 行为 |
+|---|---|---|
+| worker 抽取 CREATE 遇到 ≥0.55 Jaccard 相似活跃记忆 | skip,记日志 `memory.skip-near-dup` | `UPDATE ... SET strength = strength + 1, last_reinforced_at = now()`,记日志 `memory.reinforce` |
+| `remember` 工具遇到同类相似记忆 | 返回 `{skipped: true, similar}` | 返回 `{ok: true, reinforced: true, memory}`(locked / pending 行仍走旧 skip 路径) |
+
+`last_reinforced_at` 是后续衰减的锚点。用户越经常提及一件事,strength 越高 + last_reinforced_at 越新 → 在 pinned 排名里越顶。
+
+### 15.3 read-path 动态分数
+
+`apps/web/src/lib/chat/context.ts · MEMORY_SCORE_SQL`:
+
+```
+score =   strength
+        × (importance='high' → 3, 'medium' → 2, 'low' → 1)
+        × exp( -GREATEST(0, now()-COALESCE(last_reinforced_at, updated_at)) / (30 days) )
+```
+
+- 半衰期 30 天(`DECAY_HALFLIFE_DAYS`):一条从不被强化的 `medium` 记忆在 30 天后效果减半,90 天后降到约 12%
+- `getUserMemories` / `getRoomUsersMemories` 都改用 `ORDER BY score DESC`,上限不变(pinned 每用户 8 条)
+- 识别过滤仍然是 `category='identity' OR importance='high'` 入围,分数只决定入围内的排序 —— 避免纯 decay 打压核心身份信息
+
+### 15.4 时间范围检索
+
+`search_memories({ from, to })` 支持 ISO 范围查询,命中时:
+- WHERE `event_at IS NOT NULL AND event_at BETWEEN from AND to`
+- ORDER BY `event_at DESC`
+- 走 0007 的 `user_memories_event_at_idx` 部分索引
+
+`search_messages` 也补了 `after` 参数,与 `before` 对称组成时间窗。
+
+### 15.5 未落地(Phase B 规划)
+
+- **Consolidation**:定期扫同 user / `category='event'` / content 相似 / event_at 分散的记忆簇(≥3 条),LLM 判是否能提炼出更高阶语义 fact("经常不吃午饭"),原 event 保留作证据
+- **Pinned 阈值硬截断**:score < 阈值时不注入(现在只是排序靠后,受上限 8 保护)
+- **Retrieve reinforces recency**:Park 原文里读一次也会 bump recency;目前我们只有 write-side 强化
+- **Tune 参数**:30 天半衰期 / importance_weight {3,2,1} 都是 MVP 拍脑袋,跑一段时间收真实数据再调
+
+---
+
 ## 13. 关键风险与取舍
 
 | 风险 | 现状 | 缓解 |
@@ -482,7 +552,8 @@ MEMORY WRITING IN GROUP CONVERSATIONS:
 | `packages/db/src/schema.ts` | `user_memories` 表结构 + 枚举 |
 | `packages/db/drizzle/0002_*.sql` | source / deleted_at / last_reinforced_at 列 |
 | `packages/db/drizzle/0003_messages_trgm_index.sql` | pg_trgm 扩展 + 消息内容 GIN 索引 |
-| `apps/web/src/lib/chat/context.ts` | `buildSystemPrompt`、`getRoomUsersMemories`(pinned 注入) |
+| `packages/db/drizzle/0007_memory_temporal.sql` | event_at + strength 列 + 事件时间范围索引 |
+| `apps/web/src/lib/chat/context.ts` | `buildSystemPrompt`、`getRoomUsersMemories`(pinned 注入)、`MEMORY_SCORE_SQL`(decay 排序) |
 | `apps/web/src/lib/tools/memory-tools.ts` | 5 个记忆工具的实现与 OpenAI schema |
 | `apps/web/src/lib/tool-token.ts` | JWT 签 / 验 |
 | `apps/web/src/app/api/agent/tool/route.ts` | 工具分发端点(JWT 验证 + toolRegistry) |

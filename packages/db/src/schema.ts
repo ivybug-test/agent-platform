@@ -6,6 +6,7 @@ import {
   varchar,
   boolean,
   pgEnum,
+  real,
 } from "drizzle-orm/pg-core";
 
 // Enums
@@ -154,6 +155,13 @@ export const userMemories = pgTable("user_memories", {
   authoredByUserId: uuid("authored_by_user_id").references(() => users.id),
   confirmedAt: timestamp("confirmed_at"),
   lastReinforcedAt: timestamp("last_reinforced_at"),
+  // Temporal memory (Phase A): when the fact happened (resolved from relative
+  // references like "今天" / "yesterday" at write time). NULL for timeless facts
+  // like identity / preferences. `strength` counts reinforcement events — when
+  // a near-duplicate is seen again we bump this instead of creating a new row.
+  // Together with `last_reinforced_at` they feed the read-path decay score.
+  eventAt: timestamp("event_at", { withTimezone: true }),
+  strength: real("strength").notNull().default(1.0),
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

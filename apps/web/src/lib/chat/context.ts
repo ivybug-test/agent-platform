@@ -1,7 +1,28 @@
 import { db, messages, roomMembers, users, roomSummaries, userMemories, roomMemories, userRelationships } from "@agent-platform/db";
-import { eq, and, inArray, desc, ne, isNull, isNotNull, or } from "drizzle-orm";
+import { eq, and, inArray, desc, ne, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { createLogger } from "@agent-platform/logger";
+
+// Dynamic memory score (Phase A). Mirrors the Generative-Agents formula:
+// effective = strength × importance_weight × exp(-age_days / HALF_LIFE).
+// Rows whose last reinforcement was long ago decay toward zero; frequent
+// mentions (strength > 1) hold their place. identity / high-importance rows
+// get higher baseline weight so they still dominate the pinned window.
+const DECAY_HALFLIFE_DAYS = 30;
+const MEMORY_SCORE_SQL = sql<number>`
+  ${userMemories.strength}
+  * (CASE ${userMemories.importance}
+      WHEN 'high' THEN 3
+      WHEN 'medium' THEN 2
+      ELSE 1
+    END)
+  * exp(
+      -GREATEST(
+        0,
+        EXTRACT(EPOCH FROM (now() - COALESCE(${userMemories.lastReinforcedAt}, ${userMemories.updatedAt})))
+      ) / (86400.0 * ${DECAY_HALFLIFE_DAYS})
+    )
+`;
 
 const log = createLogger("web");
 
@@ -138,7 +159,8 @@ export async function getLatestSummary(roomId: string): Promise<string | null> {
   return summary?.content || null;
 }
 
-/** Get user memories with category, ordered by importance then recency */
+/** Get user memories with category, ordered by dynamic memory score
+ *  (strength × importance_weight × recency decay). */
 export async function getUserMemories(
   userId: string
 ): Promise<{ category: string; content: string }[]> {
@@ -149,7 +171,7 @@ export async function getUserMemories(
     })
     .from(userMemories)
     .where(and(eq(userMemories.userId, userId), visibleToSubject()))
-    .orderBy(desc(userMemories.importance), desc(userMemories.updatedAt))
+    .orderBy(desc(MEMORY_SCORE_SQL))
     .limit(30);
   return rows;
 }
@@ -199,7 +221,7 @@ export async function getRoomUsersMemories(
         )
       )
     )
-    .orderBy(desc(userMemories.importance), desc(userMemories.updatedAt));
+    .orderBy(desc(MEMORY_SCORE_SQL));
 
   // Group by user name, cap per-user to keep context bounded
   const result = new Map<string, { category: string; content: string }[]>();
@@ -250,6 +272,28 @@ function formatUserMemories(
   return sections.join("\n");
 }
 
+/** Format current wall-clock time for injection into the system prompt. */
+function formatCurrentTime(now: Date = new Date()): string {
+  // Render in Asia/Shanghai — this is a CN-user product and the LLM handling
+  // relative phrases like "今天" / "昨天" must resolve them against the user's
+  // wall clock, not UTC. If multi-TZ support is added later, thread a tz in.
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "long",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get(
+    "minute"
+  )} ${get("weekday")} (Asia/Shanghai)`;
+}
+
 /** Build the 6-layer system prompt (per CLAUDE.md context strategy) */
 export function buildSystemPrompt(opts: {
   agentPrompt: string | null;
@@ -278,9 +322,9 @@ export function buildSystemPrompt(opts: {
   }
 
   const toolGuidance = `TOOLS YOU CAN CALL (optional, use only when genuinely useful):
-- search_memories: look up facts about the current user beyond the pinned list above — preferences, relationships, past events, opinions, current context. Call this BEFORE claiming you don't know something.
-- search_messages: find something said earlier in this room that is outside the recent window shown below.
-- remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. The tool auto-skips near-duplicates.
+- search_memories: look up facts about the current user beyond the pinned list above — preferences, relationships, past events, opinions, current context. Call this BEFORE claiming you don't know something. To look up what happened in a specific time window, pass ISO8601 "from"/"to" (e.g. {from:"2026-04-12T00:00:00+08:00", to:"2026-04-19T00:00:00+08:00"}) — this filters on the fact's event_at.
+- search_messages: find something said earlier in this room that is outside the recent window shown below. Supports "before" / "after" ISO timestamps.
+- remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. If the fact describes a specific event in time (e.g. "went to Shanghai on 2026-04-14", "skipped lunch on 2026-04-19"), also pass eventAt as an ISO8601 timestamp. Do NOT record relative phrases like "今天" / "刚才" — always resolve them to an absolute date using the current time layer above. Near-duplicates reinforce the existing memory instead of creating a new one.
 - update_memory: call ONLY when the user explicitly corrects a fact ("actually it's X", "I moved", "no, not Y"). Pass the id from search_memories.
 - forget_memory: call ONLY when the user explicitly asks to forget something ("don't remember X", "stop tracking Y"). Pass the id from search_memories.
 
@@ -316,9 +360,13 @@ Prefer not calling a tool if your current context is already sufficient.`;
           .join("\n")}`
       : null;
 
+  const nowLine = `Current time: ${formatCurrentTime()}. When the user says "今天" / "昨天" / "刚才" / "上周", resolve them against this timestamp before storing anything in memory.`;
+
   return [
     // Layer 1: Agent identity (system prompt)
     opts.agentPrompt || "You are a helpful assistant.",
+    // Layer 1b: Wall-clock anchor for resolving relative time phrases
+    nowLine,
     // Layer 2: Room rules (room system_prompt)
     [
       opts.roomPrompt,

@@ -155,5 +155,32 @@ Goal: move from always-on memory injection to tool-based, on-demand retrieval. G
 
 ---
 
+## Dynamic memory
+
+Goal: give memory a time dimension and let it evolve — episodic facts get absolute timestamps, repeated mentions reinforce, unused memories decay, and recurring events consolidate into higher-level semantic facts.
+
+### Phase A — Temporal + reinforcement + decay ✅ (2026-04-19)
+- [x] Schema `0007_memory_temporal.sql`: `user_memories.event_at timestamptz`, `user_memories.strength real DEFAULT 1.0`, partial index `user_memories_event_at_idx` for time-range retrieval
+- [x] Agent prompt `Layer 1b`: `Current time: YYYY-MM-DD HH:mm Weekday (Asia/Shanghai)` so relative phrases resolve against a concrete anchor
+- [x] Extraction worker: per-message `[timestamp]` prefix + current-time banner; require `eventAt` on time-bound CREATEs; forbid relative phrases in content; skip transient states ("饿了" / "累了")
+- [x] **Near-dup → REINFORCE, not skip**: worker and `remember` tool bump `strength += 1` + `last_reinforced_at = now()` on Jaccard ≥0.55 hits (locked/pending rows still short-circuit to skip)
+- [x] `search_memories`: `from` / `to` ISO params → time-window retrieval ordered by `event_at DESC`; returns `event_at` in result rows
+- [x] `search_messages`: symmetric `after` param (mirrors existing `before`)
+- [x] Read-path ranking: `MEMORY_SCORE_SQL = strength × importance_weight × exp(-age_days/30)` applied to `getUserMemories` and `getRoomUsersMemories`
+- [x] `infra/update.sh` picks up 0007 idempotently
+- [x] Docs: `CHANGELOG.md` section + `docs/memory-system.md` §15
+
+### Phase B — Consolidation (recurring episodic → semantic)
+- [ ] Periodic worker job: cluster same-user `category='event'` rows with similar content and spread `event_at` (≥3 occurrences over a tunable window)
+- [ ] LLM judges whether a cluster represents a pattern; if yes, emit a semantic fact ("经常不吃午饭") with `importance='medium'`, preserve originals as evidence
+- [ ] Gate: wait until Phase A has produced ≥2 weeks of real reinforcement data so the clustering threshold can be calibrated, not guessed
+
+### Phase C — Decay threshold + retrieval boost
+- [ ] Hard score threshold on pinned injection (currently only ordered, not cut)
+- [ ] Reading a memory via `search_memories` bumps `last_reinforced_at` (Park et al. original semantics — retrieval boosts recency)
+- [ ] Tune `DECAY_HALFLIFE_DAYS` + importance weights on observed data
+
+---
+
 ## Immediate next task
-D1 — add `pg_trgm` GIN index on `messages.content`, update `search_messages` if we pick a different operator. Then D2.
+Let dynamic memory Phase A bake for ~2 weeks, then tackle D2 (pgvector semantic dedup) or dynamic memory Phase B (consolidation) — whichever surfaces a clearer need from real traffic. D1 (pg_trgm index for `search_messages`) is pre-landed in migration 0003.

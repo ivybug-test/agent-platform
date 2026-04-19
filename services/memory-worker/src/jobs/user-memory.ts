@@ -1,5 +1,5 @@
 import { db, messages, users, userMemories } from "@agent-platform/db";
-import { eq, desc, and, isNull, isNotNull } from "drizzle-orm";
+import { eq, desc, and, isNull, isNotNull, sql } from "drizzle-orm";
 import { llmCompleteJSON } from "../llm.js";
 import { createLogger } from "@agent-platform/logger";
 
@@ -10,15 +10,16 @@ interface UserMemoryData {
   userId: string;
 }
 
-// Threshold above which an incoming CREATE is rejected as a near-duplicate of
-// an existing active memory for the same user. Same algorithm the `remember`
-// tool uses, same default.
-const DUP_SKIP_THRESHOLD = 0.55;
+// Threshold at which an incoming CREATE is treated as a near-duplicate of an
+// existing active memory. Phase A change: the action is now REINFORCE (bump
+// strength + last_reinforced_at on the existing row) rather than silent skip,
+// so repeat mentions actually strengthen memory over time.
+const DUP_REINFORCE_THRESHOLD = 0.55;
 
 const VALID_CATEGORIES = ["identity", "preference", "relationship", "event", "opinion", "context"];
 const VALID_IMPORTANCES = ["high", "medium", "low"];
 
-function buildExtractionPrompt(language: string): string {
+function buildExtractionPrompt(language: string, nowIso: string): string {
   return `You analyze user messages to extract memorable facts about the user.
 
 LANGUAGE (HIGHEST PRIORITY — follow before any other rule):
@@ -29,13 +30,29 @@ Examples (match the user's language):
   - Chinese user: "喜欢吃辣", "住在深圳", "弟弟叫志龙"
   - English user: "Likes spicy food", "Lives in Shenzhen", "Has a brother named Zhilong"
 
+TIME (SECOND HIGHEST PRIORITY):
+Current time is ${nowIso}. Each recent message below has a [YYYY-MM-DD HH:mm]
+prefix showing when it was sent.
+- NEVER store relative phrases like "今天" / "昨天" / "刚才" / "中午" / "上周" /
+  "yesterday" / "just now" inside the fact content. Resolve them into an
+  absolute date based on the message's own timestamp and the current time.
+- For facts that describe a specific event in time (e.g. "今天没吃午饭" → "2026-04-19 没吃午饭"),
+  ALSO emit an \`eventAt\` field on the CREATE action as an ISO8601 timestamp
+  (date is fine, e.g. "2026-04-19"; add time if the user was specific about
+  "中午" etc.). For timeless facts (identity, preferences, relationships)
+  leave eventAt omitted.
+- Short-term statements that are ONLY meaningful for a few hours (e.g.
+  "我饿了", "现在有点累") must be SKIPPED — they are not worth cross-session
+  memory. If the same behaviour recurs across many days, a higher-level fact
+  ("经常不吃午饭") will emerge from reinforcement; you don't need to seed it.
+
 RULES:
 - Only extract facts that would be useful to remember across conversations
-- DO NOT extract: greetings, test messages, emotional expressions, single-word responses, questions the user asked the AI, commands to the AI
+- DO NOT extract: greetings, test messages, emotional expressions, single-word responses, questions the user asked the AI, commands to the AI, transient states
 - DO extract: personal info (name, age, location, language), preferences (food, music, hobbies), relationships (family, friends mentioned by name), significant events, opinions, ongoing situations
 - Each fact must be a single clear statement in third person (e.g. "喜欢吃辣" / "Likes spicy food", NOT first person)
 - If a new fact contradicts an existing memory, output an UPDATE action with the existing memory's id
-- If a new fact is already captured by an existing memory, SKIP it. Be strict — if in doubt, SKIP rather than duplicate.
+- If a new fact is already captured by an existing memory, SKIP it. Be strict — if in doubt, SKIP rather than duplicate. The backend will still reinforce the existing memory on near-duplicate CREATEs, so skipping is safe.
 - If a fact is genuinely new, output a CREATE action
 - If an existing memory is clearly wrong based on new info, output a DELETE action
 
@@ -47,11 +64,12 @@ HARD CONSTRAINTS (violating these will be rejected):
 OUTPUT FORMAT (strict JSON):
 {
   "actions": [
-    {"action": "create", "content": "...", "category": "identity|preference|relationship|event|opinion|context", "importance": "high|medium|low"},
+    {"action": "create", "content": "...", "category": "identity|preference|relationship|event|opinion|context", "importance": "high|medium|low", "eventAt": "2026-04-19" },
     {"action": "update", "memoryId": "<uuid>", "content": "updated content", "category": "...", "importance": "..."},
     {"action": "delete", "memoryId": "<uuid>", "reason": "..."}
   ]
 }
+(eventAt is OPTIONAL and only appears on CREATE; omit it for timeless facts.)
 
 If nothing worth remembering, return: {"actions": []}
 
@@ -59,14 +77,14 @@ CATEGORY GUIDE:
 - identity: name, age, location, nationality, language, occupation, education
 - preference: food, hobbies, interests, communication style preferences
 - relationship: family members, friends, colleagues mentioned by name or role
-- event: significant things that happened, decisions made, milestones
+- event: significant things that happened, decisions made, milestones — these almost always want eventAt
 - opinion: views on topics, beliefs, values
 - context: current projects, goals, ongoing situations
 
 IMPORTANCE GUIDE:
 - high: core identity (name, language), strong/repeated preferences, important relationships
 - medium: mentioned preferences, events, moderate context
-- low: one-time mentions, minor details, casual opinions`;
+- low: one-time mentions, minor details, casual opinions. Time-stamped single-event facts default to low/medium — they'll gain strength naturally if they recur.`;
 }
 
 /** Character-bigram Jaccard similarity (CJK-safe). */
@@ -99,6 +117,42 @@ function detectLanguage(text: string): string {
   const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
   const total = text.replace(/\s/g, "").length;
   return total > 0 && cjk / total > 0.3 ? "Chinese" : "English";
+}
+
+/** Format a Date as "YYYY-MM-DD HH:mm" in Asia/Shanghai — matches the extraction
+ *  prompt rule that relative time phrases resolve against the user's wall clock. */
+function formatWallClock(d: Date): string {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get(
+    "minute"
+  )}`;
+}
+
+/** Parse an LLM-supplied eventAt string (date or datetime) into a Date, or
+ *  return null if it's missing/invalid. Accepts "2026-04-19", "2026-04-19T12:30",
+ *  or full ISO. Bare date strings anchor to Asia/Shanghai noon so timezone drift
+ *  doesn't push them onto the prior day in UTC storage. */
+function parseEventAt(raw: unknown): Date | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    // Date-only: anchor to Asia/Shanghai 12:00 → 04:00 UTC
+    const d = new Date(`${s}T04:00:00Z`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 export async function processUserMemory(data: UserMemoryData) {
@@ -160,15 +214,23 @@ export async function processUserMemory(data: UserMemoryData) {
       ? tombstones.map((t) => `- ${t.content}`).join("\n")
       : "(none)";
 
-  const messagesText = recentUserMessages
-    .reverse()
-    .map((m) => m.content)
+  // Reverse in place → chronological order. Each line is prefixed with the
+  // message's wall-clock timestamp so the LLM can resolve relative phrases.
+  const ordered = [...recentUserMessages].reverse();
+  const messagesText = ordered
+    .map((m) => `[${formatWallClock(m.createdAt)}] ${m.content}`)
     .join("\n");
 
-  const language = detectLanguage(messagesText);
+  // Language detection works on content only — timestamps are ASCII and would
+  // skew the CJK ratio.
+  const contentOnly = ordered.map((m) => m.content).join("\n");
+  const language = detectLanguage(contentOnly);
+
+  const nowIso = formatWallClock(new Date());
 
   const userPrompt = `User: ${user.name}
 Primary language: ${language}
+Current time: ${nowIso} (Asia/Shanghai)
 
 Existing memories about this user:
 ${categorized}
@@ -176,14 +238,17 @@ ${categorized}
 Forgotten facts (user asked to forget — DO NOT re-create these):
 ${tombstoneText}
 
-Recent messages from this user:
+Recent messages from this user (each prefixed with the time it was sent):
 ${messagesText}
 
-Analyze and return JSON. Remember: write every fact in ${language}.`;
+Analyze and return JSON. Remember: write every fact in ${language}, and resolve every relative time phrase into an absolute date.`;
 
   let result: { actions?: unknown[] };
   try {
-    result = await llmCompleteJSON(buildExtractionPrompt(language), userPrompt);
+    result = await llmCompleteJSON(
+      buildExtractionPrompt(language, nowIso),
+      userPrompt
+    );
   } catch (err) {
     log.error({ roomId, userId, err }, "memory.llm-parse-error");
     return;
@@ -194,57 +259,113 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
     return;
   }
 
-  // Local snapshot of "existing content" that grows as we accept CREATEs in
-  // this batch — prevents the LLM from emitting the same CREATE twice in one
-  // response.
-  const existingForDupCheck: string[] = activeMemories.map((m) => m.content);
+  // Local snapshot of "existing rows" (id + content) for dup detection. Grows
+  // as we accept CREATEs in this batch so the LLM can't duplicate within a
+  // single response.
+  const existingForDupCheck: { id: string | null; content: string }[] =
+    activeMemories.map((m) => ({ id: m.id, content: m.content }));
 
-  let created = 0, updated = 0, deleted = 0, rejected = 0, dupSkipped = 0;
+  let created = 0,
+    updated = 0,
+    deleted = 0,
+    rejected = 0,
+    reinforced = 0;
 
   await db.transaction(async (tx) => {
     for (const action of result.actions!) {
-      const a = action as Record<string, string>;
+      const a = action as Record<string, unknown>;
       try {
-        if (a.action === "create" && a.content) {
-          if (!VALID_CATEGORIES.includes(a.category) || !VALID_IMPORTANCES.includes(a.importance)) continue;
+        if (a.action === "create" && typeof a.content === "string") {
+          if (
+            typeof a.category !== "string" ||
+            typeof a.importance !== "string" ||
+            !VALID_CATEGORIES.includes(a.category) ||
+            !VALID_IMPORTANCES.includes(a.importance)
+          )
+            continue;
+          const content = a.content;
+          const category = a.category;
+          const importance = a.importance;
 
-          // Hard guard against near-duplicates the LLM slipped through.
-          let maxSim = 0;
-          let twin = "";
+          // Near-dup detection: on a hit, REINFORCE the existing row rather
+          // than skip. This is the core Phase A signal — if a user keeps
+          // mentioning the same fact across different sessions, its strength
+          // grows and the read-path decay holds it high.
+          let best: { id: string | null; content: string; sim: number } | null =
+            null;
           for (const existing of existingForDupCheck) {
-            const sim = textSimilarity(a.content, existing);
-            if (sim > maxSim) {
-              maxSim = sim;
-              twin = existing;
+            const sim = textSimilarity(content, existing.content);
+            if (!best || sim > best.sim) {
+              best = { id: existing.id, content: existing.content, sim };
             }
           }
-          if (maxSim >= DUP_SKIP_THRESHOLD) {
-            log.info(
-              { userId, content: a.content, twin, similarity: maxSim },
-              "memory.skip-near-dup"
-            );
-            dupSkipped++;
+          if (best && best.sim >= DUP_REINFORCE_THRESHOLD) {
+            // best.id is null only for CREATEs accepted earlier in this same
+            // batch (local twin); those can't be reinforced because the row
+            // was just inserted. Skip silently in that case.
+            if (best.id) {
+              // Safety: locked/pending rows must not be silently mutated.
+              if (lockedIds.has(best.id) || pendingIds.has(best.id)) {
+                log.info(
+                  { userId, content, twin: best.content, similarity: best.sim },
+                  "memory.skip-reinforce-protected"
+                );
+              } else {
+                await tx
+                  .update(userMemories)
+                  .set({
+                    strength: sql`${userMemories.strength} + 1`,
+                    lastReinforcedAt: new Date(),
+                    updatedAt: new Date(),
+                  })
+                  .where(
+                    and(
+                      eq(userMemories.id, best.id),
+                      eq(userMemories.source, "extracted")
+                    )
+                  );
+                log.info(
+                  {
+                    userId,
+                    memoryId: best.id,
+                    content,
+                    twin: best.content,
+                    similarity: best.sim,
+                  },
+                  "memory.reinforce"
+                );
+                reinforced++;
+              }
+            }
             continue;
           }
 
+          const eventAt = parseEventAt(a.eventAt);
           await tx.insert(userMemories).values({
             userId,
-            content: a.content,
-            category: a.category as any,
-            importance: a.importance as any,
+            content,
+            category: category as any,
+            importance: importance as any,
             source: "extracted",
             sourceRoomId: roomId,
+            eventAt: eventAt ?? undefined,
+            lastReinforcedAt: new Date(),
           });
-          existingForDupCheck.push(a.content);
+          existingForDupCheck.push({ id: null, content });
           created++;
-        } else if (a.action === "update" && a.memoryId && a.content) {
-          if (lockedIds.has(a.memoryId)) {
-            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-update-on-locked");
+        } else if (
+          a.action === "update" &&
+          typeof a.memoryId === "string" &&
+          typeof a.content === "string"
+        ) {
+          const memoryId = a.memoryId;
+          if (lockedIds.has(memoryId)) {
+            log.warn({ roomId, userId, memoryId }, "memory.blocked-update-on-locked");
             rejected++;
             continue;
           }
-          if (pendingIds.has(a.memoryId)) {
-            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-update-on-pending");
+          if (pendingIds.has(memoryId)) {
+            log.warn({ roomId, userId, memoryId }, "memory.blocked-update-on-pending");
             rejected++;
             continue;
           }
@@ -252,26 +373,36 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
             .update(userMemories)
             .set({
               content: a.content,
-              category: VALID_CATEGORIES.includes(a.category) ? (a.category as any) : undefined,
-              importance: VALID_IMPORTANCES.includes(a.importance) ? (a.importance as any) : undefined,
+              category:
+                typeof a.category === "string" &&
+                VALID_CATEGORIES.includes(a.category)
+                  ? (a.category as any)
+                  : undefined,
+              importance:
+                typeof a.importance === "string" &&
+                VALID_IMPORTANCES.includes(a.importance)
+                  ? (a.importance as any)
+                  : undefined,
+              lastReinforcedAt: new Date(),
               updatedAt: new Date(),
             })
             .where(
               and(
-                eq(userMemories.id, a.memoryId),
+                eq(userMemories.id, memoryId),
                 eq(userMemories.userId, userId),
                 eq(userMemories.source, "extracted")
               )
             );
           updated++;
-        } else if (a.action === "delete" && a.memoryId) {
-          if (lockedIds.has(a.memoryId)) {
-            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-delete-on-locked");
+        } else if (a.action === "delete" && typeof a.memoryId === "string") {
+          const memoryId = a.memoryId;
+          if (lockedIds.has(memoryId)) {
+            log.warn({ roomId, userId, memoryId }, "memory.blocked-delete-on-locked");
             rejected++;
             continue;
           }
-          if (pendingIds.has(a.memoryId)) {
-            log.warn({ roomId, userId, memoryId: a.memoryId }, "memory.blocked-delete-on-pending");
+          if (pendingIds.has(memoryId)) {
+            log.warn({ roomId, userId, memoryId }, "memory.blocked-delete-on-pending");
             rejected++;
             continue;
           }
@@ -281,7 +412,7 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
             .set({ deletedAt: new Date(), updatedAt: new Date() })
             .where(
               and(
-                eq(userMemories.id, a.memoryId),
+                eq(userMemories.id, memoryId),
                 eq(userMemories.userId, userId),
                 eq(userMemories.source, "extracted")
               )
@@ -295,7 +426,17 @@ Analyze and return JSON. Remember: write every fact in ${language}.`;
   });
 
   log.info(
-    { roomId, userId, userName: user.name, language, created, updated, deleted, rejected, dupSkipped },
+    {
+      roomId,
+      userId,
+      userName: user.name,
+      language,
+      created,
+      updated,
+      deleted,
+      rejected,
+      reinforced,
+    },
     "memory.result"
   );
 }

@@ -34,7 +34,8 @@ if [ -n "$PG_CONTAINER" ]; then
       packages/db/drizzle/0003_messages_trgm_index.sql \
       packages/db/drizzle/0004_memory_authorship.sql \
       packages/db/drizzle/0005_room_memories.sql \
-      packages/db/drizzle/0006_user_relationships.sql; do
+      packages/db/drizzle/0006_user_relationships.sql \
+      packages/db/drizzle/0007_memory_temporal.sql; do
     if [ -f "$sql" ]; then
       echo "  $sql"
       docker exec -i "$PG_CONTAINER" psql -U postgres -d agent_platform < "$sql" >/dev/null
