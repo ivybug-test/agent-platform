@@ -10,6 +10,44 @@ import LinkPreviewCard from "./LinkPreviewCard";
  *  punctuation gets stripped so "看看 https://example.com。" doesn't try
  *  to fetch "https://example.com。" as one URL. Returns up to 3 unique
  *  URLs per message — beyond that the cards take over the bubble. */
+/** Collapsible chain-of-thought panel — DeepSeek v4-pro returns
+ *  reasoning_content as a separate stream channel; we surface it above
+ *  the actual answer in a muted, italic, expandable block. Default-
+ *  expanded while the message is still streaming reasoning, default-
+ *  collapsed once the final answer is in. */
+function ThinkingPanel({
+  reasoning,
+  reasoningMs,
+  streaming,
+}: {
+  reasoning: string;
+  reasoningMs?: number;
+  streaming: boolean;
+}) {
+  const seconds =
+    reasoningMs && reasoningMs > 0 ? Math.max(1, Math.round(reasoningMs / 1000)) : 0;
+  const label = streaming
+    ? "思考中…"
+    : seconds > 0
+      ? `已思考 ${seconds} 秒`
+      : "已思考";
+  return (
+    <details
+      className="text-xs opacity-70 mb-1 select-none cursor-pointer"
+      open={streaming || undefined}
+    >
+      <summary className="flex items-center gap-1 list-none [&::-webkit-details-marker]:hidden">
+        <span>🧠</span>
+        <span className={streaming ? "animate-pulse" : ""}>{label}</span>
+        <span className="opacity-60">▾</span>
+      </summary>
+      <div className="mt-1 pl-3 border-l-2 border-base-content/20 italic whitespace-pre-wrap opacity-80">
+        {reasoning}
+      </div>
+    </details>
+  );
+}
+
 function extractUrls(text: string): string[] {
   if (!text) return [];
   const matches = text.match(/https?:\/\/[^\s<>"]+/g) || [];
@@ -37,6 +75,14 @@ interface Message {
   content: string;
   contentType?: string;
   createdAt?: string;
+  /** DeepSeek v4-pro chain-of-thought, surfaced in the collapsible
+   *  thinking panel above the message bubble. Populated either from
+   *  the SSE `{reasoning: ...}` events (live stream) or from
+   *  metadata.reasoning on initial load. */
+  reasoning?: string;
+  /** Milliseconds spent in the reasoning phase. Drives the
+   *  "已思考 Xs" label. */
+  reasoningMs?: number;
 }
 
 interface ChatPanelProps {
@@ -166,6 +212,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const isInitialLoad = useRef(true);
+  // Per-stream timer for the reasoning panel. Reset to 0 each time a new
+  // agent message starts; first {reasoning} event stamps it, first
+  // {content} event closes it out into reasoningMs on the message.
+  const reasoningStartRef = useRef(0);
 
   useEffect(() => {
     setMessages([]);
@@ -186,6 +236,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           content: r.content,
           contentType: r.contentType,
           createdAt: r.createdAt,
+          reasoning: r.metadata?.reasoning,
+          reasoningMs: r.metadata?.reasoningMs,
         }));
       for (const m of loaded) {
         if (m.id) seenIds.current.add(m.id);
@@ -212,7 +264,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         senderId: r.senderId,
         senderName: r.senderName,
         content: r.content,
+        contentType: r.contentType,
         createdAt: r.createdAt,
+        reasoning: r.metadata?.reasoning,
+        reasoningMs: r.metadata?.reasoningMs,
       }));
     for (const m of fetched) {
       if (m.id) seenIds.current.add(m.id);
@@ -247,6 +302,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           content: r.content,
           contentType: r.contentType,
           createdAt: r.createdAt,
+          reasoning: r.metadata?.reasoning,
+          reasoningMs: r.metadata?.reasoningMs,
         }));
       for (const m of older) {
         if (m.id) seenIds.current.add(m.id);
@@ -427,6 +484,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       if (contentType.includes("application/json")) return;
       if (!res.ok || !res.body) throw new Error("Request failed");
 
+      reasoningStartRef.current = 0;
       setMessages((prev) => [
         ...prev,
         {
@@ -459,11 +517,44 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               seenIds.current.add(parsed.messageId);
               continue;
             }
+            if (parsed.reasoning) {
+              setMessages((prev) => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                const wasEmpty = !last.reasoning;
+                updated[updated.length - 1] = {
+                  ...last,
+                  reasoning: (last.reasoning || "") + parsed.reasoning,
+                  // First reasoning chunk → start the timer. Each
+                  // subsequent chunk while content hasn't started yet
+                  // bumps reasoningMs forward; the moment content begins
+                  // we stop updating it.
+                  reasoningMs:
+                    wasEmpty || !last.reasoningMs
+                      ? 0
+                      : last.reasoningMs,
+                };
+                return updated;
+              });
+              // Track when reasoning began on this message so we can
+              // close out reasoningMs when content starts arriving.
+              if (!reasoningStartRef.current) {
+                reasoningStartRef.current = Date.now();
+              }
+            }
             if (parsed.content) {
               setMessages((prev) => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
-                updated[updated.length - 1] = { ...last, content: last.content + parsed.content };
+                const reasoningMs =
+                  last.reasoning && reasoningStartRef.current && !last.reasoningMs
+                    ? Date.now() - reasoningStartRef.current
+                    : last.reasoningMs;
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: last.content + parsed.content,
+                  reasoningMs,
+                };
                 return updated;
               });
             }
@@ -589,6 +680,21 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                     </a>
                   ) : (
                     <>
+                      {msg.reasoning && (
+                        <ThinkingPanel
+                          reasoning={msg.reasoning}
+                          reasoningMs={msg.reasoningMs}
+                          // The latest agent message is "active" while
+                          // the panel itself has reasoning but no answer
+                          // text yet — auto-expand and animate the label.
+                          streaming={
+                            isAgent &&
+                            isStreaming &&
+                            i === messages.length - 1 &&
+                            !msg.content
+                          }
+                        />
+                      )}
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                       {extractUrls(msg.content).map((u) => (
                         <LinkPreviewCard key={u} url={u} />

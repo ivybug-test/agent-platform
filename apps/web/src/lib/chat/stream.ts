@@ -53,6 +53,11 @@ export async function streamAgentResponse(
 
   const streamStartTime = Date.now();
   let fullContent = "";
+  // DeepSeek v4-pro chain-of-thought, captured for the collapsible
+  // "thinking" UI block. NOT fed back into the next turn's context.
+  let fullReasoning = "";
+  let reasoningStartedAt = 0;
+  let reasoningEndedAt = 0;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -70,21 +75,55 @@ export async function streamAgentResponse(
             const data = line.slice(6);
             if (data === "[DONE]") continue;
             try {
-              const { content: chunk } = JSON.parse(data);
-              if (chunk) fullContent += chunk;
+              const evt = JSON.parse(data) as {
+                content?: string;
+                reasoning?: string;
+              };
+              if (evt.reasoning) {
+                if (!reasoningStartedAt) reasoningStartedAt = Date.now();
+                fullReasoning += evt.reasoning;
+              }
+              if (evt.content) {
+                if (reasoningStartedAt && !reasoningEndedAt) {
+                  reasoningEndedAt = Date.now();
+                }
+                fullContent += evt.content;
+              }
             } catch {}
           }
         }
       } finally {
         const duration = Date.now() - streamStartTime;
-        log.info({ roomId, agentMsgId, contentLength: fullContent.length, duration }, "stream.complete");
+        log.info(
+          {
+            roomId,
+            agentMsgId,
+            contentLength: fullContent.length,
+            reasoningLength: fullReasoning.length,
+            duration,
+          },
+          "stream.complete"
+        );
         log.debug({ roomId, agentMsgId, content: fullContent }, "stream.content");
+
+        const reasoningMs =
+          reasoningStartedAt && reasoningEndedAt
+            ? reasoningEndedAt - reasoningStartedAt
+            : reasoningStartedAt
+              ? Date.now() - reasoningStartedAt
+              : 0;
+        // Only attach a metadata blob when there's actually reasoning to
+        // store; non-pro turns leave the column NULL.
+        const metadata = fullReasoning
+          ? { reasoning: fullReasoning, reasoningMs }
+          : undefined;
 
         await db
           .update(messages)
           .set({
             content: fullContent,
             status: "completed",
+            metadata,
             updatedAt: new Date(),
           })
           .where(eq(messages.id, agentMsgId));

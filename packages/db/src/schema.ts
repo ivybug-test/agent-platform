@@ -16,6 +16,14 @@ export interface MessageMetadata {
     model: string;
     generatedAt: string;
   };
+  /** DeepSeek v4-pro chain-of-thought trace. The agent's final answer
+   *  stays in messages.content; this field is purely for the UI's
+   *  collapsible "thinking" panel. NOT fed back into context on the next
+   *  turn — DeepSeek docs explicitly warn against echoing it. */
+  reasoning?: string;
+  /** Milliseconds between the first reasoning chunk and the first
+   *  content chunk — what the UI shows as "已思考 Xs". */
+  reasoningMs?: number;
 }
 
 // Enums

@@ -141,10 +141,19 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           ...cfg.sampling,
         });
         for await (const chunk of stream) {
-          const content = chunk.choices[0]?.delta?.content;
-          if (content) {
-            sendEvent({ content });
-            totalChars += content.length;
+          const delta = chunk.choices[0]?.delta as
+            | { content?: string | null; reasoning_content?: string | null }
+            | undefined;
+          // DeepSeek v4-pro streams its chain-of-thought as
+          // `reasoning_content` (separate from `content`). Forward it as a
+          // distinct SSE event so the frontend can show a collapsed
+          // "thinking" panel above the actual reply.
+          if (delta?.reasoning_content) {
+            sendEvent({ reasoning: delta.reasoning_content });
+          }
+          if (delta?.content) {
+            sendEvent({ content: delta.content });
+            totalChars += delta.content.length;
           }
         }
       }
@@ -199,6 +208,9 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
         const choice = chunk.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
+        if (delta.reasoning_content) {
+          sendEvent({ reasoning: delta.reasoning_content });
+        }
         if (delta.content) {
           assistantText += delta.content;
           totalChars += delta.content.length;
