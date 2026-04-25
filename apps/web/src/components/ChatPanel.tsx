@@ -5,6 +5,7 @@ import { useSession } from "next-auth/react";
 import { io, Socket } from "socket.io-client";
 import { sendImageMessage } from "@/lib/upload-image";
 import LinkPreviewCard from "./LinkPreviewCard";
+import MarkdownContent from "./MarkdownContent";
 import {
   play as playTts,
   stopAll as stopAllTts,
@@ -282,6 +283,15 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // spawn a fresh TTS session.
   const [voiceMode, setVoiceMode] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Last TTS error — surfaced as a toast above the input dock for ~4s so
+  // failures (no plan, quota exceeded, network blip) don't leave the
+  // user wondering why nothing played.
+  const [ttsError, setTtsError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!ttsError) return;
+    const t = setTimeout(() => setTtsError(null), 4000);
+    return () => clearTimeout(t);
+  }, [ttsError]);
   // Tracks which agent we're chatting with (for /api/tts agentId param).
   // Populated from the first agent message we see; chat already enforces
   // single-agent-per-room so this is stable.
@@ -736,13 +746,34 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                 : "";
             if (clean) {
               setIsPlaying(true);
+              setTtsError(null);
               playTts({
                 body: {
                   text: clean,
                   agentId: agentIdRef.current,
                 },
                 onEnd: () => setIsPlaying(false),
-                onError: () => setIsPlaying(false),
+                onError: (err) => {
+                  setIsPlaying(false);
+                  // User-facing summary of common provider errors.
+                  // Provider shape: "minimax 2061: token plan not support model"
+                  // / "minimax 2049: invalid api key" / "tts request failed: 502 ..."
+                  const raw = err?.message || String(err);
+                  if (/abort/i.test(raw)) return; // user-initiated, no toast
+                  let shown = "TTS 失败";
+                  if (/2061|plan/i.test(raw)) {
+                    shown = "TTS 套餐未开通或当日配额已满";
+                  } else if (/2049|api key|invalid.*key/i.test(raw)) {
+                    shown = "TTS 鉴权失败";
+                  } else if (/429|rate/i.test(raw)) {
+                    shown = "TTS 频率被限，稍后再试";
+                  } else if (/502|503|504|timeout/i.test(raw)) {
+                    shown = "TTS 服务暂时无响应";
+                  } else {
+                    shown = "TTS 失败：" + raw.replace(/^.*?:\s*/, "").slice(0, 60);
+                  }
+                  setTtsError(shown);
+                },
               });
             }
             return prevMsgs;
@@ -933,7 +964,17 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                           }
                         />
                       )}
-                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      {/* Agent replies are markdown (headings, lists,
+                          tables, **bold**, [links]); user messages are
+                          plain text — render them as preserved-whitespace
+                          to avoid bullet-glyph hijacking from a stray "-".
+                          react-markdown handles partial syntax during
+                          streaming gracefully. */}
+                      {isAgent ? (
+                        <MarkdownContent>{msg.content}</MarkdownContent>
+                      ) : (
+                        <div className="whitespace-pre-wrap">{msg.content}</div>
+                      )}
                       {extractUrls(msg.content).map((u) => (
                         <LinkPreviewCard key={u} url={u} />
                       ))}
@@ -991,7 +1032,28 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           </button>
         </div>
       )}
-      <div className="flex gap-2 px-3 py-2 md:px-4 md:py-3 border-t border-base-300 safe-area-bottom">
+      {ttsError && (
+        <div className="px-4 pb-1 text-xs text-error/90 flex items-center gap-1.5 animate-fade-in">
+          <span aria-hidden>⚠️</span>
+          <span className="truncate">{ttsError}</span>
+          <button
+            type="button"
+            onClick={() => setTtsError(null)}
+            className="ml-auto text-base-content/40 hover:text-base-content"
+            aria-label="关闭提示"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {/* Input dock — mirrors DeepSeek's mobile layout: one rounded
+          container, textarea on top, two stateful pills on the lower
+          left, two action icon-buttons on the lower right. Replaces an
+          older flat row that crammed Flash/Pro, voice, image and send
+          buttons all next to the textarea — visually noisy on mobile.
+          Reply chip + uploading badge are rendered above this dock by
+          the surrounding layout. */}
+      <div className="px-3 py-2 md:px-4 md:py-3 safe-area-bottom">
         <input
           ref={fileInputRef}
           type="file"
@@ -999,88 +1061,99 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           className="hidden"
           onChange={handleImagePick}
         />
-        <button
-          type="button"
-          onClick={toggleModel}
-          disabled={isStreaming}
-          className={`btn btn-sm self-end px-2 md:min-w-[3.5rem] ${
-            model === "pro" ? "btn-secondary" : "btn-ghost"
-          }`}
-          title={
-            model === "pro"
-              ? "深度思考模式 (Pro) — 慢一点但推理更强，点击切回快速"
-              : "快速模式 (Flash) — 默认，点击切到深度思考"
-          }
-        >
-          <span className="md:hidden text-base leading-none" aria-hidden>
-            {model === "pro" ? "🧠" : "⚡"}
-          </span>
-          <span className="hidden md:inline">
-            {model === "pro" ? "深度" : "快速"}
-          </span>
-        </button>
-        {/* Voice mode toggle. When playing, the same button doubles as a
-            stop control (click to abort the current TTS but stay in
-            voice mode). Click again from idle state to leave voice mode. */}
-        <button
-          type="button"
-          onClick={isPlaying ? stopPlayback : toggleVoiceMode}
-          disabled={isStreaming && !voiceMode}
-          className={`btn btn-sm self-end px-2 md:min-w-[3.5rem] ${
-            isPlaying
-              ? "btn-error"
-              : voiceMode
-                ? "btn-secondary"
-                : "btn-ghost"
-          }`}
-          title={
-            isPlaying
-              ? "正在播放 — 点击停止"
-              : voiceMode
-                ? "语音模式开 — 点击关闭"
-                : "语音模式关 — 点击开启（agent 回复后自动朗读）"
-          }
-        >
-          <span className="text-base leading-none" aria-hidden>
-            {isPlaying ? "⏹" : voiceMode ? "🔊" : "🔇"}
-          </span>
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm self-end px-2"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={isStreaming || isUploading}
-          title="发送图片"
-        >
-          {isUploading ? (
-            <span className="loading loading-spinner loading-xs"></span>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
-            </svg>
-          )}
-        </button>
-        <textarea
-          ref={textareaRef}
-          className="textarea textarea-bordered flex-1 min-h-[2.5rem] max-h-32 text-sm leading-normal resize-none bg-base-200"
-          value={input}
-          onChange={(e) => { setInput(e.target.value); emitTyping(); }}
-          onKeyDown={handleKeyDown}
-          placeholder="输入消息..."
-          rows={1}
-          disabled={isStreaming}
-        />
-        <button
-          className="btn btn-primary btn-sm self-end"
-          onClick={sendMessage}
-          disabled={isStreaming}
-        >
-          {isStreaming ? (
-            <span className="loading loading-dots loading-xs"></span>
-          ) : (
-            "发送"
-          )}
-        </button>
+        <div className="rounded-3xl bg-base-200 border border-base-300 px-4 pt-2 pb-2.5">
+          <textarea
+            ref={textareaRef}
+            className="w-full bg-transparent border-0 outline-none focus:outline-none text-sm leading-normal resize-none min-h-[1.75rem] max-h-32 placeholder:text-base-content/40"
+            value={input}
+            onChange={(e) => {
+              setInput(e.target.value);
+              emitTyping();
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="发消息"
+            rows={1}
+            disabled={isStreaming}
+          />
+          <div className="flex items-center gap-2 mt-1">
+            {/* Stateful pill toggles on the left — they show what mode
+                the next reply will use, blue when active. */}
+            <button
+              type="button"
+              onClick={toggleModel}
+              disabled={isStreaming}
+              className={`flex items-center gap-1.5 px-3 h-7 rounded-full text-xs transition-colors ${
+                model === "pro"
+                  ? "bg-primary/20 text-primary border border-primary/40"
+                  : "bg-transparent text-base-content/70 border border-base-content/20 hover:bg-base-content/5"
+              }`}
+              title={
+                model === "pro"
+                  ? "深度思考模式 — 点击关闭"
+                  : "深度思考模式 — 点击开启"
+              }
+            >
+              <span aria-hidden>🧠</span>
+              <span>深度思考</span>
+            </button>
+            <button
+              type="button"
+              onClick={isPlaying ? stopPlayback : toggleVoiceMode}
+              disabled={isStreaming && !voiceMode && !isPlaying}
+              className={`flex items-center gap-1.5 px-3 h-7 rounded-full text-xs transition-colors ${
+                isPlaying
+                  ? "bg-error/20 text-error border border-error/40"
+                  : voiceMode
+                    ? "bg-primary/20 text-primary border border-primary/40"
+                    : "bg-transparent text-base-content/70 border border-base-content/20 hover:bg-base-content/5"
+              }`}
+              title={
+                isPlaying
+                  ? "正在播放 — 点击停止"
+                  : voiceMode
+                    ? "语音模式开 — 点击关闭"
+                    : "语音模式 — 点击开启（agent 回复后自动朗读）"
+              }
+            >
+              <span aria-hidden>{isPlaying ? "⏹" : "🔊"}</span>
+              <span>{isPlaying ? "停止" : "语音"}</span>
+            </button>
+
+            <div className="flex-1" />
+
+            {/* Right side is just the send button for now. Image upload
+                used to live here as a "+" but the icon read as a "more
+                attachments" placeholder; reintroduce when there's a
+                proper attachments menu (image / file / etc). */}
+            <button
+              type="button"
+              onClick={sendMessage}
+              disabled={isStreaming || !input.trim()}
+              className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+                input.trim() && !isStreaming
+                  ? "bg-primary text-primary-content hover:bg-primary/90"
+                  : "bg-base-content/15 text-base-content/40"
+              }`}
+              title="发送"
+              aria-label="发送"
+            >
+              {isStreaming ? (
+                <span className="loading loading-dots loading-xs"></span>
+              ) : (
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2.4}
+                  stroke="currentColor"
+                  className="w-4 h-4"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0-6 6m6-6 6 6" />
+                </svg>
+              )}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

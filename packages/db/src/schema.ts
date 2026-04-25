@@ -63,6 +63,12 @@ export const agents = pgTable("agents", {
   name: varchar("name", { length: 100 }).notNull(),
   systemPrompt: text("system_prompt"),
   model: varchar("model", { length: 100 }),
+  // TTS voice settings — NULL means "use the active provider's default
+  // voice". Frontend voice-mode toggle decides whether to play at all;
+  // these columns just pick which timbre.
+  voiceProvider: varchar("voice_provider", { length: 20 }),
+  voiceId: varchar("voice_id", { length: 100 }),
+  voiceName: varchar("voice_name", { length: 60 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
