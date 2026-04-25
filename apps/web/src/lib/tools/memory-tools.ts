@@ -351,7 +351,10 @@ const remember: ToolHandler = async (args, ctx) => {
       source: "extracted",
       sourceRoomId: ctx.roomId,
       authoredByUserId: isThirdParty ? ctx.userId : null,
-      confirmedAt: isThirdParty ? null : null,
+      // pending state for third-party writes; self-writes auto-visible
+      // because authoredByUserId is null (visibleToSubject ignores the
+      // confirmedAt column when the row is self-authored).
+      confirmedAt: null,
       eventAt: eventAt ?? undefined,
       lastReinforcedAt: new Date(),
     })

@@ -48,6 +48,13 @@ interface FriendRow {
   friend: { id: string; name: string; email: string };
 }
 
+interface FriendOption {
+  id: string;
+  name: string;
+}
+
+const RECENT_LIMIT = 8;
+
 const KIND_LABELS: Record<RelationshipKind, string> = {
   spouse: "伴侣",
   family: "家人",
@@ -86,6 +93,32 @@ const IMPORTANCE_COLORS: Record<Importance, string> = {
   low: "badge-ghost",
 };
 
+/** Compact relative timestamp for memory list rows. Within a day shows
+ *  HH:mm, within a week shows weekday + HH:mm, else MM-DD. */
+function fmtMemoryTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const now = Date.now();
+  const ms = d.getTime();
+  const diffH = (now - ms) / 3600000;
+  const sh = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+    hour12: false,
+  });
+  const parts = sh.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
+  if (diffH < 24) return `${get("hour")}:${get("minute")}`;
+  if (diffH < 24 * 7) return `${get("weekday")} ${get("hour")}:${get("minute")}`;
+  return `${get("month")}-${get("day")}`;
+}
+
 export default function MemoriesPage() {
   const { status } = useSession();
   const router = useRouter();
@@ -107,19 +140,31 @@ export default function MemoriesPage() {
   const [newContent, setNewContent] = useState("");
   const [newCategory, setNewCategory] = useState<Category>("preference");
   const [newImportance, setNewImportance] = useState<Importance>("medium");
+  // "self" → write to self; otherwise, a friend's userId (writes land
+  // pending in their /memories tab until they accept).
+  const [newSubject, setNewSubject] = useState<"self" | string>("self");
   const [saving, setSaving] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState<Set<Category>>(new Set());
+  // _ retained for legacy edit handlers — no longer used in the new UI.
+  // Search box on the "mine" tab. Empty → recent + collapsed all sections.
+  // Non-empty → flat filtered results (case-insensitive substring on
+  // content, server-side via ?q=).
+  const [query, setQuery] = useState("");
+  // Friends from /api/memories — used to populate the new-memory subject
+  // selector. Cheaper than refetching /api/friends here too.
+  const [friendOpts, setFriendOpts] = useState<FriendOption[]>([]);
+  const [allOpen, setAllOpen] = useState(false);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
-  const load = async () => {
+  const load = async (opts: { q?: string } = {}) => {
     setLoading(true);
     try {
+      const memUrl = opts.q ? `/api/memories?q=${encodeURIComponent(opts.q)}` : "/api/memories";
       const [memRes, relRes, friRes] = await Promise.all([
-        fetch("/api/memories"),
+        fetch(memUrl),
         fetch("/api/relationships"),
         fetch("/api/friends"),
       ]);
@@ -127,6 +172,7 @@ export default function MemoriesPage() {
         const data = await memRes.json();
         setMine(data.mine || []);
         setPending(data.pending || []);
+        setFriendOpts(data.friends || []);
       }
       if (relRes.ok) {
         const data = await relRes.json();
@@ -146,6 +192,17 @@ export default function MemoriesPage() {
   useEffect(() => {
     if (status === "authenticated") load();
   }, [status]);
+
+  // Debounce query → server-side ?q= refetch. Local filter would be
+  // simpler but burns through the user's whole memory list each
+  // keystroke; server-side ILIKE is fine for the volumes we handle.
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    const t = setTimeout(() => {
+      load({ q: query.trim() });
+    }, 200);
+    return () => clearTimeout(t);
+  }, [query, status]);
 
   const startEdit = (m: Memory) => {
     setEditingId(m.id);
@@ -206,6 +263,7 @@ export default function MemoriesPage() {
     if (!newContent.trim() || saving) return;
     setSaving(true);
     try {
+      const isThirdParty = newSubject !== "self";
       const res = await fetch("/api/memories", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -213,12 +271,24 @@ export default function MemoriesPage() {
           content: newContent.trim(),
           category: newCategory,
           importance: newImportance,
+          subjectUserId: isThirdParty ? newSubject : undefined,
         }),
       });
       if (res.ok) {
-        const created: Memory = await res.json();
-        setMine((prev) => [created, ...prev]);
+        const created = (await res.json()) as Memory & { pending?: boolean };
+        // Third-party writes land in the SUBJECT's pending list — they
+        // don't show up in the author's own lists at all. Just clear the
+        // form and show a brief confirmation by re-loading.
+        if (created.pending) {
+          const friend = friendOpts.find((f) => f.id === newSubject);
+          alert(
+            `已发送给 ${friend?.name || "对方"}，他/她在 /memories 的"待确认"里能看到。`
+          );
+        } else {
+          setMine((prev) => [created, ...prev]);
+        }
         setNewContent("");
+        setNewSubject("self");
         setAddOpen(false);
       }
     } finally {
@@ -272,19 +342,14 @@ export default function MemoriesPage() {
     }
   };
 
-  const toggleCategory = (cat: Category) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(cat)) next.delete(cat);
-      else next.add(cat);
-      return next;
-    });
-  };
-
-  const grouped = CATEGORY_ORDER.map((cat) => ({
+  // mine is already updatedAt-DESC sorted by the API. recent = top N.
+  // byCategory groups for the expandable "全部" section.
+  const recent = mine.slice(0, RECENT_LIMIT);
+  const byCategory = CATEGORY_ORDER.map((cat) => ({
     category: cat,
     items: mine.filter((m) => m.category === cat),
   })).filter((g) => g.items.length > 0);
+  const isSearching = query.trim().length > 0;
 
   if (status === "loading" || loading) {
     return (
@@ -607,9 +672,9 @@ export default function MemoriesPage() {
           </div>
         )}
 
-        {/* Mine tab — existing UI */}
+        {/* Mine tab */}
         {tab === "mine" && (<>
-        {/* Add form (collapsible) */}
+        {/* New-memory form */}
         {addOpen && (
           <div className="card bg-base-200 p-3 mb-4 space-y-2">
             <textarea
@@ -621,6 +686,21 @@ export default function MemoriesPage() {
               autoFocus
             />
             <div className="flex flex-wrap gap-2 items-center">
+              {/* Subject selector — defaults to self; pick a friend to
+                  send a pending memory to them. */}
+              <select
+                className="select select-bordered select-sm"
+                value={newSubject}
+                onChange={(e) => setNewSubject(e.target.value)}
+                title="记给谁"
+              >
+                <option value="self">关于我</option>
+                {friendOpts.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    关于 {f.name}（待对方确认）
+                  </option>
+                ))}
+              </select>
               <select
                 className="select select-bordered select-sm"
                 value={newCategory}
@@ -646,151 +726,278 @@ export default function MemoriesPage() {
                 onClick={create}
                 disabled={saving || !newContent.trim()}
               >
+                {newSubject === "self" ? "保存" : "发送"}
+              </button>
+            </div>
+            {newSubject !== "self" && (
+              <div className="text-[11px] text-base-content/50">
+                这条会进入对方的"待确认"列表，需要他们接受后才生效。
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Search box */}
+        <div className="relative mb-3">
+          <input
+            className="input input-bordered input-sm w-full pr-8 text-sm"
+            placeholder="搜索记忆..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-base-content/40 hover:text-base-content text-sm"
+              aria-label="清空"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        {mine.length === 0 && !isSearching && (
+          <div className="text-center text-sm text-base-content/40 py-16">
+            还没有记忆。点击右上角"+ 新增"手动添加，或在聊天中让 agent 记录。
+          </div>
+        )}
+
+        {mine.length === 0 && isSearching && (
+          <div className="text-center text-sm text-base-content/40 py-16">
+            没有匹配"{query}"的记忆。
+          </div>
+        )}
+
+        {/* Search results — flat list */}
+        {isSearching && mine.length > 0 && (
+          <div>
+            <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
+              搜索结果（{mine.length}）
+            </h2>
+            <ul className="space-y-1.5">
+              {mine.map((m) => (
+                <MineRow
+                  key={m.id}
+                  m={m}
+                  isEditing={editingId === m.id}
+                  draft={draft}
+                  setDraft={setDraft}
+                  saving={saving}
+                  startEdit={startEdit}
+                  cancelEdit={cancelEdit}
+                  saveEdit={saveEdit}
+                  remove={remove}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Default view: recent + collapsed all-by-category */}
+        {!isSearching && mine.length > 0 && (
+          <>
+            <section className="mb-4">
+              <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
+                最近（{recent.length}）
+              </h2>
+              <ul className="space-y-1.5">
+                {recent.map((m) => (
+                  <MineRow
+                    key={m.id}
+                    m={m}
+                    isEditing={editingId === m.id}
+                    draft={draft}
+                    setDraft={setDraft}
+                    saving={saving}
+                    startEdit={startEdit}
+                    cancelEdit={cancelEdit}
+                    saveEdit={saveEdit}
+                    remove={remove}
+                  />
+                ))}
+              </ul>
+            </section>
+
+            {mine.length > RECENT_LIMIT && (
+              <section>
+                <button
+                  type="button"
+                  onClick={() => setAllOpen((v) => !v)}
+                  className="w-full flex items-center gap-2 px-2 py-2 text-xs font-bold text-base-content/60 hover:text-base-content transition-colors border-t border-base-300"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    strokeWidth={2.2}
+                    stroke="currentColor"
+                    className={`w-3 h-3 transition-transform ${allOpen ? "rotate-90" : ""}`}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
+                  </svg>
+                  <span>全部 {mine.length} 条（按分类）</span>
+                </button>
+                {allOpen && (
+                  <div className="mt-2 space-y-3">
+                    {byCategory.map(({ category, items }) => (
+                      <section key={category}>
+                        <h3 className="text-[11px] uppercase tracking-wider text-base-content/40 mb-1 px-1">
+                          {CATEGORY_LABELS[category]}（{items.length}）
+                        </h3>
+                        <ul className="space-y-1.5">
+                          {items.map((m) => (
+                            <MineRow
+                              key={m.id}
+                              m={m}
+                              isEditing={editingId === m.id}
+                              draft={draft}
+                              setDraft={setDraft}
+                              saving={saving}
+                              startEdit={startEdit}
+                              cancelEdit={cancelEdit}
+                              saveEdit={saveEdit}
+                              remove={remove}
+                            />
+                          ))}
+                        </ul>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+          </>
+        )}
+        </>)}
+      </div>
+    </main>
+  );
+}
+
+/** Single row in the mine list. Inline-edit toggle, inline metadata
+ *  (importance + locked badge + relative time), and edit/forget actions
+ *  on the right. Extracted so the recent / search / by-category sections
+ *  can share the same renderer without duplicating ~80 lines of JSX. */
+function MineRow({
+  m,
+  isEditing,
+  draft,
+  setDraft,
+  saving,
+  startEdit,
+  cancelEdit,
+  saveEdit,
+  remove,
+}: {
+  m: Memory;
+  isEditing: boolean;
+  draft: Partial<Memory>;
+  setDraft: (fn: (d: Partial<Memory>) => Partial<Memory>) => void;
+  saving: boolean;
+  startEdit: (m: Memory) => void;
+  cancelEdit: () => void;
+  saveEdit: (id: string) => void;
+  remove: (id: string) => void;
+}) {
+  if (isEditing) {
+    return (
+      <li className="card bg-base-200 px-3 py-2.5">
+        <div className="space-y-2">
+          <textarea
+            className="textarea textarea-bordered w-full text-sm"
+            rows={2}
+            value={draft.content ?? ""}
+            onChange={(e) =>
+              setDraft((d) => ({ ...d, content: e.target.value }))
+            }
+            autoFocus
+          />
+          <div className="flex flex-wrap gap-1.5 items-center">
+            <select
+              className="select select-bordered select-xs"
+              value={draft.category}
+              onChange={(e) =>
+                setDraft((d) => ({ ...d, category: e.target.value as Category }))
+              }
+            >
+              {CATEGORY_ORDER.map((c) => (
+                <option key={c} value={c}>
+                  {CATEGORY_LABELS[c]}
+                </option>
+              ))}
+            </select>
+            <select
+              className="select select-bordered select-xs"
+              value={draft.importance}
+              onChange={(e) =>
+                setDraft((d) => ({
+                  ...d,
+                  importance: e.target.value as Importance,
+                }))
+              }
+            >
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+            </select>
+            <div className="ml-auto flex gap-1">
+              <button
+                className="btn btn-ghost btn-xs"
+                onClick={cancelEdit}
+                disabled={saving}
+              >
+                取消
+              </button>
+              <button
+                className="btn btn-primary btn-xs"
+                onClick={() => saveEdit(m.id)}
+                disabled={saving || !draft.content?.trim()}
+              >
                 保存
               </button>
             </div>
           </div>
+        </div>
+      </li>
+    );
+  }
+  return (
+    <li className="card bg-base-200 px-3 py-2.5">
+      <div className="text-sm break-words leading-relaxed">{m.content}</div>
+      <div className="flex items-center flex-wrap gap-1 mt-1.5">
+        <span className="badge badge-xs badge-ghost">
+          {CATEGORY_LABELS[m.category]}
+        </span>
+        <span
+          className={`badge badge-xs ${IMPORTANCE_COLORS[m.importance]}`}
+        >
+          {IMPORTANCE_LABELS[m.importance]}
+        </span>
+        {m.source === "user_explicit" && (
+          <span className="badge badge-xs badge-info">已锁定</span>
         )}
-
-        {grouped.length === 0 && (
-          <div className="text-center text-sm text-base-content/40 py-16">
-            还没有记忆。点击右上角“+ 新增”手动添加,或在聊天中让 agent 记录。
-          </div>
-        )}
-
-        {grouped.map(({ category, items }) => {
-          const isCollapsed = collapsed.has(category);
-          return (
-            <section key={category} className="mb-3">
-              <button
-                type="button"
-                onClick={() => toggleCategory(category)}
-                className="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-bold uppercase tracking-wider text-base-content/60 hover:text-base-content transition-colors"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  strokeWidth={2.2}
-                  stroke="currentColor"
-                  className={`w-3 h-3 transition-transform ${isCollapsed ? "" : "rotate-90"}`}
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
-                </svg>
-                <span>{CATEGORY_LABELS[category]}</span>
-                <span className="text-base-content/40 font-normal normal-case ml-1">
-                  {items.length}
-                </span>
-              </button>
-              {!isCollapsed && (
-                <ul className="space-y-1.5 mt-1">
-                  {items.map((m) => (
-                    <li key={m.id} className="card bg-base-200 px-3 py-2.5">
-                      {editingId === m.id ? (
-                        <div className="space-y-2">
-                          <textarea
-                            className="textarea textarea-bordered w-full text-sm"
-                            rows={2}
-                            value={draft.content ?? ""}
-                            onChange={(e) =>
-                              setDraft((d) => ({
-                                ...d,
-                                content: e.target.value,
-                              }))
-                            }
-                            autoFocus
-                          />
-                          <div className="flex flex-wrap gap-1.5 items-center">
-                            <select
-                              className="select select-bordered select-xs"
-                              value={draft.category}
-                              onChange={(e) =>
-                                setDraft((d) => ({
-                                  ...d,
-                                  category: e.target.value as Category,
-                                }))
-                              }
-                            >
-                              {CATEGORY_ORDER.map((c) => (
-                                <option key={c} value={c}>
-                                  {CATEGORY_LABELS[c]}
-                                </option>
-                              ))}
-                            </select>
-                            <select
-                              className="select select-bordered select-xs"
-                              value={draft.importance}
-                              onChange={(e) =>
-                                setDraft((d) => ({
-                                  ...d,
-                                  importance: e.target.value as Importance,
-                                }))
-                              }
-                            >
-                              <option value="high">高</option>
-                              <option value="medium">中</option>
-                              <option value="low">低</option>
-                            </select>
-                            <div className="ml-auto flex gap-1">
-                              <button
-                                className="btn btn-ghost btn-xs"
-                                onClick={cancelEdit}
-                                disabled={saving}
-                              >
-                                取消
-                              </button>
-                              <button
-                                className="btn btn-primary btn-xs"
-                                onClick={() => saveEdit(m.id)}
-                                disabled={saving || !draft.content?.trim()}
-                              >
-                                保存
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="text-sm break-words leading-relaxed">
-                            {m.content}
-                          </div>
-                          <div className="flex items-center flex-wrap gap-1 mt-1.5">
-                            <span
-                              className={`badge badge-xs ${IMPORTANCE_COLORS[m.importance]}`}
-                            >
-                              {IMPORTANCE_LABELS[m.importance]}
-                            </span>
-                            {m.source === "user_explicit" && (
-                              <span className="badge badge-xs badge-info">
-                                已锁定
-                              </span>
-                            )}
-                            <div className="ml-auto flex gap-0.5">
-                              <button
-                                className="btn btn-ghost btn-xs h-6 min-h-0 px-2"
-                                onClick={() => startEdit(m)}
-                              >
-                                编辑
-                              </button>
-                              <button
-                                className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
-                                onClick={() => remove(m.id)}
-                              >
-                                遗忘
-                              </button>
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          );
-        })}
-        </>)}
+        <span
+          className="text-[11px] text-base-content/40 ml-1"
+          title={m.updatedAt}
+        >
+          {fmtMemoryTime(m.updatedAt)}
+        </span>
+        <div className="ml-auto flex gap-0.5">
+          <button
+            className="btn btn-ghost btn-xs h-6 min-h-0 px-2"
+            onClick={() => startEdit(m)}
+          >
+            编辑
+          </button>
+          <button
+            className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
+            onClick={() => remove(m.id)}
+          >
+            遗忘
+          </button>
+        </div>
       </div>
-    </main>
+    </li>
   );
 }
