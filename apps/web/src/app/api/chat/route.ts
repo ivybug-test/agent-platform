@@ -42,10 +42,13 @@ export async function POST(req: NextRequest) {
   const user = await getRequiredUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
 
-  const { roomId, content } = await req.json();
+  const { roomId, content, model } = await req.json();
   if (!roomId || !content) {
     return new Response("Missing roomId or content", { status: 400 });
   }
+  // Frontend sends "flash" | "pro" — anything else collapses to flash so a
+  // stale client cookie can't poke at unknown variants.
+  const mode: "flash" | "pro" = model === "pro" ? "pro" : "flash";
 
   if (isRateLimited(roomId)) {
     return Response.json({ error: "Too fast, please wait a moment" }, { status: 429 });
@@ -139,6 +142,15 @@ export async function POST(req: NextRequest) {
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
 
+  // Detect images in the recent context window. If any are present, route
+  // this whole call through Kimi (vision-capable). Otherwise stay on the
+  // default text-only provider (DeepSeek). The image stays addressable as
+  // long as it sits in the recent window; once it scrolls out the agent
+  // recovers context via the captioned summary / user_memory entries the
+  // memory-worker fans out asynchronously.
+  const hasImage = recentMessages.some((m) => m.contentType === "image");
+  const provider = hasImage ? "kimi" : "deepseek";
+
   // Log full context for debugging
   const memoryCount = [...allUsersMemories.values()].reduce((s, m) => s + m.length, 0);
   log.info({
@@ -148,6 +160,9 @@ export async function POST(req: NextRequest) {
     memoryCount,
     hasSummary: !!roomSummary,
     systemPromptLength: systemContent.length,
+    provider,
+    mode,
+    hasImage,
   }, "chat.context");
   log.debug({ roomId, llmMessages }, "chat.llm-input");
 
@@ -164,5 +179,13 @@ export async function POST(req: NextRequest) {
     .returning();
 
   // Stream response
-  return streamAgentResponse(llmMessages, agentMsg.id, roomId, content, user.id);
+  return streamAgentResponse(
+    llmMessages,
+    agentMsg.id,
+    roomId,
+    content,
+    user.id,
+    provider,
+    mode
+  );
 }

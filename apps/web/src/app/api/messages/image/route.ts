@@ -4,6 +4,7 @@ import { db, messages, roomMembers } from "@agent-platform/db";
 import { and, eq } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
 import { publishRoomEvent } from "@/lib/redis";
+import { pushCaptionJob } from "@/lib/queue";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("web");
@@ -71,6 +72,13 @@ export async function POST(req: NextRequest) {
   });
 
   log.info({ roomId, userId: user.id, messageId: row.id }, "chat.image-message");
+
+  // Fire a vision-caption job so the image can survive in long-term memory
+  // once it scrolls out of the recent-message window. Non-blocking — the
+  // chat path doesn't wait for caption to complete.
+  pushCaptionJob(row.id).catch((err) => {
+    log.error({ err, messageId: row.id }, "caption.enqueue-error");
+  });
 
   return Response.json({
     message: {

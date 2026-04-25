@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
-    "sha": "96474d6",
-    "subject": "Move version-update notice from fixed banner to sidebar announcement",
-    "date": "2026-04-18T08:51:52+08:00"
+    "sha": "b549202",
+    "subject": "Document post-Phase-A follow-ups (UI, retrieval, compat fixes)",
+    "date": "2026-04-19T19:11:37+08:00"
   },
   {
-    "sha": "d020b0d",
-    "subject": "Make /api/updates public so the banner reaches anonymous visitors",
-    "date": "2026-04-18T08:44:50+08:00"
+    "sha": "5980d25",
+    "subject": "Retrieval reinforces recency on search_memories",
+    "date": "2026-04-19T15:15:06+08:00"
   },
   {
-    "sha": "52dd111",
-    "subject": "Fix banner: bake commits into a TS module instead of NEXT_PUBLIC env",
-    "date": "2026-04-18T08:05:51+08:00"
+    "sha": "358d77f",
+    "subject": "Stop agent from echoing timestamp prefixes in its replies",
+    "date": "2026-04-19T13:59:33+08:00"
   }
 ];

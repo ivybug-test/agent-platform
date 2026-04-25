@@ -7,7 +7,16 @@ import {
   boolean,
   pgEnum,
   real,
+  jsonb,
 } from "drizzle-orm/pg-core";
+
+export interface MessageMetadata {
+  vision?: {
+    caption: string;
+    model: string;
+    generatedAt: string;
+  };
+}
 
 // Enums
 export const memberTypeEnum = pgEnum("member_type", ["user", "agent"]);
@@ -85,6 +94,11 @@ export const messages = pgTable("messages", {
   content: text("content").notNull().default(""),
   contentType: varchar("content_type", { length: 50 }).notNull().default("text"),
   status: messageStatusEnum("status").notNull().default("completed"),
+  // Side-channel for non-text artifacts attached to the message.
+  // For image messages, `metadata.vision.caption` holds the asynchronously
+  // generated caption that lets text-only LLMs still reference the image
+  // after it scrolls out of the recent window.
+  metadata: jsonb("metadata").$type<MessageMetadata>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

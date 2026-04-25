@@ -87,6 +87,21 @@ IMPORTANCE GUIDE:
 - low: one-time mentions, minor details, casual opinions. Time-stamped single-event facts default to low/medium — they'll gain strength naturally if they recur.`;
 }
 
+/** Render a message's body for the extraction prompt. Image messages use
+ *  the captured caption when present so user_memories can be extracted from
+ *  what the user actually showed (e.g. "this is my dog Max" + photo →
+ *  "user has a dog named Max"). */
+function messageBody(m: {
+  content: string;
+  contentType: string;
+  metadata: unknown;
+}): string {
+  if (m.contentType !== "image") return m.content;
+  const cap =
+    (m.metadata as { vision?: { caption?: string } } | null)?.vision?.caption;
+  return cap ? `[image: ${cap}]` : "[image: (caption pending)]";
+}
+
 /** Character-bigram Jaccard similarity (CJK-safe). */
 function textSimilarity(a: string, b: string): number {
   const bigrams = (s: string) => {
@@ -218,12 +233,12 @@ export async function processUserMemory(data: UserMemoryData) {
   // message's wall-clock timestamp so the LLM can resolve relative phrases.
   const ordered = [...recentUserMessages].reverse();
   const messagesText = ordered
-    .map((m) => `[${formatWallClock(m.createdAt)}] ${m.content}`)
+    .map((m) => `[${formatWallClock(m.createdAt)}] ${messageBody(m)}`)
     .join("\n");
 
   // Language detection works on content only — timestamps are ASCII and would
   // skew the CJK ratio.
-  const contentOnly = ordered.map((m) => m.content).join("\n");
+  const contentOnly = ordered.map((m) => messageBody(m)).join("\n");
   const language = detectLanguage(contentOnly);
 
   const nowIso = formatWallClock(new Date());

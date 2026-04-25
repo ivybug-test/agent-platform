@@ -9,6 +9,16 @@ export async function* mockStream(): AsyncGenerator<string> {
   }
 }
 
+const mockVisionText =
+  "Mock vision response: I see an image. (Kimi mock mode — no real vision call.)";
+
+export async function* mockVisionStream(): AsyncGenerator<string> {
+  for (const word of mockVisionText.split(" ")) {
+    await new Promise((r) => setTimeout(r, 80));
+    yield word + " ";
+  }
+}
+
 // Simulated OpenAI streaming chunks for tool-call verification.
 // Round 0 emits a tool_call to `echo`. Round 1 emits plain text referencing
 // the tool result — lets us verify the full loop without a real LLM key.

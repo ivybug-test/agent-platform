@@ -24,3 +24,22 @@ export async function pushMemoryJobs(roomId: string, userId: string) {
     jobId: `user-memory-${userId}-${Math.floor(Date.now() / 300000)}`,
   });
 }
+
+/** Push a caption-image job. Called right after an image message is
+ *  persisted so the caption is back-filled before later memory extraction
+ *  runs read it. */
+export async function pushCaptionJob(messageId: string) {
+  const queue = getQueue();
+  await queue.add(
+    "caption-image",
+    { messageId },
+    {
+      // BullMQ dedup: same image will only spawn one job
+      jobId: `caption-image-${messageId}`,
+      attempts: 3,
+      backoff: { type: "exponential", delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    }
+  );
+}

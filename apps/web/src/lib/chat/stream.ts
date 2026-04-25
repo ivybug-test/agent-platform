@@ -6,6 +6,7 @@ import { publishRoomActivity } from "@/lib/chat/room-activity";
 import { createLogger } from "@agent-platform/logger";
 import { signToolToken } from "@/lib/tool-token";
 import { agentToolDefs } from "@/lib/tools";
+import type { LLMMessageContent } from "@/lib/chat/context";
 
 const log = createLogger("web");
 const AGENT_RUNTIME_URL =
@@ -13,13 +14,18 @@ const AGENT_RUNTIME_URL =
 const WEB_BASE_URL =
   process.env.WEB_BASE_URL || "http://localhost:3000";
 
+export type Provider = "deepseek" | "kimi";
+export type DeepSeekMode = "flash" | "pro";
+
 /** Call agent-runtime and return a streaming Response */
 export async function streamAgentResponse(
-  llmMessages: { role: string; content: string }[],
+  llmMessages: { role: string; content: LLMMessageContent }[],
   agentMsgId: string,
   roomId: string,
   userContent: string,
-  userId: string
+  userId: string,
+  provider: Provider = "deepseek",
+  mode: DeepSeekMode = "flash"
 ): Promise<Response> {
   const toolAuth = await signToolToken({ userId, roomId });
 
@@ -31,6 +37,8 @@ export async function streamAgentResponse(
       tools: agentToolDefs,
       toolCallbackUrl: `${WEB_BASE_URL}/api/agent/tool`,
       toolAuth,
+      provider,
+      model: mode,
     }),
   });
 

@@ -1,7 +1,7 @@
 # CHANGELOG.md
 
 ## 项目状态
-Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地:时间列 + 强度列、时间范围检索、Generative-Agents 风格衰减评分、近似重复改为强化而非跳过。剩余项:动态记忆 Phase B(由反复出现的事件聚合成语义 fact)、向量语义去重(D2)、MCP 集成。
+Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。剩余项:Phase C 嘴巴(TTS + 唱歌)、动态记忆 Phase B(由反复出现的事件聚合成语义 fact)、向量语义去重(D2)、MCP 集成。
 
 ## 当前阶段
 Phase 2 — Agent 架构升级(已完成);多用户重构(已完成)
@@ -238,7 +238,79 @@ Phase A 上线当天,真实使用暴露的几个缺口立刻补上。
 - 把 bash 专有的 `source` 换成 POSIX 的 `.`,dash 也能跑
 - 自我修改脚本的护栏:先 git pull,再 `exec "$0" "$@"` 让后续逻辑跑在新拉下来的文件上(避免 `git pull` 在运行中重写 `update.sh` 导致的 line-offset 错乱)
 
+## 多模态 + 联网搜索 + 链接卡片(2026-04-25)
+
+给 agent 装上"眼睛、嘴(规划)、搜索"三件套的 A + B 阶段。Phase C(TTS 嘴巴)留下一轮做。本次范围:让 agent 能看图、能联网、回复里出现 URL 时前端渲染成卡片。
+
+### 眼睛 — Kimi K2.6 视觉路由
+- DeepSeek 不支持多模态。决策:**图片在最近 50 条窗口里时,整段 LLM 调用切到 Kimi K2.6**(256K 上下文 + vision + tools + 比 moonshot-v1-vision-preview 强)。一旦图被挤出窗口,自动回落 DeepSeek
+- 拒绝了"caption-then-chat"路线:会丢像素细节、要两次 LLM 往返、引用追问("那第二张呢")会失败。Kimi vision token 单价跟 DeepSeek 同档,整段切过去更省事
+- 路由判断在 Next.js(`apps/web/src/app/api/chat/route.ts`):扫描 `recentMessages` 的 `contentType==="image"`,把 `provider: "kimi" | "deepseek"` 加进发给 runtime 的 body。CLAUDE.md 强制 agent-runtime 保持 provider-agnostic
+- `buildLLMMessages`(`apps/web/src/lib/chat/context.ts`):`ContextMessage` 加 `contentType?` 字段;遇到 image user 消息时输出 OpenAI vision content 数组 `[{type:"text",text:"[ts] Alice: [sent an image]"}, {type:"image_url",image_url:{url}}]`。COS 公网 URL 直接给 Kimi 拉
+- agent-runtime(`services/agent-runtime/src/index.ts`):`/chat` body 加 `provider?: "deepseek"|"kimi"`,默认 deepseek。`mockVisionStream` 让本地 mock 模式肉眼能区分 vision 路径
+- Kimi K2.6 限定 `temperature=1`、不接 `frequency_penalty/presence_penalty`,在 provider abstraction 里隔离
+
+### 长期记忆补丁 — 出窗口图片仍可被引用
+图被挤出 50 条窗口后两个 provider 都看不到。补一条**异步 caption 管线**让出窗口的图通过现有 memory 链路保留。
+- Schema `0008_message_metadata.sql`:`messages` 加 `metadata jsonb` nullable 列。`packages/db/src/schema.ts` 同步 `MessageMetadata` 类型
+- `services/memory-worker/src/jobs/caption-image.ts`:新 job handler。拉 image URL → 调 Kimi vision(memory-worker `llm.ts` 加 `llmCaptionImage(url)`)→ 写回 `messages.metadata.vision = {caption, model, generatedAt}`。幂等(已 caption 直接 skip)
+- `apps/web/src/app/api/messages/image/route.ts`:写完 image 消息后 `pushCaptionJob(messageId)` 入队,不阻塞响应。`apps/web/src/lib/queue.ts` 新增 `pushCaptionJob`,带 `attempts: 3`、`backoff: exponential 5s`、`jobId` 去重
+- `services/memory-worker/src/jobs/{room-summary,user-memory}.ts`:遇到 `contentType==="image"` 用 `m.metadata.vision.caption` 替换 message body(无 caption 时降级为 `[image: (caption pending)]`)。现有 summary 和 memory 抽取逻辑自动复用,普通图进 room_summary,揭示用户长期事实的图(如"这是我家狗 Max")自动抽成 user_memory
+- 隐私限制:`user_memories` 跨房间共享,敏感图(身份证等)抽出来会到处可见。Phase A 不处理,作为 follow-up
+
+### DeepSeek v4 升级 + flash/pro 模式切换
+- 老 model 名 `deepseek-chat` / `deepseek-reasoner` 在 2026-07-24 弃用。env 默认改成 `LLM_MODEL=deepseek-v4-flash`(快速非思考)和 `LLM_MODEL_PRO=deepseek-v4-pro`(深度思考)
+- agent-runtime `ChatBody.model: "flash"|"pro"`,每次请求决定走哪个;mock 模式 / `/summarize` 默认 flash
+- 前端切换:`ChatPanel.tsx` 输入栏左侧加快速/深度按钮,每个房间独立 localStorage 持久化(key `chat-model-${roomId}`)。`/api/chat` body 接受 `model`,异常值收敛到 flash
+- 踩到的坑:`tsx watch` 不监听 `.env` 改动,改完要 `touch` 一个 ts 文件强制重启子进程,否则 dotenv 还用旧值。pm2 / pnpm dev 重启就没事
+
+### Provider abstraction 重构
+之前 runtime 三个调用点(`/summarize` / 非工具 `/chat` / 工具 `/chat`)各自带 `provider === "kimi" ? ... : ...` 三元处理采样参数,加 K2.6 后变得很丑。
+- `services/agent-runtime/src/llm.ts`:抽出 `PROVIDERS: Record<Provider, ProviderSpec>` 表,每个 provider 自描述 `buildClient()` / `resolveModel(mode)` / `sampling({withPenalties})`。一处声明、三处复用
+- 对外暴露 `chatConfig(provider, mode, opts) → {client, model, sampling}`,index.ts 一行解决,没有任何 provider-specific 三元
+- 加新 provider(以后接火山 / 通义)只要在 PROVIDERS 表里加一行,类型系统强制实现完三个方法
+
+### web_search + search_lyrics 工具(Bocha 主 / Tavily 备)
+- 选型基于 4 query × 2 provider 实测对比:Bocha 延迟 ~165ms vs Tavily ~1440ms(国内服务器境外网络)、`site:` 算子 Bocha 工作 Tavily 不工作、Bocha 中文时效查询返回结构化数据 vs Tavily 给通用门户落地页;Tavily 在英文权威源(openai.com 直接命中)反而占优 → 适合做 fallback
+- `apps/web/src/lib/tools/web-search-tools.ts`:provider 抽象 + Bocha/Tavily 实现 + normalizer(去 HTML、collapse 空白、cap 300 字、URL dedupe)
+- Fallback 触发**只在 primary 错误时**,空结果不触发(零结果有时就是真相,多搜一次容易给用户误导)
+- Cache key 改成 provider-agnostic(`query:max`),一次成功后 5 分钟内任何 provider 配置都能复用,响应里 `provider` 字段说明实际 provenance
+- Redis 限流 10/分钟、200/天 per user(限流 key 复用 `getRedisClient()`,跟 `searchMessages` 的限流模式一致)
+- env 重新组织:`WEB_SEARCH_PRIMARY` / `WEB_SEARCH_FALLBACK` 选 provider,`BOCHA_API_KEY` / `TAVILY_API_KEY` 各自一个 key。改主备只改 env 不改代码
+- `search_lyrics(song, artist?)`:内部用 `web_search` + `${song} ${artist} 歌词 site:y.qq.com OR site:music.163.com` 模板,作为唱歌功能(Phase C)的前置桥
+- 系统提示 `toolGuidance`(`apps/web/src/lib/chat/context.ts`)给两个工具都点了名 —— 现有 prompt 把每个 memory tool 都点了名,新工具不点等于不存在
+
+### fetch_url 工具(读网页全文)
+当用户在聊天里粘 URL 时让 agent 主动调用读全文(8000 字截断),搜索结果 URL 不读。
+- `apps/web/src/lib/tools/web-search-tools.ts` 内新增 `fetch_url({url})`,走 Tavily `/extract` 端点(已有 boilerplate stripping,~$0.005/URL)
+- SSRF 防护:拒绝 localhost / `127.*` / `10.*` / `192.168.*` / `169.254.*` / `::1` 和 file:/data: 等 scheme
+- 5/分钟、100/天 per user 限流;5 分钟内存 cache;single URL per call
+- prompt 强约束:**只在用户主动丢 URL 时调用**。搜索结果 URL 用 snippet 就够,别为它再花一次 extract
+- 已知限制:Tavily extract 不跑 JS,QQ 音乐 / 网易云这种 SPA 拿到的是空壳;静态页(知乎、新闻、博客、GitHub README、文档站、维基)都能完整读到
+
+### 链接预览卡片
+agent 回复 / 用户输入里出现 URL,在消息气泡下面渲染卡片(封面 + 标题 + 描述 + 站点名)。
+- 后端 `apps/web/src/app/api/link-preview/route.ts`:GET `?url=...`,session 校验,返回 `{url, host, title?, description?, image?, favicon?, siteName?, ok}`
+- `apps/web/src/lib/link-preview/og-parse.ts`:正则解析 OG / Twitter / `<title>` / `<meta name=description>` / `<link rel=icon>`,相对 URL 用页面 base 解析。生产页面 OG 标签格式都很稳,没引入 cheerio
+- `apps/web/src/lib/link-preview/qq-music.ts`:`y.qq.com` 专用。从 URL 抓 `songmid` → 调 QQ 音乐公开 API(`c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=...`,header 带 `Referer: https://y.qq.com/`)→ 拼出"歌名 - 歌手"+ 专辑封面(`https://y.qq.com/music/photo_new/T002R300x300M000<albumMid>.jpg`)+ 专辑名 + 站点 logo。SPA 外壳里没 OG 时这条路救命
+- `apps/web/src/lib/link-preview/netease.ts`:`music.163.com` 同款。`/api/song/detail/?ids=[id]`,header 带 `Referer: https://music.163.com/`
+- `apps/web/src/lib/link-preview/index.ts`:adapter 优先 → OG fallback → host-only fallback。Redis 缓存 1h(成功)/ 60s(负缓存),fetch 6s 超时 + 512KB 字节 cap(OG meta 永远在 head)。fetch 完整失败时仍返回 `<host>/favicon.ico` 推测路径,前端 `<img onError>` 兜底
+- `apps/web/src/components/LinkPreviewCard.tsx`:DaisyUI 紧凑横排(封面 64×64 / 标题 1-2 行 / 描述 2 行 / 站点名 1 行)。模块级 `Map<url, Promise>` 缓存避免同 URL 多次拉。骨架 loading 占位
+- `ChatPanel.tsx`:`extractUrls(text)` 正则提 URL(去尾部 CJK + ASCII 标点,去重,单条最多 3 个),气泡正文下渲染卡片
+- 实测:腾讯新闻完整 OG,QQ 音乐"晴天 - 周杰伦 / 专辑:叶惠美 / 真实封面图",example.com 标题 + favicon。GitHub 等境外站国内服务器可能 timeout,降级到 host-only 卡片
+
+### 已知坑(部署时注意)
+- `tsx watch` 不监听 `.env`;dev 改 env 要 touch 一个 ts 文件,prod 用 pm2 直接 `pm2 restart`
+- Kimi K2.6 不接 `frequency_penalty/presence_penalty`,只能 `temperature=1`。已经在 PROVIDERS 表里隔离
+- COS 必须配,否则图片上传 0 字节 → 眼睛和 caption 管线断链
+- `AUTH_SECRET` / `INTERNAL_JWT_SECRET` 必须 prod 重新生成,不能照搬 dev
+- agent-runtime 和 web 之间 `AGENT_RUNTIME_URL` / `WEB_BASE_URL` 必须互通(工具回调走 web 这条,跨机部署要走内网 IP)
+- memory-worker 必须开,不然 caption 任务积在队列里,room_summary / user_memory 也不更新
+- prod 跑 `pnpm --filter @agent-platform/db db:migrate` 应用 0008 迁移
+
 ## 尚未开始
+- Phase C 嘴巴 — TTS 语音回复(MiniMax Speech-02 主 / Tencent Cloud TTS 备)、可中断的浏览器流式播放(MSE + AbortController)、agents 表加 voiceProvider/voiceId/voiceName、唱歌的最小可行版(`sing_song` 工具调 `search_lyrics` + 朗读副歌片段 + QQ 音乐跳转按钮)
+- 多模态 follow-up — caption 进 user_memories 时的隐私过滤(身份证 / 信用卡 / 私人照片),避免跨房间泄露
 - Phase 2 D1 — `messages.content` 的 pg_trgm GIN 索引,让 `search_messages` 在超过几千行后还能快
 - Phase 2 D2 — 系统化的记忆去重(pgvector + cosine,或定期 cron 合并)。C1 的 `remember` 现在只有 bigram 快查
 - 动态记忆 Phase B — 周期性聚合:对同一用户、相似 content、分散 event_at 的 `category='event'` 记忆聚类 → LLM 提炼成更高阶语义 fact("经常不吃午饭"),原 event 保留作证据,陈旧的自然 decay 出去

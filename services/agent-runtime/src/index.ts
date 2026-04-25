@@ -3,8 +3,13 @@ import { resolve } from "path";
 config({ path: resolve(process.cwd(), "../../.env") });
 
 import Fastify from "fastify";
-import { getClient, getModel } from "./llm.js";
-import { mockStream, mockToolStream } from "./mock.js";
+import {
+  chatConfig,
+  getModel,
+  type Provider,
+  type DeepSeekMode,
+} from "./llm.js";
+import { mockStream, mockToolStream, mockVisionStream } from "./mock.js";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("agent-runtime");
@@ -27,9 +32,11 @@ app.post<{ Body: SummarizeBody }>("/summarize", async (request, reply) => {
     return { text: "(mock mode — no real summary)" };
   }
   try {
-    const client = getClient();
-    const res = await client.chat.completions.create({
-      model: getModel(),
+    // /summarize is DeepSeek-only by design (ad-hoc text summaries —
+    // never multimodal). Honours the caller's temperature override.
+    const cfg = chatConfig("deepseek");
+    const res = await cfg.client.chat.completions.create({
+      model: cfg.model,
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -59,6 +66,10 @@ interface ChatBody {
   toolCallbackUrl?: string;
   toolAuth?: string;
   maxToolRounds?: number;
+  provider?: Provider;
+  /** DeepSeek-only knob: flash (fast/cheap) or pro (reasoning).
+   *  Ignored when provider="kimi" (vision model is fixed). */
+  model?: DeepSeekMode;
 }
 
 interface AccumulatedToolCall {
@@ -78,6 +89,8 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
     toolCallbackUrl,
     toolAuth,
     maxToolRounds,
+    provider = "deepseek",
+    model: mode = "flash",
   } = request.body;
   const startTime = Date.now();
   const toolsEnabled = Array.isArray(tools) && tools.length > 0;
@@ -89,7 +102,9 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
   log.info(
     {
       messageCount: initialMessages.length,
-      model: getModel(),
+      provider,
+      mode,
+      model: getModel(provider, mode),
       toolsEnabled,
       toolCount: tools?.length ?? 0,
       mock: isMock,
@@ -112,19 +127,18 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
     let totalChars = 0;
     try {
       if (isMock) {
-        for await (const chunk of mockStream()) {
+        const mockIter = provider === "kimi" ? mockVisionStream() : mockStream();
+        for await (const chunk of mockIter) {
           sendEvent({ content: chunk });
           totalChars += chunk.length;
         }
       } else {
-        const client = getClient();
-        const stream = await client.chat.completions.create({
-          model: getModel(),
+        const cfg = chatConfig(provider, mode, { withPenalties: true });
+        const stream = await cfg.client.chat.completions.create({
+          model: cfg.model,
           messages: initialMessages,
           stream: true,
-          temperature: 0.8,
-          frequency_penalty: 0.6,
-          presence_penalty: 0.5,
+          ...cfg.sampling,
         });
         for await (const chunk of stream) {
           const content = chunk.choices[0]?.delta?.content;
@@ -163,19 +177,23 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
       let finishReason: string | null = null;
       let assistantText = "";
 
-      const iter: AsyncIterable<any> = isMock
-        ? mockToolStream(
+      const iter: AsyncIterable<any> = await (async () => {
+        if (isMock) {
+          return mockToolStream(
             round,
             (tools as ToolDef[]).map((t) => t.function.name)
-          )
-        : ((await getClient().chat.completions.create({
-            model: getModel(),
-            messages,
-            tools: tools as any,
-            tool_choice: "auto",
-            stream: true,
-            temperature: 0.8,
-          })) as any);
+          );
+        }
+        const cfg = chatConfig(provider, mode);
+        return (await cfg.client.chat.completions.create({
+          model: cfg.model,
+          messages,
+          tools: tools as any,
+          tool_choice: "auto",
+          stream: true,
+          ...cfg.sampling,
+        })) as any;
+      })();
 
       for await (const chunk of iter) {
         const choice = chunk.choices?.[0];

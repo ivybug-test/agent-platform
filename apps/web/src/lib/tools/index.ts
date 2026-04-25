@@ -3,6 +3,7 @@ import type { ToolContext } from "@/lib/tool-token";
 export type ToolHandler = (args: any, ctx: ToolContext) => Promise<unknown>;
 
 import { memoryToolHandlers, memoryToolDefs } from "./memory-tools";
+import { webSearchToolHandlers, webSearchToolDefs } from "./web-search-tools";
 
 /**
  * Registry of tools the agent can call. Entries keyed by the OpenAI
@@ -13,10 +14,11 @@ export const toolRegistry: Record<string, ToolHandler> = {
   // smoke-tested without touching real data.
   _echo: async (args) => ({ echoed: args }),
   ...memoryToolHandlers,
+  ...webSearchToolHandlers,
 };
 
 /** OpenAI-shaped tool definitions passed to agent-runtime in the /chat body. */
-export const agentToolDefs = memoryToolDefs;
+export const agentToolDefs = [...memoryToolDefs, ...webSearchToolDefs];
 
 export function getTool(name: string): ToolHandler | undefined {
   return toolRegistry[name];

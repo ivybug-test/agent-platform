@@ -5,6 +5,21 @@ import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("memory-worker");
 
+/** Render a message's body for inclusion in extraction prompts. For image
+ *  messages, prefer the asynchronously generated vision caption; if it
+ *  hasn't landed yet, fall back to a placeholder so downstream models know
+ *  an image existed without being given the raw URL. */
+function messageBody(m: {
+  content: string;
+  contentType: string;
+  metadata: unknown;
+}): string {
+  if (m.contentType !== "image") return m.content;
+  const cap =
+    (m.metadata as { vision?: { caption?: string } } | null)?.vision?.caption;
+  return cap ? `[image: ${cap}]` : "[image: (caption pending)]";
+}
+
 interface RoomSummaryData {
   roomId: string;
 }
@@ -57,12 +72,15 @@ export async function processRoomSummary(data: RoomSummaryData) {
       : [];
   const nameMap = new Map(senderUsers.map((u) => [u.id, u.name]));
 
-  // Build conversation text with real user names
+  // Build conversation text with real user names. Image messages are
+  // substituted with their caption (if generated yet) so the summarizer can
+  // include image context.
   const convoText = recentMessages
     .map((m) => {
-      if (m.senderType === "agent") return `Agent: ${m.content}`;
+      const body = messageBody(m);
+      if (m.senderType === "agent") return `Agent: ${body}`;
       const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
-      return `${name}: ${m.content}`;
+      return `${name}: ${body}`;
     })
     .join("\n");
 

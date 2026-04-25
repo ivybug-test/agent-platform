@@ -4,6 +4,30 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { io, Socket } from "socket.io-client";
 import { sendImageMessage } from "@/lib/upload-image";
+import LinkPreviewCard from "./LinkPreviewCard";
+
+/** Pull every http(s) URL out of a message body. Trailing CJK and ASCII
+ *  punctuation gets stripped so "看看 https://example.com。" doesn't try
+ *  to fetch "https://example.com。" as one URL. Returns up to 3 unique
+ *  URLs per message — beyond that the cards take over the bubble. */
+function extractUrls(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/https?:\/\/[^\s<>"]+/g) || [];
+  const cleaned: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of matches) {
+    let u = raw;
+    // Strip common trailing punctuation that clearly isn't part of the URL.
+    while (u.length > 0 && /[)\]\.,，。、;:!?！？]$/.test(u)) {
+      u = u.slice(0, -1);
+    }
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    cleaned.push(u);
+    if (cleaned.length >= 3) break;
+  }
+  return cleaned;
+}
 
 interface Message {
   id?: string;
@@ -110,6 +134,33 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  // Per-room DeepSeek model toggle: flash (fast/cheap default) or pro
+  // (thinking/reasoning). Persisted in localStorage so a user's choice
+  // survives reload but stays scoped to that room.
+  const [model, setModel] = useState<"flash" | "pro">("flash");
+  useEffect(() => {
+    if (!roomId) return;
+    try {
+      const saved = localStorage.getItem(`chat-model-${roomId}`);
+      if (saved === "pro" || saved === "flash") {
+        setModel(saved);
+      } else {
+        setModel("flash");
+      }
+    } catch {
+      setModel("flash");
+    }
+  }, [roomId]);
+  const toggleModel = () => {
+    setModel((prev) => {
+      const next = prev === "flash" ? "pro" : "flash";
+      try {
+        localStorage.setItem(`chat-model-${roomId}`, next);
+      } catch {}
+      return next;
+    });
+  };
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -369,7 +420,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ roomId, content: text }),
+        body: JSON.stringify({ roomId, content: text, model }),
       });
 
       const contentType = res.headers.get("content-type") || "";
@@ -537,7 +588,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                       />
                     </a>
                   ) : (
-                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                    <>
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      {extractUrls(msg.content).map((u) => (
+                        <LinkPreviewCard key={u} url={u} />
+                      ))}
+                    </>
                   )}
                 </div>
               </div>
@@ -565,6 +621,21 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           className="hidden"
           onChange={handleImagePick}
         />
+        <button
+          type="button"
+          onClick={toggleModel}
+          disabled={isStreaming}
+          className={`btn btn-sm self-end px-2 min-w-[3.5rem] ${
+            model === "pro" ? "btn-secondary" : "btn-ghost"
+          }`}
+          title={
+            model === "pro"
+              ? "深度思考模式 (Pro) — 慢一点但推理更强，点击切回快速"
+              : "快速模式 (Flash) — 默认，点击切到深度思考"
+          }
+        >
+          {model === "pro" ? "深度" : "快速"}
+        </button>
         <button
           type="button"
           className="btn btn-ghost btn-sm self-end px-2"

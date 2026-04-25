@@ -190,5 +190,44 @@ M4、M5、M6 都依赖 M3,彼此独立
 
 ---
 
+## 多模态 + 联网搜索 + 链接卡片(2026-04-25)
+
+给 agent 的"眼睛 + 嘴 + 搜索"三件套。本次范围 A + B,Phase C(TTS 嘴巴)留下一轮做。
+
+### Phase A — 眼睛(Kimi K2.6 视觉)✅
+- [x] A1 路由:`apps/web/src/app/api/chat/route.ts` 扫 recentMessages 检测 `contentType==="image"` → 把 `provider: "kimi"|"deepseek"` 加进 runtime body
+- [x] A2 多模态消息构造:`buildLLMMessages` 对 image user 消息输出 OpenAI vision content 数组
+- [x] A3 Runtime provider 工厂:`services/agent-runtime/src/llm.ts` 抽出 PROVIDERS 表 + `chatConfig()` 一站式 helper,index.ts 三个调用点共用
+- [x] A4 Kimi K2.6 采样限制隔离:provider 各自描述 sampling(`temperature=1` / 不接 penalty)
+- [x] A5 mockVisionStream:本地肉眼区分 vision 路径
+- [x] A6 caption 异步管线:Schema `0008_message_metadata.sql` 加 `messages.metadata jsonb`;memory-worker 新 `caption-image` job + `llmCaptionImage` helper;`/api/messages/image` 写完后 `pushCaptionJob` 入队不阻塞
+- [x] A7 现有 summary / user-memory 抽取在 image 消息上用 caption 替换 body(`messageBody()` helper)
+- [x] A8 端到端实测:Kimi K2.6 描述真实截图,DeepSeek 路径回归通过
+
+### Phase B — 联网搜索 + 链接卡片 ✅
+- [x] B1 web_search 工具:Bocha 主 + Tavily 备,`apps/web/src/lib/tools/web-search-tools.ts`,fallback 只在 primary 错误时触发(空结果不触发)
+- [x] B2 search_lyrics 工具:模板 `${song} ${artist} 歌词 site:y.qq.com OR site:music.163.com`,作为唱歌(Phase C)前置桥
+- [x] B3 fetch_url 工具:Tavily `/extract`,8000 字截断,SSRF 防护,prompt 强约束"只在用户主动丢 URL 时调用"
+- [x] B4 Redis 限流:web_search 10/分钟、200/天;fetch_url 5/分钟、100/天 per user
+- [x] B5 工具注册到 `agentToolDefs` + `toolRegistry`,toolGuidance 给三个工具点名
+- [x] B6 链接预览后端:`/api/link-preview` 端点 + OG 正则解析 + QQ 音乐 / 网易云专用 adapter(调它们公开 API 拿歌名 + 封面)+ Redis 缓存 1h
+- [x] B7 链接预览前端:`LinkPreviewCard` 组件 + ChatPanel `extractUrls` 在气泡下渲染卡片
+- [x] B8 Bocha vs Tavily 实测对比:延迟、`site:` 算子、中英文场景、QQ 音乐链接命中率(决策依据见 CHANGELOG)
+
+### DeepSeek v4 模型升级 ✅
+- [x] env 默认改 `LLM_MODEL=deepseek-v4-flash` + 新增 `LLM_MODEL_PRO=deepseek-v4-pro`(老名字 2026-07-24 弃用)
+- [x] Runtime `ChatBody.model: "flash"|"pro"`,`getModel(provider, mode)`
+- [x] 前端 ChatPanel 加快速 / 深度切换按钮,localStorage 按 roomId 持久化
+- [x] `/api/chat` body 接受 `model` 字段,异常值收敛到 flash
+
+### Phase C — 嘴巴(TTS + 唱歌)未开始
+- [ ] TTS 主路径:MiniMax Speech-02 流式 HTTP chunked,首声 < 800ms。备:Tencent Cloud TTS(复用现有 `TENCENT_SECRET_*`)
+- [ ] Schema:`agents` 加 `voiceProvider/voiceId/voiceName` 三列
+- [ ] 浏览器播放:`<audio>` + MSE + AbortController;中断触发包括停止键 / 新消息 / 切房间 / 组件卸载
+- [ ] 音色选择 UI:`AgentVoicePicker.tsx` modal,从 RoomSettings 入口
+- [ ] 唱歌 MVP:`sing_song` 工具调 `search_lyrics` → 朗读歌词副歌片段 + 文字尾部 `[[song:title|qqMusicUrl]]` 标记 → 前端渲染"在 QQ 音乐听"按钮(QQ 音乐卡片 adapter 已经在 Phase B 准备好)
+- [ ] mock 模式:静音 1.2s mp3 分 4 块流式返回
+- [ ] 限流 / rate limit
+
 ## 下一个主任务
-D2(pgvector 语义去重)是下一块最大的地 —— 不做的话 Phase A 的 reinforce 信号会在同义改写("喜欢甜食" vs "爱吃蛋糕")上被打散到多条记忆,而不是集中到一条;同时它是 Phase B 的前置(consolidation 需要干净的去重底座)。Phase B 本身还要等 ≥2 周真实强化数据
+D2(pgvector 语义去重)和 Phase C(TTS 嘴巴)各占一块大地。D2 不做的话 Phase A 的 reinforce 信号会在同义改写("喜欢甜食" vs "爱吃蛋糕")上被打散;Phase C 完整唱歌路径需要 TTS provider 接入 + 流式播放 + 中断支持,工程量约 1 周。Phase B 的真 SVS(GPT-SoVITS / DiffSinger)仍然推迟,先靠 TTS-on-lyrics + QQ 音乐链接的务实方案。

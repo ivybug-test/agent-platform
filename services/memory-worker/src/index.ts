@@ -10,6 +10,7 @@ import {
   processMemoryDedup,
   processMemoryDedupScan,
 } from "./jobs/memory-dedup.js";
+import { processCaptionImage } from "./jobs/caption-image.js";
 
 if (!process.env.REDIS_URL) {
   throw new Error("REDIS_URL environment variable is required");
@@ -38,6 +39,9 @@ const worker = new Worker(
         break;
       case "memory-dedup":
         await processMemoryDedup(job.data);
+        break;
+      case "caption-image":
+        await processCaptionImage(job.data);
         break;
       default:
         console.warn(`Unknown job type: ${job.name}`);

@@ -346,6 +346,9 @@ export function buildSystemPrompt(opts: {
 - remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. If the fact describes a specific event in time (e.g. "went to Shanghai on 2026-04-14", "skipped lunch on 2026-04-19"), also pass eventAt as an ISO8601 timestamp. Do NOT record relative phrases like "今天" / "刚才" — always resolve them to an absolute date using the current time layer above. Near-duplicates reinforce the existing memory instead of creating a new one.
 - update_memory: call ONLY when the user explicitly corrects a fact ("actually it's X", "I moved", "no, not Y"). Pass the id from search_memories.
 - forget_memory: call ONLY when the user explicitly asks to forget something ("don't remember X", "stop tracking Y"). Pass the id from search_memories.
+- web_search: search the live web. Use ONLY for current events, real-world facts, products, or links you cannot answer from memory or training. Cap 5 results. Cite the URL inline when you use a result.
+- search_lyrics: when the user asks you to sing or quote a specific song, call this BEFORE composing the reply to fetch the lyrics + a QQ Music / NetEase link.
+- fetch_url: read the full content of a webpage. Call this ONLY when the USER pasted a URL into chat (e.g. "看下这个 https://..." / "what does this page say <url>"). DO NOT call fetch_url on URLs that came back from web_search — the snippet is enough. Returns ~8000 chars of cleaned page text.
 
 LANGUAGE: When writing memory content (via remember / update_memory), write in the SAME LANGUAGE the user is using in the conversation. If the user writes in Chinese, store the fact in Chinese (e.g. "喜欢吃辣"). Do NOT translate.
 
@@ -450,8 +453,14 @@ interface ContextMessage {
   senderType: string;
   senderId: string | null;
   content: string;
+  contentType?: string | null;
   createdAt?: Date | string | null;
 }
+
+type LLMTextPart = { type: "text"; text: string };
+type LLMImagePart = { type: "image_url"; image_url: { url: string } };
+export type LLMContentPart = LLMTextPart | LLMImagePart;
+export type LLMMessageContent = string | LLMContentPart[];
 
 /**
  * Deduplicate context messages: when multiple agent responses are highly similar,
@@ -529,7 +538,7 @@ export function buildLLMMessages(
   }
 
   return [
-    { role: "system" as const, content: systemWithGap },
+    { role: "system" as const, content: systemWithGap as LLMMessageContent },
     ...filtered.map((m) => {
       if (m.senderType === "user") {
         // Timestamp prefix is applied to user messages only. Putting it on
@@ -541,12 +550,26 @@ export function buildLLMMessages(
           ? `[${formatShortWallClock(new Date(m.createdAt))}] `
           : "";
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
+        if (m.contentType === "image" && m.content) {
+          // Multimodal content array — only Kimi (vision-capable) actually
+          // reads the image_url part; for DeepSeek turns we never reach here
+          // because the route detects the presence of an image and switches
+          // provider to Kimi for the whole call.
+          const parts: LLMContentPart[] = [
+            { type: "text", text: `${tsPrefix}${name}: [sent an image]` },
+            { type: "image_url", image_url: { url: m.content } },
+          ];
+          return { role: "user" as const, content: parts as LLMMessageContent };
+        }
         return {
           role: "user" as const,
-          content: `${tsPrefix}${name}: ${m.content}`,
+          content: `${tsPrefix}${name}: ${m.content}` as LLMMessageContent,
         };
       }
-      return { role: "assistant" as const, content: m.content };
+      return {
+        role: "assistant" as const,
+        content: m.content as LLMMessageContent,
+      };
     }),
   ];
 }
