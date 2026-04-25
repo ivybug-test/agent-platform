@@ -232,6 +232,26 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Separate input that forces the camera UI on mobile via the `capture`
+  // attribute. Desktop browsers ignore `capture` and just open the file
+  // picker, which is fine — webcam capture isn't a feature we ship.
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const attachMenuRef = useRef<HTMLDivElement>(null);
+  // Close the attach menu when clicking anywhere outside it.
+  useEffect(() => {
+    if (!showAttachMenu) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (
+        attachMenuRef.current &&
+        !attachMenuRef.current.contains(e.target as Node)
+      ) {
+        setShowAttachMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [showAttachMenu]);
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -1061,6 +1081,17 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           className="hidden"
           onChange={handleImagePick}
         />
+        {/* `capture="environment"` asks the OS for a fresh camera shot
+            instead of the gallery picker. Mobile-only — desktop falls
+            through to the regular file dialog. */}
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={handleImagePick}
+        />
         <div className="rounded-3xl bg-base-200 border border-base-300 px-4 pt-2 pb-2.5">
           <textarea
             ref={textareaRef}
@@ -1121,10 +1152,73 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
             <div className="flex-1" />
 
-            {/* Right side is just the send button for now. Image upload
-                used to live here as a "+" but the icon read as a "more
-                attachments" placeholder; reintroduce when there's a
-                proper attachments menu (image / file / etc). */}
+            {/* Attach menu — click "+" to expand a small popover with
+                camera / gallery options. Only one option used to be
+                exposed (image picker as a "+" icon) but it read as a
+                placeholder; the popover makes the intent clear and
+                leaves room for future attachment types. */}
+            <div className="relative" ref={attachMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowAttachMenu((v) => !v)}
+                disabled={isStreaming || isUploading}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 ${
+                  showAttachMenu
+                    ? "bg-base-content/20"
+                    : "hover:bg-base-content/10"
+                }`}
+                title="添加内容"
+                aria-label="添加内容"
+                aria-expanded={showAttachMenu}
+              >
+                {isUploading ? (
+                  <span className="loading loading-spinner loading-xs"></span>
+                ) : (
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    strokeWidth={2}
+                    stroke="currentColor"
+                    className={`w-4 h-4 transition-transform ${
+                      showAttachMenu ? "rotate-45" : ""
+                    }`}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M12 4.5v15m7.5-7.5h-15"
+                    />
+                  </svg>
+                )}
+              </button>
+              {showAttachMenu && (
+                <div className="absolute bottom-full right-0 mb-2 min-w-[8.5rem] bg-base-100 border border-base-300 rounded-xl shadow-lg overflow-hidden z-20">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachMenu(false);
+                      cameraInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-base-200 text-left"
+                  >
+                    <span aria-hidden>📷</span>
+                    <span>拍照</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachMenu(false);
+                      fileInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-base-200 text-left border-t border-base-300"
+                  >
+                    <span aria-hidden>🖼️</span>
+                    <span>选择图片</span>
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               onClick={sendMessage}
