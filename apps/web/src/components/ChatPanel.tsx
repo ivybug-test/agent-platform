@@ -731,7 +731,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           type="button"
           onClick={toggleModel}
           disabled={isStreaming}
-          className={`btn btn-sm self-end px-2 min-w-[3.5rem] ${
+          className={`btn btn-sm self-end px-2 md:min-w-[3.5rem] ${
             model === "pro" ? "btn-secondary" : "btn-ghost"
           }`}
           title={
@@ -740,7 +740,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               : "快速模式 (Flash) — 默认，点击切到深度思考"
           }
         >
-          {model === "pro" ? "深度" : "快速"}
+          <span className="md:hidden text-base leading-none" aria-hidden>
+            {model === "pro" ? "🧠" : "⚡"}
+          </span>
+          <span className="hidden md:inline">
+            {model === "pro" ? "深度" : "快速"}
+          </span>
         </button>
         <button
           type="button"

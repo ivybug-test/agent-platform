@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
-    "sha": "b549202",
-    "subject": "Document post-Phase-A follow-ups (UI, retrieval, compat fixes)",
-    "date": "2026-04-19T19:11:37+08:00"
+    "sha": "d5fdc11",
+    "subject": "Rebuild /memories page around search + recent + manual third-party writes",
+    "date": "2026-04-25T21:17:42+08:00"
   },
   {
-    "sha": "5980d25",
-    "subject": "Retrieval reinforces recency on search_memories",
-    "date": "2026-04-19T15:15:06+08:00"
+    "sha": "db8a6b6",
+    "subject": "chmod +x infra/update.sh",
+    "date": "2026-04-25T21:16:26+08:00"
   },
   {
-    "sha": "358d77f",
-    "subject": "Stop agent from echoing timestamp prefixes in its replies",
-    "date": "2026-04-19T13:59:33+08:00"
+    "sha": "ac6db62",
+    "subject": "Render DeepSeek v4-pro reasoning as collapsible thinking panel",
+    "date": "2026-04-25T21:02:48+08:00"
   }
 ];

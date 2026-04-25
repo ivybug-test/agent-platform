@@ -25,12 +25,24 @@ interface ProviderSpec {
   sampling(opts: { withPenalties: boolean }): SamplingKnobs;
 }
 
+// Per-request timeout sent into both provider clients. 60s is generous
+// for normal streaming chat but firmly shorter than the OpenAI SDK's
+// 10-minute default — when a provider hangs (e.g. Kimi can't fetch an
+// image URL) the user gets an SSE error within a minute instead of
+// staring at a spinner forever. maxRetries=1 keeps a single retry for
+// transient 5xx but doesn't multiply the wait on a hard hang (streaming
+// requests aren't retried by the SDK once headers arrive anyway).
+const REQUEST_TIMEOUT_MS = 60_000;
+const REQUEST_MAX_RETRIES = 1;
+
 const PROVIDERS: Record<Provider, ProviderSpec> = {
   deepseek: {
     buildClient: () =>
       new OpenAI({
         apiKey: process.env.LLM_API_KEY,
         baseURL: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
+        timeout: REQUEST_TIMEOUT_MS,
+        maxRetries: REQUEST_MAX_RETRIES,
       }),
     resolveModel: (mode) =>
       mode === "pro"
@@ -52,6 +64,8 @@ const PROVIDERS: Record<Provider, ProviderSpec> = {
       new OpenAI({
         apiKey: process.env.KIMI_API_KEY,
         baseURL: process.env.KIMI_BASE_URL || "https://api.moonshot.cn/v1",
+        timeout: REQUEST_TIMEOUT_MS,
+        maxRetries: REQUEST_MAX_RETRIES,
       }),
     resolveModel: () => process.env.KIMI_VISION_MODEL || "kimi-k2.6",
     sampling: () => ({ temperature: 1 }),

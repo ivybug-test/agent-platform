@@ -81,6 +81,11 @@ interface AccumulatedToolCall {
 const TOOL_CALL_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_TOOL_ROUNDS = 5;
 const HARD_TOOL_ROUND_CAP = 10;
+// Cap the final answer at 4096 tokens. DeepSeek's `max_tokens` only
+// counts visible output (chain-of-thought has its own internal budget),
+// so this just guards against runaway answers — it does NOT shrink the
+// reasoning window.
+const CHAT_MAX_TOKENS = 4096;
 
 app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
   const {
@@ -125,12 +130,16 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
   // Fast path: legacy non-tool behavior preserved for simple chat calls
   if (!toolsEnabled) {
     let totalChars = 0;
+    let hasContent = false;
+    let hasReasoning = false;
+    let finishReason: string | null = null;
     try {
       if (isMock) {
         const mockIter = provider === "kimi" ? mockVisionStream() : mockStream();
         for await (const chunk of mockIter) {
           sendEvent({ content: chunk });
           totalChars += chunk.length;
+          hasContent = true;
         }
       } else {
         const cfg = chatConfig(provider, mode, { withPenalties: true });
@@ -138,25 +147,60 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           model: cfg.model,
           messages: initialMessages,
           stream: true,
+          max_tokens: CHAT_MAX_TOKENS,
           ...cfg.sampling,
         });
         for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta as
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta as
             | { content?: string | null; reasoning_content?: string | null }
             | undefined;
           // DeepSeek v4-pro streams its chain-of-thought as
-          // `reasoning_content` (separate from `content`). Forward it as a
-          // distinct SSE event so the frontend can show a collapsed
-          // "thinking" panel above the actual reply.
+          // `reasoning_content` (separate from `content`). Only surface
+          // it to the client in pro mode; flash users opted out of the
+          // "thinking" UI entirely.
           if (delta?.reasoning_content) {
-            sendEvent({ reasoning: delta.reasoning_content });
+            hasReasoning = true;
+            if (mode === "pro") {
+              sendEvent({ reasoning: delta.reasoning_content });
+            }
           }
           if (delta?.content) {
             sendEvent({ content: delta.content });
             totalChars += delta.content.length;
+            hasContent = true;
+          }
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+        }
+      }
+
+      // Fallback: if reasoning happened but no content was emitted (pro
+      // model burned its budget on the chain-of-thought, or the upstream
+      // dropped the answer), re-run the same prompt in flash so the user
+      // never gets a "thought-but-didn't-answer" turn.
+      if (!isMock && !hasContent && hasReasoning) {
+        log.warn(
+          { finishReason, mode },
+          "llm.empty-content-after-reasoning, falling back to flash"
+        );
+        const fb = chatConfig(provider, "flash", { withPenalties: true });
+        const fbStream = await fb.client.chat.completions.create({
+          model: fb.model,
+          messages: initialMessages,
+          stream: true,
+          max_tokens: CHAT_MAX_TOKENS,
+          ...fb.sampling,
+        });
+        for await (const chunk of fbStream) {
+          const c = chunk.choices?.[0]?.delta?.content;
+          if (c) {
+            sendEvent({ content: c });
+            totalChars += c.length;
+            hasContent = true;
           }
         }
       }
+
       log.info({ duration: Date.now() - startTime, totalChars }, "llm.complete");
     } catch (err) {
       log.error({ err, duration: Date.now() - startTime }, "llm.error");
@@ -200,16 +244,22 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           tools: tools as any,
           tool_choice: "auto",
           stream: true,
+          max_tokens: CHAT_MAX_TOKENS,
           ...cfg.sampling,
         })) as any;
       })();
 
+      let roundHadReasoning = false;
       for await (const chunk of iter) {
         const choice = chunk.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
         if (delta.reasoning_content) {
-          sendEvent({ reasoning: delta.reasoning_content });
+          roundHadReasoning = true;
+          // Flash-mode users opted out of the thinking UI; do not forward.
+          if (mode === "pro") {
+            sendEvent({ reasoning: delta.reasoning_content });
+          }
         }
         if (delta.content) {
           assistantText += delta.content;
@@ -237,6 +287,35 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
       }
 
       if (finishReason !== "tool_calls") {
+        // Fallback: pro reasoned but produced no answer. Re-run the same
+        // turn in flash so the user always gets a reply.
+        if (
+          !isMock &&
+          !assistantText &&
+          roundHadReasoning &&
+          Object.keys(accumulated).length === 0
+        ) {
+          log.warn(
+            { round, finishReason, mode },
+            "llm.empty-content-after-reasoning, falling back to flash"
+          );
+          const fb = chatConfig(provider, "flash");
+          const fbStream = (await fb.client.chat.completions.create({
+            model: fb.model,
+            messages,
+            stream: true,
+            max_tokens: CHAT_MAX_TOKENS,
+            ...fb.sampling,
+          })) as any;
+          for await (const chunk of fbStream) {
+            const c = chunk.choices?.[0]?.delta?.content;
+            if (c) {
+              assistantText += c;
+              totalChars += c.length;
+              sendEvent({ content: c });
+            }
+          }
+        }
         done = true;
         break;
       }
