@@ -73,9 +73,11 @@ export async function POST(req: NextRequest) {
 
   log.info({ roomId, userId: user.id, messageId: row.id }, "chat.image-message");
 
-  // Fire a vision-caption job so the image can survive in long-term memory
-  // once it scrolls out of the recent-message window. Non-blocking — the
-  // chat path doesn't wait for caption to complete.
+  // Caption is async — Kimi K2.6 takes 30-60s when it thinks, blocking the
+  // upload would feel frozen. The memory-worker picks up the job and writes
+  // the caption to messages.metadata.vision. Until then, buildLLMMessages
+  // renders the image as "[图片: 描述生成中，请稍等]" so the chat agent
+  // doesn't pretend to have seen it.
   pushCaptionJob(row.id).catch((err) => {
     log.error({ err, messageId: row.id }, "caption.enqueue-error");
   });

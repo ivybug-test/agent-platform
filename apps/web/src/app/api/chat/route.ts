@@ -142,14 +142,11 @@ export async function POST(req: NextRequest) {
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
 
-  // Detect images in the recent context window. If any are present, route
-  // this whole call through Kimi (vision-capable). Otherwise stay on the
-  // default text-only provider (DeepSeek). The image stays addressable as
-  // long as it sits in the recent window; once it scrolls out the agent
-  // recovers context via the captioned summary / user_memory entries the
-  // memory-worker fans out asynchronously.
-  const hasImage = recentMessages.some((m) => m.contentType === "image");
-  const provider = hasImage ? "kimi" : "deepseek";
+  // Vision is handled at image-upload time: Kimi captions the image once,
+  // we stash the caption in messages.metadata.vision.caption, and chat
+  // LLMs (always DeepSeek now) only ever see "[图片: <caption>]" text.
+  // No multimodal routing needed here.
+  const provider = "deepseek";
 
   // Log full context for debugging
   const memoryCount = [...allUsersMemories.values()].reduce((s, m) => s + m.length, 0);
@@ -162,7 +159,6 @@ export async function POST(req: NextRequest) {
     systemPromptLength: systemContent.length,
     provider,
     mode,
-    hasImage,
   }, "chat.context");
   log.debug({ roomId, llmMessages }, "chat.llm-input");
 

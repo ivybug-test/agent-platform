@@ -38,6 +38,16 @@ export async function llmCaptionImage(imageUrl: string): Promise<{
   caption: string;
   model: string;
 }> {
+  // Moonshot rejects arbitrary HTTPS URLs ("unsupported image url") even when
+  // they're publicly fetchable — pre-fetch and pass a base64 data URL. Kept
+  // in sync with apps/web/src/lib/vision/caption.ts (sync path); this worker
+  // is the async fallback for legacy or retry rows.
+  const fetched = await fetch(imageUrl);
+  if (!fetched.ok) throw new Error(`image fetch: HTTP ${fetched.status}`);
+  const mime = fetched.headers.get("content-type") || "image/jpeg";
+  const bytes = Buffer.from(await fetched.arrayBuffer());
+  const dataUrl = `data:${mime};base64,${bytes.toString("base64")}`;
+
   const client = getKimiClient();
   const model = process.env.KIMI_VISION_MODEL || "kimi-k2.6";
 
@@ -53,14 +63,18 @@ export async function llmCaptionImage(imageUrl: string): Promise<{
         role: "user",
         content: [
           { type: "text", text: "Describe this image." },
-          { type: "image_url", image_url: { url: imageUrl } },
+          { type: "image_url", image_url: { url: dataUrl } },
         ],
       },
     ],
     // K2.6 only allows temperature=1; sampling determinism comes from the
     // tight system prompt instead.
     temperature: 1,
-    max_tokens: 300,
+    // K2.6 is a thinking model: reasoning_content burns from this same
+    // budget. 300 left ~0 room for the actual caption ("length" finish,
+    // empty content). 1500 gives ~1.2k for thinking + ~300 for the actual
+    // 30-80 word description.
+    max_tokens: 1500,
   });
 
   return {

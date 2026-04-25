@@ -455,6 +455,7 @@ interface ContextMessage {
   content: string;
   contentType?: string | null;
   createdAt?: Date | string | null;
+  metadata?: { vision?: { caption?: string } } | null;
 }
 
 type LLMTextPart = { type: "text"; text: string };
@@ -551,15 +552,19 @@ export function buildLLMMessages(
           : "";
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
         if (m.contentType === "image" && m.content) {
-          // Multimodal content array — only Kimi (vision-capable) actually
-          // reads the image_url part; for DeepSeek turns we never reach here
-          // because the route detects the presence of an image and switches
-          // provider to Kimi for the whole call.
-          const parts: LLMContentPart[] = [
-            { type: "text", text: `${tsPrefix}${name}: [sent an image]` },
-            { type: "image_url", image_url: { url: m.content } },
-          ];
-          return { role: "user" as const, content: parts as LLMMessageContent };
+          // Image bytes never reach the chat LLM — only the caption does.
+          // The image is captioned at upload time (synchronously, via Kimi)
+          // and the caption lives on messages.metadata.vision.caption. If
+          // it's missing (sync caption errored, async fallback hasn't run
+          // yet), we tell the agent so it doesn't pretend to have seen it.
+          const caption = m.metadata?.vision?.caption?.trim();
+          const visionText = caption
+            ? `[图片: ${caption}]`
+            : "[图片: 描述生成中，请稍等]";
+          return {
+            role: "user" as const,
+            content: `${tsPrefix}${name}: ${visionText}` as LLMMessageContent,
+          };
         }
         return {
           role: "user" as const,
@@ -573,3 +578,4 @@ export function buildLLMMessages(
     }),
   ];
 }
+
