@@ -17,6 +17,16 @@ export function getRedisClient(): IORedis {
   return getPublisher();
 }
 
+/** Lightweight quoted-message snippet broadcast alongside a reply. The
+ *  sending side includes this so receivers can render the quote inline
+ *  without a follow-up fetch. content is truncated to keep events small. */
+export interface ReplyToSnippet {
+  id: string;
+  senderName: string | null;
+  content: string;
+  contentType?: string;
+}
+
 interface RoomEvent {
   type: "user-message" | "agent-message" | "agent-chunk";
   roomId: string;
@@ -29,6 +39,8 @@ interface RoomEvent {
     content: string;
     contentType?: string;
     status: string;
+    replyToMessageId?: string | null;
+    replyTo?: ReplyToSnippet | null;
   };
 }
 

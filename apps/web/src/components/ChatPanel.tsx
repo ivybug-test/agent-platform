@@ -5,6 +5,11 @@ import { useSession } from "next-auth/react";
 import { io, Socket } from "socket.io-client";
 import { sendImageMessage } from "@/lib/upload-image";
 import LinkPreviewCard from "./LinkPreviewCard";
+import {
+  play as playTts,
+  stopAll as stopAllTts,
+  stripMarkdownForTts,
+} from "@/lib/audio/streaming-player";
 
 /** Pull every http(s) URL out of a message body. Trailing CJK and ASCII
  *  punctuation gets stripped so "看看 https://example.com。" doesn't try
@@ -67,6 +72,50 @@ function extractUrls(text: string): string[] {
   return cleaned;
 }
 
+interface ReplyToSnippet {
+  id: string;
+  senderName: string | null;
+  content: string;
+  contentType?: string;
+}
+
+/** Compact label shown inside both the quote chip (above input) and the
+ *  inline quote block (above the reply bubble). Truncates and prefixes
+ *  the original sender's name. Image quotes show "[图片]" instead of a
+ *  URL so the chip stays readable. */
+function quotePreview(snippet: ReplyToSnippet, max = 60): string {
+  const body =
+    snippet.contentType === "image" ? "[图片]" : snippet.content || "";
+  const oneLine = body.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  return oneLine.slice(0, max) + "…";
+}
+
+/** Inline quote block rendered above each reply bubble. Click → scroll to
+ *  source if it's still in the loaded window; otherwise just highlights. */
+function QuoteBlock({
+  reply,
+  onJump,
+}: {
+  reply: ReplyToSnippet;
+  onJump: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onJump(reply.id)}
+      className="block w-full text-left mb-1 pl-2 pr-2 py-1 rounded border-l-2 border-base-content/30 bg-base-content/5 hover:bg-base-content/10 transition-colors"
+    >
+      <div className="text-[10px] opacity-60">
+        回复 {reply.senderName || "用户"}
+      </div>
+      <div className="text-xs opacity-80 line-clamp-2">
+        {quotePreview(reply, 100)}
+      </div>
+    </button>
+  );
+}
+
 interface Message {
   id?: string;
   senderType: "user" | "agent";
@@ -83,6 +132,11 @@ interface Message {
   /** Milliseconds spent in the reasoning phase. Drives the
    *  "已思考 Xs" label. */
   reasoningMs?: number;
+  /** Reply / quote target. The full snippet (preview text + sender name)
+   *  is denormalized onto each message so we can render the quote chip
+   *  without a follow-up fetch. Click → scroll to source. */
+  replyToMessageId?: string | null;
+  replyTo?: ReplyToSnippet | null;
 }
 
 interface ChatPanelProps {
@@ -180,6 +234,19 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  // Reply / quote state — set by long-press / right-click on a message,
+  // shown as a chip above the input, sent with the next message and then
+  // cleared. `null` means no quote is staged.
+  const [replyTarget, setReplyTarget] = useState<ReplyToSnippet | null>(null);
+  // Which message's action menu is currently open. Keyed by message id;
+  // `null` closes any open menu.
+  const [menuForId, setMenuForId] = useState<string | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Real agent name from the room (e.g. "Assistant", "Maya"). Loaded with
+  // the message history so optimistic placeholders match what the rest of
+  // the chat shows after the SSE stream resolves.
+  const [agentName, setAgentName] = useState("Assistant");
 
   // Per-room DeepSeek model toggle: flash (fast/cheap default) or pro
   // (thinking/reasoning). Persisted in localStorage so a user's choice
@@ -207,6 +274,55 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       return next;
     });
   };
+
+  // Per-room voice mode toggle. When on, every agent reply auto-plays
+  // through TTS after the text stream finishes. User interruptions
+  // (sending new message, toggling off, switching room) abort the
+  // in-flight playback and DO NOT resume — the next agent reply will
+  // spawn a fresh TTS session.
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  // Tracks which agent we're chatting with (for /api/tts agentId param).
+  // Populated from the first agent message we see; chat already enforces
+  // single-agent-per-room so this is stable.
+  const agentIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!roomId) return;
+    try {
+      const saved = localStorage.getItem(`voice-mode-${roomId}`);
+      setVoiceMode(saved === "on");
+    } catch {
+      setVoiceMode(false);
+    }
+    // Switching room always kills playback in flight.
+    stopAllTts();
+    setIsPlaying(false);
+  }, [roomId]);
+  const toggleVoiceMode = () => {
+    setVoiceMode((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(`voice-mode-${roomId}`, next ? "on" : "off");
+      } catch {}
+      // Turning OFF mid-playback aborts immediately. Turning ON does not
+      // retroactively play prior messages — only new replies trigger TTS.
+      if (!next) {
+        stopAllTts();
+        setIsPlaying(false);
+      }
+      return next;
+    });
+  };
+  const stopPlayback = () => {
+    stopAllTts();
+    setIsPlaying(false);
+  };
+  // Cleanup on unmount — drop any audio that was still playing.
+  useEffect(() => {
+    return () => {
+      stopAllTts();
+    };
+  }, []);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -238,9 +354,18 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           createdAt: r.createdAt,
           reasoning: r.metadata?.reasoning,
           reasoningMs: r.metadata?.reasoningMs,
+          replyToMessageId: r.replyToMessageId ?? null,
+          replyTo: r.replyTo ?? null,
         }));
       for (const m of loaded) {
         if (m.id) seenIds.current.add(m.id);
+        if (m.senderType === "agent" && m.senderId && !agentIdRef.current) {
+          agentIdRef.current = m.senderId;
+        }
+      }
+      if (data.roomAgent?.name) {
+        setAgentName(data.roomAgent.name);
+        if (data.roomAgent.id) agentIdRef.current = data.roomAgent.id;
       }
       setMessages(loaded);
       setHasMore(data.hasMore ?? false);
@@ -304,6 +429,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           createdAt: r.createdAt,
           reasoning: r.metadata?.reasoning,
           reasoningMs: r.metadata?.reasoningMs,
+          replyToMessageId: r.replyToMessageId ?? null,
+          replyTo: r.replyTo ?? null,
         }));
       for (const m of older) {
         if (m.id) seenIds.current.add(m.id);
@@ -394,6 +521,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           senderName: msg.senderName,
           content: msg.content,
           contentType: msg.contentType,
+          replyToMessageId: msg.replyToMessageId ?? null,
+          replyTo: msg.replyTo ?? null,
         },
       ]);
     });
@@ -462,22 +591,40 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     const text = input.trim();
     if (!text || isStreaming) return;
 
+    // User typed → interrupt any in-flight TTS. The agent's about to
+    // produce a new reply; the old one is no longer interesting.
+    stopAllTts();
+    setIsPlaying(false);
+
+    // Snapshot the staged quote so user can clear/replace it while we're
+    // mid-flight without leaving the optimistic message holding a stale
+    // reference.
+    const stagedReply = replyTarget;
+
     const userMsg: Message = {
       senderType: "user",
       senderId: currentUserId || null,
       senderName: session?.user?.name || "You",
       content: text,
       createdAt: new Date().toISOString(),
+      replyToMessageId: stagedReply?.id ?? null,
+      replyTo: stagedReply,
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
+    setReplyTarget(null);
     setIsStreaming(true);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ roomId, content: text, model }),
+        body: JSON.stringify({
+          roomId,
+          content: text,
+          model,
+          replyToMessageId: stagedReply?.id ?? null,
+        }),
       });
 
       const contentType = res.headers.get("content-type") || "";
@@ -490,7 +637,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         {
           senderType: "agent",
           senderId: null,
-          senderName: "Agent",
+          senderName: agentName,
           content: "",
           createdAt: new Date().toISOString(),
         },
@@ -567,13 +714,42 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         updated[updated.length - 1] = {
           senderType: "agent",
           senderId: null,
-          senderName: "Agent",
+          senderName: agentName,
           content: "错误:未能获取回复。",
         };
         return updated;
       });
     } finally {
       setIsStreaming(false);
+      // Voice mode kicks in after the text is fully streamed. Read the
+      // freshly-completed message off the latest state via setMessages
+      // (closure here would see stale data) and pipe its text to TTS.
+      // We read voiceMode off a fresh snapshot via setVoiceMode so the
+      // user toggling it off mid-stream still suppresses playback.
+      setVoiceMode((vmCurrent) => {
+        if (vmCurrent) {
+          setMessages((prevMsgs) => {
+            const last = prevMsgs[prevMsgs.length - 1];
+            const clean =
+              last && last.senderType === "agent"
+                ? stripMarkdownForTts(last.content)
+                : "";
+            if (clean) {
+              setIsPlaying(true);
+              playTts({
+                body: {
+                  text: clean,
+                  agentId: agentIdRef.current,
+                },
+                onEnd: () => setIsPlaying(false),
+                onError: () => setIsPlaying(false),
+              });
+            }
+            return prevMsgs;
+          });
+        }
+        return vmCurrent;
+      });
       onChatComplete?.();
     }
   };
@@ -587,9 +763,11 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       return;
     }
     setIsUploading(true);
+    const stagedReply = replyTarget;
     try {
-      const msg = await sendImageMessage(file, roomId);
+      const msg = await sendImageMessage(file, roomId, stagedReply?.id ?? null);
       seenIds.current.add(msg.id);
+      setReplyTarget(null);
       setMessages((prev) => [
         ...prev,
         {
@@ -600,6 +778,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           content: msg.content,
           contentType: msg.contentType,
           createdAt: msg.createdAt,
+          replyToMessageId: msg.replyToMessageId ?? null,
+          replyTo: msg.replyTo ?? null,
         },
       ]);
     } catch (err: any) {
@@ -608,6 +788,54 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       setIsUploading(false);
     }
   };
+
+  const startLongPress = (m: Message) => {
+    if (!m.id) return;
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      setMenuForId(m.id!);
+    }, 450);
+  };
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+  const openMenuViaContextMenu = (e: React.MouseEvent, m: Message) => {
+    if (!m.id) return;
+    e.preventDefault();
+    setMenuForId(m.id);
+  };
+
+  const beginQuote = (m: Message) => {
+    if (!m.id) return;
+    setReplyTarget({
+      id: m.id,
+      senderName: m.senderName,
+      content: m.content,
+      contentType: m.contentType,
+    });
+    setMenuForId(null);
+    // Focus the input so the user can keep typing immediately.
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
+  const jumpToMessage = (id: string) => {
+    const el = document.getElementById(`msg-${id}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ring-2", "ring-primary/60");
+    setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
+  };
+
+  // Click-anywhere closes the open action menu.
+  useEffect(() => {
+    if (!menuForId) return;
+    const onDocClick = () => setMenuForId(null);
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [menuForId]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -650,7 +878,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           const timeLabel = fmtTime(msg.createdAt);
 
           return (
-            <div key={i}>
+            <div key={i} id={msg.id ? `msg-${msg.id}` : undefined} className="rounded transition-shadow">
               {showDayDivider && (
                 <div className="flex justify-center my-3">
                   <span className="text-[10px] px-2 py-0.5 rounded bg-base-300/60 text-base-content/50">
@@ -658,7 +886,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                   </span>
                 </div>
               )}
-              <div className={`chat ${isMe ? "chat-end" : "chat-start"}`}>
+              <div className={`chat ${isMe ? "chat-end" : "chat-start"} relative`}>
                 <div className="chat-header text-xs opacity-60 mb-0.5">
                   {displayName}
                   {timeLabel && (
@@ -667,7 +895,17 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                     </time>
                   )}
                 </div>
-                <div className={`chat-bubble ${bubbleColor} text-sm`}>
+                <div
+                  className={`chat-bubble ${bubbleColor} text-sm select-text`}
+                  onContextMenu={(e) => openMenuViaContextMenu(e, msg)}
+                  onTouchStart={() => startLongPress(msg)}
+                  onTouchEnd={cancelLongPress}
+                  onTouchMove={cancelLongPress}
+                  onTouchCancel={cancelLongPress}
+                >
+                  {msg.replyTo && (
+                    <QuoteBlock reply={msg.replyTo} onJump={jumpToMessage} />
+                  )}
                   {isImageMessage(msg) ? (
                     <a href={msg.content} target="_blank" rel="noopener noreferrer">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -702,6 +940,20 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                     </>
                   )}
                 </div>
+                {menuForId && menuForId === msg.id && (
+                  <div
+                    className={`absolute z-20 ${isMe ? "right-2" : "left-2"} -bottom-8 bg-base-100 border border-base-300 rounded-lg shadow-lg text-xs overflow-hidden`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300 w-full text-left"
+                      onClick={() => beginQuote(msg)}
+                    >
+                      引用
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -719,6 +971,26 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         <div ref={bottomRef} />
       </div>
 
+      {replyTarget && (
+        <div className="flex items-center gap-2 px-3 md:px-4 pt-2 -mb-1 border-t border-base-300">
+          <div className="flex-1 min-w-0 px-2 py-1 rounded border-l-2 border-primary/60 bg-base-200 text-xs">
+            <div className="opacity-60 leading-tight">
+              引用 {replyTarget.senderName || "用户"}
+            </div>
+            <div className="opacity-90 truncate">
+              {quotePreview(replyTarget, 80)}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs"
+            onClick={() => setReplyTarget(null)}
+            title="取消引用"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div className="flex gap-2 px-3 py-2 md:px-4 md:py-3 border-t border-base-300 safe-area-bottom">
         <input
           ref={fileInputRef}
@@ -747,6 +1019,32 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
             {model === "pro" ? "深度" : "快速"}
           </span>
         </button>
+        {/* Voice mode toggle. When playing, the same button doubles as a
+            stop control (click to abort the current TTS but stay in
+            voice mode). Click again from idle state to leave voice mode. */}
+        <button
+          type="button"
+          onClick={isPlaying ? stopPlayback : toggleVoiceMode}
+          disabled={isStreaming && !voiceMode}
+          className={`btn btn-sm self-end px-2 md:min-w-[3.5rem] ${
+            isPlaying
+              ? "btn-error"
+              : voiceMode
+                ? "btn-secondary"
+                : "btn-ghost"
+          }`}
+          title={
+            isPlaying
+              ? "正在播放 — 点击停止"
+              : voiceMode
+                ? "语音模式开 — 点击关闭"
+                : "语音模式关 — 点击开启（agent 回复后自动朗读）"
+          }
+        >
+          <span className="text-base leading-none" aria-hidden>
+            {isPlaying ? "⏹" : voiceMode ? "🔊" : "🔇"}
+          </span>
+        </button>
         <button
           type="button"
           className="btn btn-ghost btn-sm self-end px-2"
@@ -763,6 +1061,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           )}
         </button>
         <textarea
+          ref={textareaRef}
           className="textarea textarea-bordered flex-1 min-h-[2.5rem] max-h-32 text-sm leading-normal resize-none bg-base-200"
           value={input}
           onChange={(e) => { setInput(e.target.value); emitTyping(); }}

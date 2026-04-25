@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
 import { publishRoomEvent } from "@/lib/redis";
 import { pushCaptionJob } from "@/lib/queue";
+import { fetchReplySnippet } from "@/lib/chat/reply-snippet";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("web");
@@ -17,10 +18,14 @@ export async function POST(req: NextRequest) {
   const user = await getRequiredUser();
   if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { roomId, imageUrl } = await req.json();
+  const { roomId, imageUrl, replyToMessageId } = await req.json();
   if (!roomId || !imageUrl) {
     return Response.json({ error: "Missing roomId or imageUrl" }, { status: 400 });
   }
+  const replyTargetId: string | null =
+    typeof replyToMessageId === "string" && replyToMessageId.length > 0
+      ? replyToMessageId
+      : null;
 
   // Sanity-check URL: must be https, must point at a cos.myqcloud.com host.
   try {
@@ -45,6 +50,10 @@ export async function POST(req: NextRequest) {
     );
   if (!member) return Response.json({ error: "Forbidden" }, { status: 403 });
 
+  const replySnippet = replyTargetId
+    ? await fetchReplySnippet(replyTargetId)
+    : null;
+
   const [row] = await db
     .insert(messages)
     .values({
@@ -54,6 +63,7 @@ export async function POST(req: NextRequest) {
       content: imageUrl,
       contentType: "image",
       status: "completed",
+      replyToMessageId: replySnippet ? replySnippet.id : null,
     })
     .returning();
 
@@ -68,6 +78,8 @@ export async function POST(req: NextRequest) {
       content: imageUrl,
       contentType: "image",
       status: "completed",
+      replyToMessageId: row.replyToMessageId,
+      replyTo: replySnippet,
     },
   });
 
@@ -91,6 +103,8 @@ export async function POST(req: NextRequest) {
       content: row.content,
       contentType: row.contentType,
       createdAt: row.createdAt,
+      replyToMessageId: row.replyToMessageId,
+      replyTo: replySnippet,
     },
   });
 }

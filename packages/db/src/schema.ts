@@ -107,6 +107,12 @@ export const messages = pgTable("messages", {
   // generated caption that lets text-only LLMs still reference the image
   // after it scrolls out of the recent window.
   metadata: jsonb("metadata").$type<MessageMetadata>(),
+  // Reply / quote target. Lets users disambiguate "上面那张图" by pointing
+  // at a specific earlier message. Self-FK; ON DELETE SET NULL so deleting
+  // an old message doesn't break threads that referenced it. The actual
+  // FK constraint lives in 0009_message_reply_to.sql — drizzle-kit's push
+  // doesn't reliably author self-referential FKs.
+  replyToMessageId: uuid("reply_to_message_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -1,8 +1,9 @@
 import "@/lib/env";
 import { NextRequest } from "next/server";
-import { db, messages, users, agents } from "@agent-platform/db";
+import { db, messages, users, agents, roomMembers } from "@agent-platform/db";
 import { eq, inArray, desc, and, lt } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
+import { bulkReplySnippets } from "@/lib/chat/reply-snippet";
 
 export const dynamic = "force-dynamic";
 
@@ -51,10 +52,44 @@ export async function GET(req: NextRequest) {
   for (const u of userRows) nameMap.set(u.id, u.name);
   for (const a of agentRows) nameMap.set(a.id, a.name);
 
+  // Resolve quoted-message snippets for any message that has a reply
+  // target. One bulk lookup avoids an N+1 over the page.
+  const replyTargetIds = [
+    ...new Set(
+      rows.map((m) => m.replyToMessageId).filter((x): x is string => !!x)
+    ),
+  ];
+  const replyMap = await bulkReplySnippets(replyTargetIds);
+
   const result = rows.map((m) => ({
     ...m,
     senderName: m.senderId ? nameMap.get(m.senderId) || null : null,
+    replyTo: m.replyToMessageId ? replyMap.get(m.replyToMessageId) ?? null : null,
   }));
 
-  return Response.json({ messages: result, currentUserId: user.id, hasMore });
+  // Resolve the room's primary agent so the client can label optimistic
+  // placeholders with the real name (DB might say "Assistant", "Maya",
+  // etc.). Avoids the "Agent → Assistant" flip on every page reload.
+  const [agentMember] = await db
+    .select()
+    .from(roomMembers)
+    .where(
+      and(eq(roomMembers.roomId, roomId), eq(roomMembers.memberType, "agent"))
+    )
+    .limit(1);
+  let agentInfo: { id: string; name: string } | null = null;
+  if (agentMember) {
+    const [agent] = await db
+      .select({ id: agents.id, name: agents.name })
+      .from(agents)
+      .where(eq(agents.id, agentMember.memberId));
+    if (agent) agentInfo = agent;
+  }
+
+  return Response.json({
+    messages: result,
+    currentUserId: user.id,
+    hasMore,
+    roomAgent: agentInfo,
+  });
 }

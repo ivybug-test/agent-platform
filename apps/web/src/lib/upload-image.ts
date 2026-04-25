@@ -104,12 +104,20 @@ export interface ImageMessageResult {
   content: string;
   contentType: string;
   createdAt: string;
+  replyToMessageId?: string | null;
+  replyTo?: {
+    id: string;
+    senderName: string | null;
+    content: string;
+    contentType?: string;
+  } | null;
 }
 
 /** End-to-end: compress → upload to COS → persist image message on server. */
 export async function sendImageMessage(
   file: File,
-  roomId: string
+  roomId: string,
+  replyToMessageId?: string | null
 ): Promise<ImageMessageResult> {
   if (!file.type.startsWith("image/")) throw new Error("not an image");
   if (file.size > MAX_UPLOAD_BYTES) throw new Error("file too large");
@@ -120,7 +128,7 @@ export async function sendImageMessage(
   const res = await fetch("/api/messages/image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ roomId, imageUrl }),
+    body: JSON.stringify({ roomId, imageUrl, replyToMessageId: replyToMessageId ?? null }),
   });
   if (!res.ok) throw new Error(`persist failed: ${res.status}`);
   const data = await res.json();

@@ -346,7 +346,7 @@ export function buildSystemPrompt(opts: {
 - remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. If the fact describes a specific event in time (e.g. "went to Shanghai on 2026-04-14", "skipped lunch on 2026-04-19"), also pass eventAt as an ISO8601 timestamp. Do NOT record relative phrases like "今天" / "刚才" — always resolve them to an absolute date using the current time layer above. Near-duplicates reinforce the existing memory instead of creating a new one.
 - update_memory: call ONLY when the user explicitly corrects a fact ("actually it's X", "I moved", "no, not Y"). Pass the id from search_memories.
 - forget_memory: call ONLY when the user explicitly asks to forget something ("don't remember X", "stop tracking Y"). Pass the id from search_memories.
-- web_search: search the live web. Use ONLY for current events, real-world facts, products, or links you cannot answer from memory or training. Cap 5 results. Cite the URL inline when you use a result.
+- web_search: search the live web. Use ONLY for current events, real-world facts, products, or links you cannot answer from memory or training. Cap 5 results. **You MUST cite the source URL inline (markdown "[标题](url)") for every concrete fact, date, or claim you take from a search result. If a claim is not supported by a returned snippet, do NOT make it. If the search returned nothing useful, say so explicitly — never fall back to hallucinated knowledge.**
 - search_lyrics: when the user asks you to sing or quote a specific song, call this BEFORE composing the reply to fetch the lyrics + a QQ Music / NetEase link.
 - fetch_url: read the full content of a webpage. Call this ONLY when the USER pasted a URL into chat (e.g. "看下这个 https://..." / "what does this page say <url>"). DO NOT call fetch_url on URLs that came back from web_search — the snippet is enough. Returns ~8000 chars of cleaned page text.
 
@@ -414,7 +414,10 @@ Prefer not calling a tool if your current context is already sufficient.`;
 1. The message you are replying to was sent by: ${opts.currentUserName}. Respond ONLY to ${opts.currentUserName}'s latest message. Do NOT confuse them with other users.
 2. Each user message is prefixed with "[YYYY-MM-DD HH:mm] Name:" (e.g. "[2026-04-19 13:56] binqiu: hello"). The bracketed timestamp is metadata telling you WHEN that message was sent — it is NOT part of the user's words. Use it to reason about timing, but NEVER echo a timestamp back and NEVER start your reply with "[YYYY-MM-DD HH:mm]" or any similar bracketed time. ALWAYS check the name prefix to identify who is speaking. Different names = different people with different personalities and memories.
 3. Do NOT repeat yourself. Before replying, review your recent responses above. If you already said something similar, say something new and different.
-4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.`,
+4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.
+5. Images appear inline as "[图片#N: <description>]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against these numbers. You did NOT see the raw image — only the description — so describe based on the text and don't claim to have seen pixels not in the description.
+6. A user message may begin with a quoted-reply prefix "> [回复 NAME: <preview>] …" — this means the user is explicitly replying to that earlier message. Treat the quoted preview as the focus of their question, not the user's own words. NEVER echo the "> [回复 …]" prefix back in your reply.
+7. TOOL HONESTY: If you called a tool earlier in this turn (web_search / fetch_url / search_memories / etc), you DID call it. You can see the result yourself in the conversation history. NEVER claim "I didn't actually search" or "I didn't really look it up" — that's a lie. If a user asks "where did this come from?" / "你搜了哪些网页?", look back at the actual tool results and list the source URLs you used.`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -450,12 +453,14 @@ function textSimilarity(a: string, b: string): number {
 }
 
 interface ContextMessage {
+  id?: string;
   senderType: string;
   senderId: string | null;
   content: string;
   contentType?: string | null;
   createdAt?: Date | string | null;
   metadata?: { vision?: { caption?: string } } | null;
+  replyToMessageId?: string | null;
 }
 
 type LLMTextPart = { type: "text"; text: string };
@@ -538,6 +543,53 @@ export function buildLLMMessages(
     }
   }
 
+  // Number images by their order of appearance in the window so the agent
+  // can disambiguate references like "图2 是什么" / "上面那张图" — without
+  // numbering it has to guess which image when several share the window.
+  let imageSeq = 0;
+
+  // Map id → ContextMessage for resolving in-window quote targets. If a
+  // user replies to a message that's still in the window we render a
+  // structured "> [quote]" prefix so the agent can pinpoint it.
+  const byId = new Map<string, ContextMessage>();
+  for (const m of filtered) if (m.id) byId.set(m.id, m);
+
+  // Sequence number assigned to images by appearance order; reused when a
+  // reply targets one of those images so the quote prefix says "图片#N".
+  const imageSeqByMessageId = new Map<string, number>();
+  let probe = 0;
+  for (const m of filtered) {
+    if (m.contentType === "image" && m.id) {
+      probe += 1;
+      imageSeqByMessageId.set(m.id, probe);
+    }
+  }
+
+  function quotePrefix(replyId: string): string {
+    const target = byId.get(replyId);
+    if (!target) {
+      // Quote target scrolled out of the window — keep the signal that the
+      // user explicitly referenced an earlier message but don't make up
+      // content the agent can't see.
+      return `> [回复了一条更早的消息（已超出最近窗口）]\n`;
+    }
+    const targetName = target.senderId
+      ? nameMap.get(target.senderId) || (target.senderType === "agent" ? "Agent" : "User")
+      : target.senderType === "agent"
+        ? "Agent"
+        : "User";
+    let preview: string;
+    if (target.contentType === "image") {
+      const seq = imageSeqByMessageId.get(replyId);
+      const cap = target.metadata?.vision?.caption?.trim();
+      preview = `图片#${seq ?? "?"}${cap ? `: ${cap.slice(0, 60)}${cap.length > 60 ? "…" : ""}` : ""}`;
+    } else {
+      const oneLine = (target.content || "").replace(/\s+/g, " ").trim();
+      preview = oneLine.length > 80 ? oneLine.slice(0, 80) + "…" : oneLine;
+    }
+    return `> [回复 ${targetName}: ${preview}]\n`;
+  }
+
   return [
     { role: "system" as const, content: systemWithGap as LLMMessageContent },
     ...filtered.map((m) => {
@@ -551,24 +603,25 @@ export function buildLLMMessages(
           ? `[${formatShortWallClock(new Date(m.createdAt))}] `
           : "";
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
+        const qPrefix = m.replyToMessageId ? quotePrefix(m.replyToMessageId) : "";
         if (m.contentType === "image" && m.content) {
           // Image bytes never reach the chat LLM — only the caption does.
-          // The image is captioned at upload time (synchronously, via Kimi)
-          // and the caption lives on messages.metadata.vision.caption. If
-          // it's missing (sync caption errored, async fallback hasn't run
-          // yet), we tell the agent so it doesn't pretend to have seen it.
+          // The image is captioned async by memory-worker; if the caption
+          // hasn't landed yet we say so explicitly so the agent doesn't
+          // pretend to have seen it.
+          imageSeq += 1;
           const caption = m.metadata?.vision?.caption?.trim();
           const visionText = caption
-            ? `[图片: ${caption}]`
-            : "[图片: 描述生成中，请稍等]";
+            ? `[图片#${imageSeq}: ${caption}]`
+            : `[图片#${imageSeq}: 描述生成中，请稍等]`;
           return {
             role: "user" as const,
-            content: `${tsPrefix}${name}: ${visionText}` as LLMMessageContent,
+            content: `${qPrefix}${tsPrefix}${name}: ${visionText}` as LLMMessageContent,
           };
         }
         return {
           role: "user" as const,
-          content: `${tsPrefix}${name}: ${m.content}` as LLMMessageContent,
+          content: `${qPrefix}${tsPrefix}${name}: ${m.content}` as LLMMessageContent,
         };
       }
       return {

@@ -25,7 +25,8 @@ export async function streamAgentResponse(
   userContent: string,
   userId: string,
   provider: Provider = "deepseek",
-  mode: DeepSeekMode = "flash"
+  mode: DeepSeekMode = "flash",
+  agentName: string = "Assistant"
 ): Promise<Response> {
   const toolAuth = await signToolToken({ userId, roomId });
 
@@ -138,7 +139,7 @@ export async function streamAgentResponse(
             id: agentMsgId,
             senderType: "agent",
             senderId: null,
-            senderName: "Agent",
+            senderName: agentName,
             content: fullContent,
             status: "completed",
           },

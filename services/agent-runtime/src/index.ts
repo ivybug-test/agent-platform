@@ -250,12 +250,19 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
       })();
 
       let roundHadReasoning = false;
+      // Accumulated reasoning_content for the round. DeepSeek now requires
+      // the assistant turn pushed back into the next round to echo its own
+      // reasoning_content verbatim, otherwise the next call 400s with
+      // "The `reasoning_content` in the thinking mode must be passed back
+      // to the API.". Stored per-round and reset on the next iteration.
+      let roundReasoning = "";
       for await (const chunk of iter) {
         const choice = chunk.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
         if (delta.reasoning_content) {
           roundHadReasoning = true;
+          roundReasoning += delta.reasoning_content;
           // Flash-mode users opted out of the thinking UI; do not forward.
           if (mode === "pro") {
             sendEvent({ reasoning: delta.reasoning_content });
@@ -331,8 +338,11 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
         break;
       }
 
-      // Record the assistant turn with its tool_calls so the next round has context
-      messages.push({
+      // Record the assistant turn with its tool_calls so the next round has
+      // context. reasoning_content must be echoed back verbatim — DeepSeek's
+      // tool-calling thinking-mode contract requires it; omitting it 400s
+      // round 2 with "must be passed back to the API".
+      const assistantTurn: any = {
         role: "assistant",
         content: assistantText || null,
         tool_calls: toolCallList.map((tc) => ({
@@ -340,7 +350,9 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           type: "function",
           function: { name: tc.name, arguments: tc.args },
         })),
-      });
+      };
+      if (roundReasoning) assistantTurn.reasoning_content = roundReasoning;
+      messages.push(assistantTurn);
 
       // Execute each tool call via the Next.js callback, in series
       for (const tc of toolCallList) {
