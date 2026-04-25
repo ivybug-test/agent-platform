@@ -6,12 +6,33 @@ import Link from "next/link";
 import { useSession, signOut } from "next-auth/react";
 import FriendsPanel from "@/components/FriendsPanel";
 import { RECENT_COMMITS } from "@/lib/build-info.generated";
+import {
+  play as playTts,
+  stopAll as stopAllTts,
+} from "@/lib/audio/streaming-player";
 
 interface UpdatesResp {
   commits: { sha: string; subject: string; date: string }[];
   summary?: string;
   expired?: boolean;
 }
+
+interface AgentRow {
+  id: string;
+  name: string;
+  voiceProvider: string | null;
+  voiceId: string | null;
+  voiceName: string | null;
+}
+
+interface VoiceOption {
+  id: string;
+  name: string;
+  provider: string;
+  gender?: "male" | "female" | "neutral";
+}
+
+const VOICE_PREVIEW_TEXT = "你好，我是你的语音助手。这是一段试听样本。";
 
 function parseBullets(text: string): string[] {
   return text
@@ -35,6 +56,15 @@ export default function MePage() {
   const [updates, setUpdates] = useState<UpdatesResp | null>(null);
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteResult, setInviteResult] = useState<string | null>(null);
+
+  // Voice picker state — list of agents I share a room with (typically
+  // just one in this single-agent product), plus preset voices from the
+  // active TTS provider, plus which voice is currently previewing.
+  const [agentList, setAgentList] = useState<AgentRow[]>([]);
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [voiceProviderName, setVoiceProviderName] = useState<string>("");
+  const [voiceSavingId, setVoiceSavingId] = useState<string | null>(null);
+  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -65,7 +95,71 @@ export default function MePage() {
       const r = await fetch("/api/updates");
       if (r.ok) setUpdates(await r.json());
     })();
+    (async () => {
+      const r = await fetch("/api/agents");
+      if (r.ok) {
+        const d = await r.json();
+        setAgentList(d.agents || []);
+      }
+    })();
+    (async () => {
+      const r = await fetch("/api/tts/voices");
+      if (r.ok) {
+        const d = await r.json();
+        setVoices(d.voices || []);
+        setVoiceProviderName(d.provider || "");
+      }
+    })();
   }, [status, showFriends]);
+
+  // Stop preview audio when navigating away from /me.
+  useEffect(() => {
+    return () => stopAllTts();
+  }, []);
+
+  const selectVoice = async (agentId: string, voice: VoiceOption) => {
+    setVoiceSavingId(agentId);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/voice`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          voiceProvider: voice.provider,
+          voiceId: voice.id,
+          voiceName: voice.name,
+        }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setAgentList((prev) =>
+          prev.map((a) =>
+            a.id === agentId ? { ...a, ...updated } : a
+          )
+        );
+      }
+    } finally {
+      setVoiceSavingId(null);
+    }
+  };
+
+  const previewVoice = (voice: VoiceOption) => {
+    // Re-clicking the same row stops the preview.
+    if (previewingVoiceId === voice.id) {
+      stopAllTts();
+      setPreviewingVoiceId(null);
+      return;
+    }
+    setPreviewingVoiceId(voice.id);
+    playTts({
+      body: {
+        text: VOICE_PREVIEW_TEXT,
+        voiceId: voice.id,
+        voiceProvider: voice.provider,
+      },
+      onEnd: () => setPreviewingVoiceId(null),
+      onError: () => setPreviewingVoiceId(null),
+    });
+  };
 
   const generateInvite = async () => {
     if (inviteBusy) return;
@@ -228,6 +322,78 @@ export default function MePage() {
             )}
           </section>
         )}
+
+        {/* Voice picker. One card per agent the user shares a room
+            with — usually just one, but the UI scales if more get added.
+            Click a voice row to save (auto-PATCH); click ▶ to preview
+            without saving; click the same ▶ again to stop. */}
+        {agentList.map((agent) => (
+          <section key={agent.id} className="card bg-base-200 px-4 py-3">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-lg" aria-hidden>
+                🎙️
+              </span>
+              <div className="flex-1 text-sm font-medium">
+                {agent.name} 的语音音色
+              </div>
+              <span className="text-[11px] opacity-50">
+                当前：{agent.voiceName || "默认"}
+              </span>
+            </div>
+            {voices.length === 0 ? (
+              <div className="text-xs opacity-50 italic">
+                语音服务（{voiceProviderName || "—"}）未配置或加载中…
+              </div>
+            ) : (
+              <ul className="space-y-1">
+                {voices.map((v) => {
+                  const selected = agent.voiceId === v.id;
+                  const previewing = previewingVoiceId === v.id;
+                  const saving = voiceSavingId === agent.id && !selected;
+                  return (
+                    <li
+                      key={v.id}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors cursor-pointer ${
+                        selected
+                          ? "bg-primary/15 border border-primary/40"
+                          : "hover:bg-base-300/60 border border-transparent"
+                      }`}
+                      onClick={() => !selected && selectVoice(agent.id, v)}
+                    >
+                      <span
+                        className={`w-3 h-3 rounded-full shrink-0 border-2 ${
+                          selected
+                            ? "bg-primary border-primary"
+                            : "border-base-content/30"
+                        }`}
+                      />
+                      <span className="flex-1 text-sm">{v.name}</span>
+                      {saving && (
+                        <span className="loading loading-spinner loading-xs" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          previewVoice(v);
+                        }}
+                        className={`w-7 h-7 rounded-full flex items-center justify-center text-xs transition-colors ${
+                          previewing
+                            ? "bg-error text-error-content"
+                            : "bg-base-300 hover:bg-base-content/20"
+                        }`}
+                        aria-label={previewing ? "停止试听" : "试听"}
+                        title={previewing ? "停止试听" : "试听"}
+                      >
+                        {previewing ? "■" : "▶"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        ))}
 
         {/* Entry: updates. Always expanded here (the old AnnouncementPanel
             in the sidebar was collapsible; on this dedicated page there's
