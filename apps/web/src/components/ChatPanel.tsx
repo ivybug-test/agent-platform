@@ -1433,31 +1433,44 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     // on the next scroll event.
     shouldAutoScroll.current = false;
 
-    const highlight = (el: HTMLElement) => {
-      // Explicit scroll-to math. el.offsetTop is relative to the
-      // element's offsetParent (nearest positioned ancestor) — that's
-      // the OUTER wrapper here (it has `relative` for the "↓ 最新"
-      // button anchor), NOT the scroll container. Using offsetTop
-      // would land us off by the scroll container's distance from the
-      // wrapper's top. getBoundingClientRect bypasses offsetParent
-      // entirely and measures actual visual positions, so converting
-      // via (elRect.top - containerRect.top + container.scrollTop)
-      // gives the exact intra-container offset regardless of which
-      // ancestor happens to be positioned.
+    const highlight = async (el: HTMLElement) => {
+      // Explicit scroll-to math via getBoundingClientRect (NOT
+      // offsetTop — the outer wrapper is the offsetParent because of
+      // the "↓ 最新" button's `relative` anchor, and offsetTop would
+      // include the scroll container's distance from it).
       const container = scrollContainerRef.current;
-      if (container) {
+      if (!container) {
+        el.scrollIntoView({ block: "center" });
+        el.classList.add("ring-2", "ring-primary/60");
+        setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
+        return;
+      }
+      const computeTargetTop = (): number => {
         const containerRect = container.getBoundingClientRect();
         const elRect = el.getBoundingClientRect();
         const elTopInContainer =
           elRect.top - containerRect.top + container.scrollTop;
-        const targetTop =
-          elTopInContainer - container.clientHeight / 2 + elRect.height / 2;
-        container.scrollTo({
-          top: Math.max(0, targetTop),
-          behavior: "auto",
-        });
-      } else {
-        el.scrollIntoView({ block: "center" });
+        return Math.max(
+          0,
+          elTopInContainer - container.clientHeight / 2 + elRect.height / 2
+        );
+      };
+      // Multi-pass scroll. content-visibility:auto bubbles are sized
+      // by their contain-intrinsic-size (120px placeholder) until they
+      // first paint. The first scrollTo lands using those placeholder
+      // heights — close-but-wrong because real bubbles vary from 60-
+      // 600px. Once the target's neighborhood scrolls into view those
+      // bubbles render with real heights, the layout shifts, and a
+      // re-measure gives the correct center. Iterate until the
+      // computed top stabilizes (within 2px) or we've spent 4 frames,
+      // whichever comes first.
+      let prev = -1;
+      for (let i = 0; i < 4; i++) {
+        const target = computeTargetTop();
+        if (Math.abs(target - prev) < 2) break;
+        container.scrollTo({ top: target, behavior: "auto" });
+        prev = target;
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
       }
       el.classList.add("ring-2", "ring-primary/60");
       setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
@@ -1480,7 +1493,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     // Fast path — already loaded.
     const fast = document.getElementById(`msg-${id}`);
     if (fast) {
-      highlight(fast);
+      await highlight(fast);
       return;
     }
     // Slow path. Each iteration: load older page, give the DOM up to
@@ -1491,7 +1504,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       await loadOlderRef.current();
       const el = await waitForEl(500);
       if (el) {
-        highlight(el);
+        await highlight(el);
         return;
       }
     }
