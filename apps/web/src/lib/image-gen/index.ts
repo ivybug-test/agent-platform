@@ -203,7 +203,8 @@ async function callImagesGenerations(
   model: string,
   size: string,
   prompt: string,
-  referenceImages: string[]
+  referenceImages: string[],
+  signal?: AbortSignal
 ): Promise<ImageGenResult> {
   // Doubao Seedream's image-to-image / multi-reference path is a
   // top-level `image` field on the same /images/generations endpoint —
@@ -232,6 +233,7 @@ async function callImagesGenerations(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -258,14 +260,12 @@ async function callImagesGenerations(
 }
 
 export interface GenerateImageOptions {
-  /** Image-to-image / multi-reference fusion. URLs of existing images
-   *  to use as visual references. Currently only honored when provider
-   *  is volc + the underlying model is Doubao Seedream (it accepts a
-   *  top-level `image` field on /images/generations). For openai chat
-   *  / google direct the references are dropped — those paths would
-   *  need image_url content blocks / inline_data parts respectively
-   *  to support i2i; not implemented yet. */
   referenceImages?: string[];
+  /** Caller cancels in-flight gen via AbortController.signal — fetch
+   *  picks it up and rejects with AbortError. Wired through only the
+   *  volc path for now (the only one we run async/cancellable in
+   *  practice via image-tools.ts); other paths ignore. */
+  signal?: AbortSignal;
 }
 
 export async function generateImage(
@@ -282,7 +282,7 @@ export async function generateImage(
     return callGoogleDirect(apiKey, baseUrl, model, prompt);
   }
   if (provider === "volc") {
-    return callImagesGenerations(apiKey, baseUrl, model, size, prompt, refs);
+    return callImagesGenerations(apiKey, baseUrl, model, size, prompt, refs, opts?.signal);
   }
   if (refs.length > 0) {
     throw new Error("image-to-image not implemented for openai chat");

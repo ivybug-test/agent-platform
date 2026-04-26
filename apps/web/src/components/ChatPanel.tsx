@@ -463,7 +463,19 @@ function MessageBubbleInner({
           onTouchCancel={onLongPressCancel}
         >
           {msg.replyTo && <QuoteBlock reply={msg.replyTo} onJump={onJumpToMessage} />}
-          {isImageMessage(msg) ? (
+          {msg.contentType === "image-pending" ? (
+            // Async generate_image placeholder while the BG task runs.
+            // Same footprint as a real image bubble so the layout
+            // doesn't jump when the URL lands.
+            <div className="flex items-center justify-center w-[200px] h-[200px] rounded bg-base-100/40 border border-dashed border-base-content/30 gap-2 text-xs opacity-70">
+              <span className="loading loading-spinner loading-sm"></span>
+              <span>生成中…</span>
+            </div>
+          ) : msg.contentType === "image-failed" ? (
+            <div className="px-3 py-2 rounded bg-error/10 border border-error/30 text-xs text-error max-w-[240px]">
+              {msg.content || "(生成失败)"}
+            </div>
+          ) : isImageMessage(msg) ? (
             <a href={msg.content} target="_blank" rel="noopener noreferrer">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
@@ -948,20 +960,44 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     socket.on("room-message", (event: any) => {
       const msg = event.message;
       if (!msg) return;
-      // Skip empty messages
-      if (!msg.content) return;
+      // 'message-updated' is the event the BG image-gen task fires
+      // when it finishes (or fails / is cancelled). It refers to a
+      // messageId we ALREADY have in state (we inserted a placeholder
+      // pending bubble from the tool_result on the originator, or
+      // received the placeholder from the earlier 'agent-message'
+      // event for other room members). Update by id, don't insert.
+      if (event.type === "message-updated") {
+        if (!msg.id) return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msg.id
+              ? {
+                  ...m,
+                  content: msg.content ?? m.content,
+                  contentType: msg.contentType ?? m.contentType,
+                }
+              : m
+          )
+        );
+        return;
+      }
+      // Skip empty messages (image-pending placeholders are an
+      // exception — they have content="" but a real contentType, and
+      // we DO want to render the spinner bubble).
+      if (!msg.content && msg.contentType !== "image-pending") return;
       // Skip our own user messages (already shown locally)
       if (msg.senderType === "user" && msg.senderId === currentUserId) return;
       // Skip agent text messages triggered by us — those streamed in via
       // SSE already, the Redis echo would just duplicate. EXCEPT image
-      // messages from generate_image: the SSE only carries text chunks,
-      // so the tool-inserted image bubble has never reached this client
-      // without the Redis path. seenIds dedup below still handles the
-      // after-reload case.
+      // messages (real or pending) from generate_image: SSE doesn't
+      // carry image bubbles. The tool_result handler already inserted
+      // the placeholder; seenIds.has(msg.id) below catches that.
       if (
         msg.senderType === "agent" &&
         event.triggeredBy === currentUserId &&
-        msg.contentType !== "image"
+        msg.contentType !== "image" &&
+        msg.contentType !== "image-pending" &&
+        msg.contentType !== "image-failed"
       ) return;
       // Skip duplicates
       if (msg.id && seenIds.current.has(msg.id)) return;
@@ -1262,17 +1298,18 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               // the in-flight agent message so the 🔊 button shows up
               // right when the tool fires, not only after reload.
               // stream.ts persists the same blob server-side.
-              // generate_image: insert the image bubble as a NEW
-              // message right when tool_result arrives. Doing it here
-              // (rather than waiting for the Redis broadcast →
-              // realtime-gateway → Socket.IO path) means the
-              // originating user always sees their image, even when
-              // the gateway service isn't running. seenIds.add prevents
-              // the eventual Redis echo (if any) from rendering twice.
+              // generate_image: tool returns immediately with a
+              // placeholder messageId (queued: true) — the actual
+              // gen runs server-side in the background. Insert a
+              // pending bubble right here so the user sees a
+              // "生成中..." spinner without waiting for Redis. When
+              // the BG task finishes, a "message-updated" event over
+              // socket.io will swap in the real image. seenIds.add
+              // prevents the eventual Redis echo from re-inserting.
               if (knownName === "generate_image" && tr.ok && tr.data) {
-                const url = typeof tr.data.url === "string" ? tr.data.url : "";
-                const newId = typeof tr.data.messageId === "string" ? tr.data.messageId : "";
-                if (url && newId && !seenIds.current.has(newId)) {
+                const newId =
+                  typeof tr.data.messageId === "string" ? tr.data.messageId : "";
+                if (newId && !seenIds.current.has(newId)) {
                   seenIds.current.add(newId);
                   setMessages((prev) => [
                     ...prev,
@@ -1281,8 +1318,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                       senderType: "agent",
                       senderId: agentIdRef.current,
                       senderName: agentName,
-                      content: url,
-                      contentType: "image",
+                      content: "",
+                      contentType: "image-pending",
                       createdAt: new Date().toISOString(),
                     },
                   ]);

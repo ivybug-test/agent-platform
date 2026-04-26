@@ -13,6 +13,14 @@ const log = createLogger("web");
 const RATE_PER_MIN = 5;
 const RATE_PER_DAY = 50;
 
+// Per-message AbortController for in-flight generations so the
+// `cancel_image_generation` tool can interrupt mid-flight. Keyed by
+// the placeholder message id. Lives in this Next.js process; survives
+// neither restart nor multiple replicas — acceptable for now since
+// dev / single-replica prod is the only deployment shape and a 20-30s
+// stale entry is harmless.
+const inFlightImageGens = new Map<string, AbortController>();
+
 async function checkRateLimit(userId: string): Promise<{
   ok: boolean;
   retryAfterSec?: number;
@@ -119,62 +127,27 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
     .where(eq(agents.id, agentId));
   const agentName = agentRow?.name || "agent";
 
-  const startedAt = Date.now();
-
-  // 1. Provider call
-  let img;
-  try {
-    img = await generateImage(prompt, {
-      referenceImages: referenceImageUrls,
-    });
-  } catch (err: any) {
-    log.error(
-      {
-        err: err?.message,
-        userId: ctx.userId,
-        roomId: ctx.roomId,
-        promptLen: prompt.length,
-        refCount: referenceImageUrls.length,
-      },
-      "imagegen.provider-error"
-    );
-    return { error: `image-gen failed: ${err?.message || "unknown"}` };
-  }
-
-  // 2. Upload to COS so the URL is durable (provider URLs typically expire)
-  let upload;
-  try {
-    upload = await uploadBufferToCos(img.bytes, {
-      contentType: img.mimeType,
-      keyPrefix: `agent-images/${ctx.roomId}/${agentId}`,
-      ext: pickExtension(img.mimeType),
-    });
-  } catch (err: any) {
-    log.error(
-      { err: err?.message, userId: ctx.userId, roomId: ctx.roomId },
-      "imagegen.upload-error"
-    );
-    return { error: `upload failed: ${err?.message || "unknown"}` };
-  }
-
-  // 3. Persist the image as a regular agent message — same shape as
-  // user-uploaded images so existing rendering / history / replies all
-  // just work. No separate schema field needed.
+  // 1. Insert a placeholder image message synchronously. contentType
+  // "image-pending" tells the frontend to render a spinner / "生成中"
+  // instead of a real <img>. Status stays "streaming" until either
+  // the BG promise updates it to completed (with a real URL) or it's
+  // cancelled / fails.
   const [row] = await db
     .insert(messages)
     .values({
       roomId: ctx.roomId,
       senderType: "agent",
       senderId: agentId,
-      content: upload.url,
-      contentType: "image",
-      status: "completed",
+      content: "",
+      contentType: "image-pending",
+      status: "streaming",
     })
     .returning();
 
-  // 4. Broadcast so other room members + the originating client see it
-  // immediately. The originating client also receives this via Redis
-  // pub/sub; ChatPanel's seenIds dedup keeps it from rendering twice.
+  // 2. Broadcast the placeholder so other room members see "生成中..."
+  // even while we're still cooking. Originating client also picks it
+  // up off the SSE tool_result return below — Redis isn't on the
+  // critical path for them.
   publishRoomEvent({
     type: "agent-message",
     roomId: ctx.roomId,
@@ -184,45 +157,171 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
       senderType: "agent",
       senderId: agentId,
       senderName: agentName,
-      content: upload.url,
-      contentType: "image",
-      status: "completed",
+      content: "",
+      contentType: "image-pending",
+      status: "streaming",
     },
   });
 
-  log.info(
-    {
-      userId: ctx.userId,
-      roomId: ctx.roomId,
-      agentId,
-      messageId: row.id,
-      bytes: img.bytes.length,
-      durationMs: Date.now() - startedAt,
-      promptLen: prompt.length,
-    },
-    "imagegen.complete"
-  );
+  // 3. Kick off the actual gen + upload + DB-update + completion-
+  // broadcast off-thread. The Next.js process keeps running so the
+  // promise completes; we don't need BullMQ for a single ~20s job.
+  // AbortController lets cancel_image_generation interrupt it.
+  const ac = new AbortController();
+  inFlightImageGens.set(row.id, ac);
+  const startedAt = Date.now();
 
-  // Return the message id alongside the URL so the originating client
-  // can render the image bubble directly off the SSE tool_result
-  // event — without depending on realtime-gateway / Socket.IO being
-  // up. (For other room members, the publishRoomEvent above is still
-  // the path; if the gateway isn't running they see it on the next
-  // refresh.) The agent gets the URL too so its follow-up text reply
-  // ("画好了 — ...") is grounded in reality, but the prompt asks it
-  // NOT to inline the URL.
+  void (async () => {
+    try {
+      const img = await generateImage(prompt, {
+        referenceImages: referenceImageUrls,
+        signal: ac.signal,
+      });
+      if (ac.signal.aborted) throw new DOMException("aborted", "AbortError");
+      const upload = await uploadBufferToCos(img.bytes, {
+        contentType: img.mimeType,
+        keyPrefix: `agent-images/${ctx.roomId}/${agentId}`,
+        ext: pickExtension(img.mimeType),
+      });
+      if (ac.signal.aborted) throw new DOMException("aborted", "AbortError");
+
+      await db
+        .update(messages)
+        .set({
+          content: upload.url,
+          contentType: "image",
+          status: "completed",
+          updatedAt: new Date(),
+        })
+        .where(eq(messages.id, row.id));
+
+      publishRoomEvent({
+        type: "message-updated",
+        roomId: ctx.roomId,
+        triggeredBy: ctx.userId,
+        message: {
+          id: row.id,
+          senderType: "agent",
+          senderId: agentId,
+          senderName: agentName,
+          content: upload.url,
+          contentType: "image",
+          status: "completed",
+        },
+      });
+
+      log.info(
+        {
+          userId: ctx.userId,
+          roomId: ctx.roomId,
+          agentId,
+          messageId: row.id,
+          bytes: img.bytes.length,
+          durationMs: Date.now() - startedAt,
+          promptLen: prompt.length,
+        },
+        "imagegen.complete"
+      );
+    } catch (err: any) {
+      const aborted =
+        err?.name === "AbortError" || ac.signal.aborted;
+      log.warn(
+        {
+          err: err?.message,
+          userId: ctx.userId,
+          roomId: ctx.roomId,
+          messageId: row.id,
+          aborted,
+        },
+        aborted ? "imagegen.cancelled" : "imagegen.bg-failed"
+      );
+      // Mark the placeholder as failed so the bubble stops spinning
+      // and the user knows it didn't land. Cancel and provider error
+      // share this path — the contentType signals "this was an image
+      // attempt that didn't finish" to the frontend.
+      await db
+        .update(messages)
+        .set({
+          content: aborted ? "(已取消)" : `(生成失败: ${err?.message || "unknown"})`.slice(0, 200),
+          contentType: "image-failed",
+          status: "failed",
+          updatedAt: new Date(),
+        })
+        .where(eq(messages.id, row.id))
+        .catch(() => {});
+      publishRoomEvent({
+        type: "message-updated",
+        roomId: ctx.roomId,
+        triggeredBy: ctx.userId,
+        message: {
+          id: row.id,
+          senderType: "agent",
+          senderId: agentId,
+          senderName: agentName,
+          content: aborted ? "(已取消)" : `(生成失败: ${err?.message || "unknown"})`.slice(0, 200),
+          contentType: "image-failed",
+          status: "failed",
+        },
+      });
+    } finally {
+      inFlightImageGens.delete(row.id);
+    }
+  })();
+
+  // 4. Return immediately so the agent's tool callback unblocks. The
+  // tool result tells the frontend the messageId of the placeholder
+  // so it can render the spinner bubble; once the BG promise lands
+  // a message-updated event, the bubble swaps to the real image.
   return {
     data: {
       messageId: row.id,
-      url: upload.url,
+      queued: true,
       provider: "nanobanana",
-      modelText: img.modelText || undefined,
     },
   };
 };
 
+/** Abort an in-flight generate_image call. Looks up the
+ *  AbortController stashed by generateImageHandler when it kicked off
+ *  the BG promise, signals it, lets the existing catch path mark the
+ *  message as cancelled. */
+const cancelImageGenerationHandler: ToolHandler = async (args, ctx) => {
+  const messageId =
+    typeof args?.messageId === "string" ? args.messageId.trim() : "";
+  if (!messageId) return { error: "messageId is required" };
+
+  const ac = inFlightImageGens.get(messageId);
+  if (!ac) {
+    // Either gen already finished (placeholder swapped to image-completed)
+    // or the messageId is bogus. Either way nothing to cancel.
+    return {
+      data: {
+        ok: false,
+        reason:
+          "no in-flight generation for that messageId (already finished, failed, or never existed)",
+      },
+    };
+  }
+  // Verify same-room scope so a malicious-prompt scenario can't poke
+  // generations in other rooms.
+  const [row] = await db
+    .select({ roomId: messages.roomId })
+    .from(messages)
+    .where(eq(messages.id, messageId));
+  if (!row || row.roomId !== ctx.roomId) {
+    return { error: "messageId is not in this room" };
+  }
+  ac.abort();
+  log.info(
+    { userId: ctx.userId, roomId: ctx.roomId, messageId },
+    "imagegen.cancel-requested"
+  );
+  return { data: { ok: true } };
+};
+
 export const imageToolHandlers: Record<string, ToolHandler> = {
   generate_image: generateImageHandler,
+  cancel_image_generation: cancelImageGenerationHandler,
 };
 
 export const imageToolDefs = [
@@ -231,7 +330,7 @@ export const imageToolDefs = [
     function: {
       name: "generate_image",
       description:
-        "Generate an image from a text prompt (and optional reference images) and post it to the room as a separate image message. Call this whenever the user wants to SEE something — not just literal '画' commands. Concrete triggers: (1) explicit drawing — 画一张 / 画一个 / 画个 / 画下 / 画 X / 来张图 / draw / paint / generate; (2) requests to see — 给我看 / 给我看看 / 给我看一下 X / 让我看看 X / 我想看看 X / 想看 X 的样子 / 看一下 X 长啥样 / show me X / let me see X; (3) implied creation — 'X 长什么样 (with no source to look up)' / '搞张 X 的图' / 'X 的画面'; (4) IMAGE-TO-IMAGE / EDIT — 把这张图改成 X / 用这张图当底 / 改成 X 风格 / 加点 X / 把它变成 X / 这两张融合 / use this image as reference / make it look like X — pass the source image's msgId in referenceMessageIds. The image appears automatically as its own bubble; DO NOT paste the returned URL into your text reply. Just briefly say what you made. One call per request unless user asks for '再来一张' / variations.",
+        "Generate an image from a text prompt (+ optional reference images). The tool is ASYNC — it returns immediately with { messageId, queued: true } and the actual gen runs in the background (~20s). The placeholder image message is already in the room as a 'generating...' bubble. When the BG task lands, it swaps in the real image automatically. So your text reply should be quick acknowledgment ('画着呢，稍等一下~' / '我开始画了'), NOT 'here it is' phrasing. Triggers: (1) explicit drawing — 画一张 / 画一个 / 画个 / 画下 / 画 X / 来张图 / draw / paint / generate; (2) requests to see — 给我看 / 给我看看 / 让我看看 / 我想看看 / 看一下 X 长啥样 / show me X / let me see X; (3) implied creation — 'X 长什么样 / 搞张 X 的图 / X 的画面'; (4) IMAGE-TO-IMAGE / EDIT — 把这张图改成 X / 改成 X 风格 / 加点 X / 这两张融合 — pass the source image's msgId in referenceMessageIds. ALSO remember the returned messageId — if the user later says '停 / 别画了 / 取消', call cancel_image_generation({messageId}) with it. DO NOT paste the URL in your reply. One generate_image call per request.",
       parameters: {
         type: "object",
         required: ["prompt"],
@@ -246,6 +345,25 @@ export const imageToolDefs = [
             items: { type: "string" },
             description:
               "Optional msgIds of image messages in this room to use as visual references for image-to-image generation. Read these from the inline '[图片#N (msgId=xxx)]' markers above. Pass when the user asks to MODIFY an existing image (改 / 加 / 变成 / 用这张), apply a STYLE to it, or FUSE multiple images. 1-4 ids supported; each must be an image message in the SAME room. Omit for plain text-to-image.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "cancel_image_generation",
+      description:
+        "Cancel an in-flight generate_image call you started earlier in this conversation. Use when the user explicitly asks to stop / cancel / abort the drawing — '停 / 别画了 / 取消 / stop / cancel / 不要了'. Pass the messageId you got back from the generate_image tool result. Returns { ok: true } when the BG task was successfully signalled to abort, or { ok: false, reason } if the gen has already finished / failed / wasn't found. Don't call this preemptively — only when the user says to stop.",
+      parameters: {
+        type: "object",
+        required: ["messageId"],
+        properties: {
+          messageId: {
+            type: "string",
+            description:
+              "The messageId returned from a recent generate_image tool call (the placeholder image bubble's id).",
           },
         },
       },

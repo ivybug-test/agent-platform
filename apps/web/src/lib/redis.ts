@@ -28,7 +28,7 @@ export interface ReplyToSnippet {
 }
 
 interface RoomEvent {
-  type: "user-message" | "agent-message" | "agent-chunk";
+  type: "user-message" | "agent-message" | "agent-chunk" | "message-updated";
   roomId: string;
   triggeredBy?: string; // userId who triggered this agent response
   message: {
