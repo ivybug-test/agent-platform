@@ -1,10 +1,26 @@
 import type { ToolHandler } from "./index";
 
+/** Allowed voice ids for per-call override. Kept in sync with
+ *  apps/web/src/lib/tts/voices.ts MINIMAX_VOICES — when adding voices
+ *  there, mirror them here so the agent only picks ones we actually
+ *  ship. Defaults flow naturally: omit voiceId → /api/tts falls back
+ *  to the agent's globally-configured voice (set on /me). */
+const ALLOWED_VOICE_IDS = new Set([
+  "male-qn-qingse",
+  "male-qn-jingying",
+  "female-shaonv",
+  "female-yujie",
+  "female-chengshu",
+  "audiobook_male_1",
+  "audiobook_female_1",
+]);
+
 /** `speak` is a marker tool — the actual TTS happens lazily on the
  *  client when the user clicks the 🔊 button on the agent bubble. The
- *  tool itself just confirms receipt; stream.ts pulls `text` out of the
- *  matching tool_call event and persists it to `messages.metadata.audio`
- *  so a refresh / second client both see the play button.
+ *  tool itself just confirms receipt; stream.ts pulls `text` (and
+ *  optional `voiceId`) out of the matching tool_call event and
+ *  persists them to `messages.metadata.audio` so a refresh / second
+ *  client both see the play button + use the right voice.
  *
  *  We deliberately don't pre-warm /api/tts here: synthesizing for
  *  every reply would burn quota even when the user never clicks. The
@@ -13,6 +29,10 @@ const speak: ToolHandler = async (args) => {
   const text = typeof args?.text === "string" ? args.text.trim() : "";
   if (!text) return { error: "text is required" };
   if (text.length > 2000) return { error: "text too long (max 2000 chars)" };
+  const rawVoiceId = typeof args?.voiceId === "string" ? args.voiceId.trim() : "";
+  if (rawVoiceId && !ALLOWED_VOICE_IDS.has(rawVoiceId)) {
+    return { error: `unknown voiceId: ${rawVoiceId.slice(0, 60)}` };
+  }
   return { data: { ok: true } };
 };
 
@@ -35,6 +55,20 @@ export const voiceToolDefs = [
             type: "string",
             description:
               "Plain spoken-language text. No markdown, no URLs, no code blocks. Cap 2000 chars.",
+          },
+          voiceId: {
+            type: "string",
+            enum: [
+              "male-qn-qingse",
+              "male-qn-jingying",
+              "female-shaonv",
+              "female-yujie",
+              "female-chengshu",
+              "audiobook_male_1",
+              "audiobook_female_1",
+            ],
+            description:
+              "Optional override for the agent's default voice (set by the user on the /me page). Pick from the enum to match the moment — e.g. female-shaonv (少女) for a playful / cute reply, male-qn-qingse (青涩少年) for a softer male, female-yujie (御姐) for a confident / sultry tone, audiobook_female_1 (有声书女声) for narration / story-telling, audiobook_male_1 (有声书男声) for serious narration. OMIT this field for normal replies — the user's chosen voice is the right default. Only override when the content has an obvious vocal character mismatch with the default voice (animal-character roleplay / story narrator / specific gender request like '用男声说一遍').",
           },
         },
       },
