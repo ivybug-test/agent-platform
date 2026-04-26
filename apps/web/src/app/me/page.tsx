@@ -66,30 +66,6 @@ export default function MePage() {
   const [voiceSavingId, setVoiceSavingId] = useState<string | null>(null);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
 
-  // "无耳机时静音" preference. Read from localStorage on mount; flip
-  // via the toggle in the audio settings card. ChatPanel reads the same
-  // key when deciding whether to start TTS for a new agent reply.
-  const [muteWithoutHeadphones, setMuteWithoutHeadphones] = useState(false);
-  useEffect(() => {
-    try {
-      setMuteWithoutHeadphones(
-        localStorage.getItem("tts-mute-without-headphones") === "true"
-      );
-    } catch {}
-  }, []);
-  const toggleMuteWithoutHeadphones = () => {
-    setMuteWithoutHeadphones((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(
-          "tts-mute-without-headphones",
-          next ? "true" : "false"
-        );
-      } catch {}
-      return next;
-    });
-  };
-
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
@@ -346,39 +322,6 @@ export default function MePage() {
             )}
           </section>
         )}
-
-        {/* Audio output gate — when on, ChatPanel only fires TTS for
-            an agent reply if the browser sees a non-speaker audio
-            output (best-effort headphone detection). When off (default),
-            voice mode plays through whatever the OS routes to. */}
-        <section className="card bg-base-200 px-4 py-3">
-          <div className="flex items-center gap-3">
-            <span className="text-lg" aria-hidden>🎧</span>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium">无耳机时静音</div>
-              <div className="text-[11px] opacity-60 mt-0.5 break-words">
-                开启后，没检测到耳机时不外放（公共场合用）。检测基于浏览器
-                的输出设备列表，部分设备/系统可能识别不到，识别不到时仍
-                会播放。
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={toggleMuteWithoutHeadphones}
-              role="switch"
-              aria-checked={muteWithoutHeadphones}
-              className={`shrink-0 w-12 h-7 rounded-full relative transition-colors ${
-                muteWithoutHeadphones ? "bg-primary" : "bg-base-content/20"
-              }`}
-            >
-              <span
-                className={`absolute top-1 w-5 h-5 rounded-full bg-base-100 transition-transform ${
-                  muteWithoutHeadphones ? "translate-x-6" : "translate-x-1"
-                }`}
-              />
-            </button>
-          </div>
-        </section>
 
         {/* Voice picker. One card per agent the user shares a room
             with — usually just one, but the UI scales if more get added.

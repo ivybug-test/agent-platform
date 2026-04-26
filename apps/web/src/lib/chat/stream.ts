@@ -1,4 +1,5 @@
 import { db, messages, rooms } from "@agent-platform/db";
+import type { ToolInvocation, ToolInvocationHit } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
 import { publishRoomEvent } from "@/lib/redis";
@@ -7,6 +8,92 @@ import { createLogger } from "@agent-platform/logger";
 import { signToolToken } from "@/lib/tool-token";
 import { agentToolDefs } from "@/lib/tools";
 import type { LLMMessageContent } from "@/lib/chat/context";
+
+/** Tool names whose results we surface to the user as a "搜索网页" card.
+ *  Memory tools (search_memories / remember / etc.) stay invisible because
+ *  they're internal bookkeeping the user doesn't care about. */
+const VISIBLE_TOOL_NAMES = new Set([
+  "web_search",
+  "search_lyrics",
+  "search_music",
+  "fetch_url",
+]);
+
+/** Pull a free-form display label out of the JSON-stringified tool args. The
+ *  agent's call may stream incrementally so the args string can be partial
+ *  garbage by the time we see it — callers must tolerate `undefined`. */
+function extractQueryLabel(name: string, argsJson: string): string | undefined {
+  if (!argsJson) return undefined;
+  try {
+    const obj = JSON.parse(argsJson) as Record<string, unknown>;
+    if (name === "search_lyrics") {
+      const song = typeof obj.song === "string" ? obj.song : "";
+      const artist = typeof obj.artist === "string" ? obj.artist : "";
+      return artist ? `${song} ${artist}` : song || undefined;
+    }
+    if (name === "fetch_url") {
+      return typeof obj.url === "string" ? obj.url : undefined;
+    }
+    // web_search / search_music both use `query`.
+    return typeof obj.query === "string" ? obj.query : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Shape of the `tool_result.data` payload — matches what
+ *  apps/web/src/lib/tools/web-search-tools.ts returns. */
+interface ToolResultPayload {
+  data?: {
+    results?: ToolInvocationHit[];
+    provider?: string;
+    url?: string;
+    title?: string;
+    charCount?: number;
+  };
+  error?: string;
+}
+
+function buildInvocation(
+  name: string,
+  argsJson: string,
+  payload: ToolResultPayload | null,
+  ok: boolean
+): ToolInvocation {
+  const inv: ToolInvocation = { name };
+  const query = extractQueryLabel(name, argsJson);
+  if (query) inv.query = query;
+
+  if (!ok || !payload) {
+    inv.error = payload?.error || "tool call failed";
+    return inv;
+  }
+
+  if (name === "fetch_url") {
+    if (payload.data?.url) {
+      inv.fetched = {
+        url: payload.data.url,
+        title: payload.data.title,
+        charCount: payload.data.charCount,
+      };
+    }
+    if (payload.data?.provider) inv.provider = payload.data.provider;
+    if (payload.error) inv.error = payload.error;
+    return inv;
+  }
+
+  // web_search / search_lyrics / search_music — list of hits.
+  if (Array.isArray(payload.data?.results)) {
+    inv.results = payload.data.results.map((r) => ({
+      title: r.title || r.url,
+      url: r.url,
+      snippet: r.snippet,
+    }));
+  }
+  if (payload.data?.provider) inv.provider = payload.data.provider;
+  if (payload.error) inv.error = payload.error;
+  return inv;
+}
 
 const log = createLogger("web");
 const AGENT_RUNTIME_URL =
@@ -59,6 +146,11 @@ export async function streamAgentResponse(
   let fullReasoning = "";
   let reasoningStartedAt = 0;
   let reasoningEndedAt = 0;
+  // Pair tool_call (id, name, args) with the matching tool_result so we can
+  // persist the user-visible search hits onto the message. Memory tools are
+  // filtered out at persistence time.
+  const pendingToolCalls = new Map<string, { name: string; args: string }>();
+  const toolInvocations: ToolInvocation[] = [];
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -79,6 +171,13 @@ export async function streamAgentResponse(
               const evt = JSON.parse(data) as {
                 content?: string;
                 reasoning?: string;
+                tool_call?: { id: string; name: string; args: string };
+                tool_result?: {
+                  id: string;
+                  name?: string;
+                  ok: boolean;
+                  data?: ToolResultPayload;
+                };
               };
               if (evt.reasoning) {
                 if (!reasoningStartedAt) reasoningStartedAt = Date.now();
@@ -89,6 +188,28 @@ export async function streamAgentResponse(
                   reasoningEndedAt = Date.now();
                 }
                 fullContent += evt.content;
+              }
+              if (evt.tool_call) {
+                pendingToolCalls.set(evt.tool_call.id, {
+                  name: evt.tool_call.name,
+                  args: evt.tool_call.args,
+                });
+              }
+              if (evt.tool_result) {
+                const pending = pendingToolCalls.get(evt.tool_result.id);
+                const name = pending?.name || evt.tool_result.name || "";
+                const argsJson = pending?.args || "";
+                if (name && VISIBLE_TOOL_NAMES.has(name)) {
+                  toolInvocations.push(
+                    buildInvocation(
+                      name,
+                      argsJson,
+                      (evt.tool_result.data ?? null) as ToolResultPayload | null,
+                      !!evt.tool_result.ok
+                    )
+                  );
+                }
+                pendingToolCalls.delete(evt.tool_result.id);
               }
             } catch {}
           }
@@ -113,11 +234,16 @@ export async function streamAgentResponse(
             : reasoningStartedAt
               ? Date.now() - reasoningStartedAt
               : 0;
-        // Only attach a metadata blob when there's actually reasoning to
-        // store; non-pro turns leave the column NULL.
-        const metadata = fullReasoning
-          ? { reasoning: fullReasoning, reasoningMs }
-          : undefined;
+        // Only attach a metadata blob when there's a reason to (reasoning
+        // trace or tool calls to display). Plain non-pro / no-tool turns
+        // still leave the column NULL.
+        const metadata =
+          fullReasoning || toolInvocations.length > 0
+            ? {
+                ...(fullReasoning ? { reasoning: fullReasoning, reasoningMs } : {}),
+                ...(toolInvocations.length > 0 ? { toolInvocations } : {}),
+              }
+            : undefined;
 
         await db
           .update(messages)

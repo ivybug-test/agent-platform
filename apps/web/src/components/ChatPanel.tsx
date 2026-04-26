@@ -11,7 +11,6 @@ import {
   stopAll as stopAllTts,
   stripMarkdownForTts,
 } from "@/lib/audio/streaming-player";
-import { isHeadphonesConnected } from "@/lib/audio/headphone-check";
 
 /** Pull every http(s) URL out of a message body. Trailing CJK and ASCII
  *  punctuation gets stripped so "看看 https://example.com。" doesn't try
@@ -505,11 +504,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const ttsCanceledRef = useRef(false);
   const isStreamingRef = useRef(false);
   const voiceModeRef = useRef(false);
-  // Per-reply gate: when the user enabled "无耳机时静音" on /me and we
-  // can't see headphones at the start of this reply, suppress TTS for
-  // the entire reply (decided once up-front so we don't keep re-checking
-  // mid-stream). True = play allowed.
-  const ttsAllowedRef = useRef(true);
   // Defensive dup-suppression. Each chunk we ship to MiniMax is
   // identified by its starting cursor in the agent's reply; if
   // tryAdvanceTts somehow gets called twice for the same start cursor
@@ -526,7 +520,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     ttsBusyRef.current = false;
     liveAgentTextRef.current = "";
     ttsCanceledRef.current = false;
-    ttsAllowedRef.current = true;
     playedCursorsRef.current = new Set();
   };
 
@@ -539,7 +532,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const tryAdvanceTts = (finalFlush = false) => {
     if (!voiceModeRef.current) return;
     if (ttsCanceledRef.current) return;
-    if (!ttsAllowedRef.current) return;
     if (ttsBusyRef.current) return;
 
     const full = liveAgentTextRef.current;
@@ -945,29 +937,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     // fresh at cursor 0.
     resetTtsQueue();
     isStreamingRef.current = true;
-
-    // Headphone gate. The /me toggle "无耳机时静音" persists to localStorage;
-    // when on, we try to detect a non-speaker output device and suppress
-    // TTS for the upcoming reply if none is found. Decided once per
-    // reply, fired async so we don't block message send. The toast keeps
-    // the user from wondering why nothing played.
-    if (voiceMode) {
-      let muteNoHp = false;
-      try {
-        muteNoHp =
-          localStorage.getItem("tts-mute-without-headphones") === "true";
-      } catch {}
-      if (muteNoHp) {
-        isHeadphonesConnected().then((ok) => {
-          if (!ok) {
-            ttsAllowedRef.current = false;
-            stopAllTts();
-            setIsPlaying(false);
-            setTtsError("未检测到耳机 — 本条静音");
-          }
-        });
-      }
-    }
 
     // Snapshot the staged quote so user can clear/replace it while we're
     // mid-flight without leaving the optimistic message holding a stale

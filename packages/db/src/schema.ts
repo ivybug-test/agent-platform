@@ -10,6 +10,34 @@ import {
   jsonb,
 } from "drizzle-orm/pg-core";
 
+/** A single search/fetch tool call surfaced in the chat UI. We persist the
+ *  user-visible bits (which tool, what was searched, what hits came back) so
+ *  the "已搜索 N 个网页" card survives reload — it isn't just a live-stream
+ *  artifact. Only the public-facing tools land here (web_search /
+ *  search_lyrics / search_music / fetch_url); memory tools stay invisible. */
+export interface ToolInvocationHit {
+  title: string;
+  url: string;
+  snippet?: string;
+}
+
+export interface ToolInvocation {
+  /** Tool function name (e.g. "web_search"). */
+  name: string;
+  /** Free-form display query. For search tools this is the `query`/`song`
+   *  argument; for fetch_url it's the URL. */
+  query?: string;
+  /** Search hits — present for web_search / search_lyrics / search_music. */
+  results?: ToolInvocationHit[];
+  /** fetch_url returns one document — title + URL + char count. */
+  fetched?: { url: string; title?: string; charCount?: number };
+  /** Provider name returned by the tool (bocha / tavily). */
+  provider?: string;
+  /** Set when the tool errored or rate-limited so the UI can show a muted
+   *  "搜索失败" row instead of an empty card. */
+  error?: string;
+}
+
 export interface MessageMetadata {
   vision?: {
     caption: string;
@@ -24,6 +52,9 @@ export interface MessageMetadata {
   /** Milliseconds between the first reasoning chunk and the first
    *  content chunk — what the UI shows as "已思考 Xs". */
   reasoningMs?: number;
+  /** Search/fetch tool calls made while producing this reply. Rendered as
+   *  a "已搜索 N 个网页" card above the bubble. */
+  toolInvocations?: ToolInvocation[];
 }
 
 // Enums
