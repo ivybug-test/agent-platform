@@ -251,6 +251,31 @@ function extractUrls(text: string): string[] {
   return cleaned;
 }
 
+/** Generate a uuid v4. Prefers crypto.randomUUID (cryptographically
+ *  random, ~zero collision risk) but falls back to a Math.random-built
+ *  v4 when the page runs in an INSECURE CONTEXT — `crypto.randomUUID`
+ *  is gated on HTTPS-or-localhost, so accessing the dev server via an
+ *  http:// LAN IP / proxy hostname makes the call throw. The fallback
+ *  is fine because message ids are persisted but never used as auth /
+ *  capability tokens; a chance collision on Math.random is laughably
+ *  smaller than the risk of breaking the send button. */
+function makeMessageId(): string {
+  const c = typeof crypto !== "undefined" ? crypto : null;
+  if (c && typeof c.randomUUID === "function") {
+    try {
+      return c.randomUUID();
+    } catch {
+      // Some browsers (older Edge / odd embeds) throw despite presenting
+      // the function. Drop through to the Math.random path.
+    }
+  }
+  const bytes = new Array(16).fill(0).map(() => Math.floor(Math.random() * 256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 interface ReplyToSnippet {
   id: string;
   senderName: string | null;
@@ -1026,8 +1051,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     // bubbles have no id until refresh — which means long-press / quote
     // / scroll-to-jump are all broken on freshly-sent messages. seenIds
     // tracks them too so the Redis echo doesn't double-render.
-    const userMessageId = crypto.randomUUID();
-    const agentMessageId = crypto.randomUUID();
+    const userMessageId = makeMessageId();
+    const agentMessageId = makeMessageId();
     seenIds.current.add(userMessageId);
     seenIds.current.add(agentMessageId);
 
@@ -1277,7 +1302,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     // Mint the id up-front so the optimistic image bubble has it from
     // first paint — keeps long-press / quote / scroll-to-jump working
     // without waiting for the server round-trip.
-    const messageId = crypto.randomUUID();
+    const messageId = makeMessageId();
     seenIds.current.add(messageId);
     try {
       const msg = await sendImageMessage(file, roomId, stagedReply?.id ?? null, messageId);
