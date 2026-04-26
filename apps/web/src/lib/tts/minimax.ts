@@ -106,19 +106,21 @@ export const minimaxProvider: TTSProvider = {
 
 /** Decode MiniMax's SSE event stream into raw mp3 bytes.
  *
- *  Each SSE chunk looks like `data: {"data":{"audio":"<hex>"},...}\n\n`.
+ *  Each SSE chunk looks like `data: {"data":{"audio":"<hex>","status":N},...}\n\n`.
  *  We pull `audio` (hex string), convert to bytes, and emit.
  *
- *  ⚠️ MiniMax's final event has `is_final: true` AND repeats the full
- *  audio payload in `data.audio` (with a fresh ID3 header — the whole
- *  thing, not a delta). Earlier docs claimed it had no audio; reality
- *  disagrees. If we forward those bytes, the audio plays through twice
- *  — once via the streamed chunks, once via the final dump. Skip
- *  whatever audio comes attached to is_final. */
+ *  ⚠️ MiniMax marks the terminal event with `data.status === 2` — and that
+ *  event repeats the FULL audio payload (fresh ID3 header, all frames),
+ *  not a delta. Streaming chunks are `data.status === 1`. If we forward
+ *  the status-2 audio we play the whole utterance twice — once via the
+ *  streamed chunks, once via the final dump. Drop any audio carried by
+ *  a status-2 event (and anything after, just in case). The earlier
+ *  attempt at this gate watched `is_final`, but MiniMax never actually
+ *  sets that field — verified by curl'ing /t2a_v2 directly. */
 function makeSseAudioTransformer(): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   let buffer = "";
-  let finalSeen = false;
+  let terminated = false;
   return new TransformStream({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -130,15 +132,11 @@ function makeSseAudioTransformer(): TransformStream<Uint8Array, Uint8Array> {
         if (!payload) continue;
         try {
           const evt = JSON.parse(payload) as {
-            data?: { audio?: string };
-            is_final?: boolean;
+            data?: { audio?: string; status?: number };
           };
-          // Once we've seen a final marker, drop any subsequent audio
-          // payloads — they're the full re-dump that would replay the
-          // whole utterance.
-          if (finalSeen) continue;
-          if (evt.is_final) {
-            finalSeen = true;
+          if (terminated) continue;
+          if (evt.data?.status === 2) {
+            terminated = true;
             continue;
           }
           const hex = evt.data?.audio;
