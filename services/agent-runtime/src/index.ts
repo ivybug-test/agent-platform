@@ -60,6 +60,12 @@ interface ToolDef {
   };
 }
 
+type ToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "function"; function: { name: string } };
+
 interface ChatBody {
   messages: any[];
   tools?: ToolDef[];
@@ -70,6 +76,38 @@ interface ChatBody {
   /** DeepSeek-only knob: flash (fast/cheap) or pro (reasoning).
    *  Ignored when provider="kimi" (vision model is fixed). */
   model?: DeepSeekMode;
+  /** Optional override for first-round tool_choice. Web side picks
+   *  this from the user's input via cheap regex (画一张 → force
+   *  generate_image, 学猫叫 → force speak, etc) so the model can't
+   *  hallucinate "I called the tool" without actually calling. Defaults
+   *  to "auto" when absent. */
+  toolChoice?: ToolChoice;
+}
+
+/** Patterns the model loves to write WHEN IT THINKS the tool fired,
+ *  even if it didn't. If we see one of these in the assistant text
+ *  AND the matching tool wasn't actually called this turn, the
+ *  model hallucinated and we re-prompt with forced tool_choice. */
+function detectHallucinatedTool(
+  text: string,
+  toolsCalled: Set<string>
+): string | null {
+  if (!text) return null;
+  if (
+    /🔊|听语音版|语音版|\(点.{0,4}听\)|语音已发/.test(text) &&
+    !toolsCalled.has("speak")
+  ) {
+    return "speak";
+  }
+  if (
+    /画着呢|稍等十几秒|稍等几秒|马上.{0,3}来|马上就好|正在画|开始画|画好了|看这张|图给你|图已生成/.test(
+      text
+    ) &&
+    !toolsCalled.has("generate_image")
+  ) {
+    return "generate_image";
+  }
+  return null;
 }
 
 interface AccumulatedToolCall {
@@ -100,6 +138,7 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
     maxToolRounds,
     provider = "deepseek",
     model: mode = "flash",
+    toolChoice: requestedToolChoice,
   } = request.body;
   const startTime = Date.now();
   const toolsEnabled = Array.isArray(tools) && tools.length > 0;
@@ -228,11 +267,29 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
   let round = 0;
   let done = false;
 
+  // Track tools the agent ACTUALLY emitted across all rounds this
+  // turn — the validator uses this to spot "I claimed a tool ran
+  // but no tool_call exists" hallucinations. Retries are capped so
+  // a stubborn model can't spin the loop forever.
+  const toolsCalledThisTurn = new Set<string>();
+  let retriesLeft = 1;
+  // Set when the validator wants the next round to FORCE a specific
+  // tool_choice. Cleared after one use so it doesn't leak past retry.
+  let forceToolChoice: ToolChoice | null = null;
+
   try {
     while (!done && round < maxRounds) {
       const accumulated: Record<number, AccumulatedToolCall> = {};
       let finishReason: string | null = null;
       let assistantText = "";
+
+      // Pick this round's tool_choice. Order of preference:
+      //   1. Validator-forced override (after a hallucination retry)
+      //   2. Per-request override (招1 — web layer's regex routing)
+      //   3. "auto" default
+      const roundToolChoice: ToolChoice =
+        forceToolChoice ?? requestedToolChoice ?? "auto";
+      forceToolChoice = null;
 
       const iter: AsyncIterable<any> = await (async () => {
         if (isMock) {
@@ -246,7 +303,7 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           model: cfg.model,
           messages,
           tools: tools as any,
-          tool_choice: "auto",
+          tool_choice: roundToolChoice,
           stream: true,
           max_tokens: CHAT_MAX_TOKENS,
           ...cfg.sampling,
@@ -327,6 +384,55 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
             }
           }
         }
+
+        // Content/tool_calls consistency check (post-validation, 招1
+        // reactive form). Detects "I wrote 听语音版/画着呢 but didn't
+        // emit the matching tool_call" — the model's most common
+        // hallucination pattern. On hit:
+        //   1. tell client to retract the bad text it just streamed
+        //   2. push the bad assistant turn + a corrective system msg
+        //      back into the LLM context
+        //   3. re-run THIS round with tool_choice forced to the
+        //      missing tool — the model can't refuse to call it
+        // Capped at retriesLeft (default 1) so a misaligned model
+        // can't spin forever.
+        const halluTool = detectHallucinatedTool(
+          assistantText,
+          toolsCalledThisTurn
+        );
+        const haveToolDef = !!(tools as ToolDef[] | undefined)?.some(
+          (t) => t.function.name === halluTool
+        );
+        if (halluTool && haveToolDef && retriesLeft > 0) {
+          log.info(
+            {
+              round,
+              halluTool,
+              retriesLeft,
+              textPreview: assistantText.slice(0, 60).replace(/\n/g, " "),
+            },
+            "validation.hallucination-retry"
+          );
+          sendEvent({ content_retracted: true });
+          messages.push({
+            role: "assistant",
+            content: assistantText || null,
+          });
+          messages.push({
+            role: "system",
+            content: `[CORRECTION] Your previous reply contained text that presupposes you called the ${halluTool} tool ("${assistantText
+              .slice(0, 60)
+              .replace(/\n/g, " ")}..."), but you did NOT actually emit ${halluTool} as a tool_call. The platform has tracked all your tool calls this turn — the user already noticed. Now ACTUALLY call ${halluTool} with proper arguments. Don't apologize in text, just emit the tool_call.`,
+          });
+          forceToolChoice = {
+            type: "function",
+            function: { name: halluTool },
+          };
+          retriesLeft--;
+          round++;
+          continue;
+        }
+
         done = true;
         break;
       }
@@ -360,6 +466,10 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
 
       // Execute each tool call via the Next.js callback, in series
       for (const tc of toolCallList) {
+        // Track for the post-validation hallucination check on later
+        // rounds — once a tool is actually called this turn, claims
+        // about it in any subsequent text are no longer hallucinations.
+        toolsCalledThisTurn.add(tc.name);
         sendEvent({
           tool_call: { id: tc.id, name: tc.name, args: tc.args },
         });

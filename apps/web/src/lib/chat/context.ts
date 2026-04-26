@@ -516,7 +516,9 @@ The user has the receipts; defending a fake claim is a worse failure than admitt
 
 If a past assistant turn in this conversation has '[平台备注: ...]' appended at the end, that's the platform telling you THAT past turn hallucinated a tool call. Don't defend it. Acknowledge the failure if asked, and this turn actually call the tool.
 
-This rule pairs with #7 (TOOL HONESTY) — #7 forbids DENYING tools you DID use; #10 forbids CLAIMING tools you DID NOT use. Both: your reply must match ground truth, not what you wish you had done.`,
+This rule pairs with #7 (TOOL HONESTY) — #7 forbids DENYING tools you DID use; #10 forbids CLAIMING tools you DID NOT use. Both: your reply must match ground truth, not what you wish you had done.
+
+GROUND TRUTH FOR YOUR OWN TOOL CALLS — every tool call you actually make produces a 'role: "tool"' message in your conversation history with the tool's response. THAT is the platform's record of what really happened. Before you write text that references a past tool call (yours or any agent's), scan your own context window for the matching 'role: "tool"' message — if it isn't there, the call didn't happen, regardless of what your previous assistant text said. Trust the tool messages over your own narration.`,
   ]
     .filter(Boolean)
     .join("\n\n");

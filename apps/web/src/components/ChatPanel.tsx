@@ -516,31 +516,43 @@ function MessageBubbleInner({
             e.preventDefault();
             onContextMenu(msg.id);
           }}
-          onTouchStart={(e) => {
+          // Pointer events instead of touch events — on iOS Safari the
+          // scroll-gesture predictor tends to fire `touchcancel` early
+          // for any touch inside a scroll container, killing our 450ms
+          // timer before it ever fires. Pointer events only emit
+          // `pointercancel` once an actual pan has started, so a
+          // stationary press makes it through. Filter out mouse so
+          // desktop click-and-hold doesn't open the action menu — that
+          // path is owned by `onContextMenu` (right-click) instead.
+          onPointerDown={(e) => {
+            console.log("[diag] pointerdown", { type: e.pointerType, msgId: msg.id });
+            if (e.pointerType === "mouse") return;
             if (!msg.id) return;
-            const t = e.touches[0];
-            touchStartRef.current = t
-              ? { x: t.clientX, y: t.clientY }
-              : null;
+            touchStartRef.current = { x: e.clientX, y: e.clientY };
             onLongPressStart(msg.id);
           }}
-          onTouchMove={(e) => {
+          onPointerMove={(e) => {
+            if (e.pointerType === "mouse") return;
             const start = touchStartRef.current;
             if (!start) return;
-            const t = e.touches[0];
-            if (!t) return;
-            const dx = t.clientX - start.x;
-            const dy = t.clientY - start.y;
-            if (Math.hypot(dx, dy) > 10) {
+            const dx = e.clientX - start.x;
+            const dy = e.clientY - start.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > 10) {
+              console.log("[diag] pointermove → cancel (moved", Math.round(dist), "px)");
               touchStartRef.current = null;
               onLongPressCancel();
             }
           }}
-          onTouchEnd={() => {
+          onPointerUp={(e) => {
+            if (e.pointerType === "mouse") return;
+            console.log("[diag] pointerup → cancel");
             touchStartRef.current = null;
             onLongPressCancel();
           }}
-          onTouchCancel={() => {
+          onPointerCancel={(e) => {
+            if (e.pointerType === "mouse") return;
+            console.log("[diag] pointercancel → cancel");
             touchStartRef.current = null;
             onLongPressCancel();
           }}
@@ -1317,6 +1329,24 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               seenIds.current.add(parsed.messageId);
               continue;
             }
+            // Validator caught a content/tool_call mismatch on the
+            // agent-runtime side and is replaying the round with a
+            // forced tool_choice. Wipe whatever partial reply we'd
+            // streamed so the corrected version replaces it cleanly
+            // (server side already throws away its accumulated
+            // fullContent on the same event).
+            if (parsed.content_retracted) {
+              setMessages((prev) => {
+                const updated = [...prev];
+                const lastIdx = updated.length - 1;
+                const last = updated[lastIdx];
+                if (last && last.senderType === "agent") {
+                  updated[lastIdx] = { ...last, content: "" };
+                }
+                return updated;
+              });
+              continue;
+            }
             if (parsed.reasoning) {
               setMessages((prev) => {
                 const updated = [...prev];
@@ -1592,7 +1622,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // keystroke. Setters from useState and refs are guaranteed stable.
   const startLongPress = useCallback((id: string) => {
     if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = setTimeout(() => setMenuForId(id), 450);
+    longPressTimerRef.current = setTimeout(() => {
+      console.log("[diag] long-press timer fired → opening menu for", id);
+      setMenuForId(id);
+    }, 450);
   }, []);
   const cancelLongPress = useCallback(() => {
     if (longPressTimerRef.current) {

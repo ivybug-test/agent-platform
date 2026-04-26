@@ -98,6 +98,57 @@ function buildInvocation(
 const log = createLogger("web");
 const AGENT_RUNTIME_URL =
   process.env.AGENT_RUNTIME_URL!;
+
+type ToolChoice =
+  | "auto"
+  | "required"
+  | { type: "function"; function: { name: string } };
+
+/** Cheap input-classification → tool_choice override. When the user's
+ *  message obviously demands a specific tool ("画一张猫" / "学猫叫" /
+ *  "唱一段") we force tool_choice to that function, denying the model
+ *  the option of writing "(点 🔊 听语音版)" without actually calling
+ *  it. Anything that doesn't match falls back to "auto" so the model
+ *  still has full freedom for ambiguous cases. Conservative regex —
+ *  bias toward NOT forcing on edge cases (Layer 1's post-validation
+ *  cleans those up). */
+const IMAGE_GEN_TRIGGERS: RegExp[] = [
+  /画[一]?[张个幅条只头份片群]/,
+  /画.{0,4}[张个幅条只片]/,
+  /给我?看看?[一下]?\s*[一-龥]/,
+  /让我?看看?[一下]?\s*[一-龥]/,
+  /我?想?看看?\s*[一-龥]+(的样子|长什么样)/,
+  /搞[一]?张图/,
+  /来[一]?张图/,
+  /\bdraw\b/i,
+  /\bpaint\b/i,
+  /\bgenerate\b.*\bimage\b/i,
+  /\bshow me a\b/i,
+];
+const SPEAK_TRIGGERS: RegExp[] = [
+  /学.{0,3}叫/,
+  /模仿.{0,3}声/,
+  /用语音(说|回复|聊|讲)?/,
+  /念一下/,
+  /朗读/,
+  /唱[一]?(段|首|个)?/,
+  /哼[一]?(段|首|个)?/,
+  /(用|换)[一]?(种|个)?[男女](声音|的声音)?/,
+  /\b(sing|hum)\b/i,
+  /\bread.*aloud\b/i,
+  /\bsay.{0,5}out loud\b/i,
+];
+function pickToolChoice(userContent: string): ToolChoice {
+  if (!userContent) return "auto";
+  const c = userContent;
+  if (IMAGE_GEN_TRIGGERS.some((r) => r.test(c))) {
+    return { type: "function", function: { name: "generate_image" } };
+  }
+  if (SPEAK_TRIGGERS.some((r) => r.test(c))) {
+    return { type: "function", function: { name: "speak" } };
+  }
+  return "auto";
+}
 const WEB_BASE_URL =
   process.env.WEB_BASE_URL || "http://localhost:3000";
 
@@ -116,6 +167,13 @@ export async function streamAgentResponse(
   agentName: string = "agent"
 ): Promise<Response> {
   const toolAuth = await signToolToken({ userId, roomId });
+  const toolChoice = pickToolChoice(userContent);
+  if (toolChoice !== "auto") {
+    log.info(
+      { roomId, userId, forcedTool: typeof toolChoice === "object" ? toolChoice.function.name : toolChoice },
+      "chat.tool-choice-forced"
+    );
+  }
 
   const response = await fetch(`${AGENT_RUNTIME_URL}/chat`, {
     method: "POST",
@@ -127,6 +185,7 @@ export async function streamAgentResponse(
       toolAuth,
       provider,
       model: mode,
+      toolChoice,
     }),
   });
 
@@ -175,6 +234,7 @@ export async function streamAgentResponse(
               const evt = JSON.parse(data) as {
                 content?: string;
                 reasoning?: string;
+                content_retracted?: boolean;
                 tool_call?: { id: string; name: string; args: string };
                 tool_result?: {
                   id: string;
@@ -186,6 +246,13 @@ export async function streamAgentResponse(
               if (evt.reasoning) {
                 if (!reasoningStartedAt) reasoningStartedAt = Date.now();
                 fullReasoning += evt.reasoning;
+              }
+              if (evt.content_retracted) {
+                // Validator caught a content/tool_call mismatch and is
+                // re-running the round. Throw away the partial content
+                // we'd been accumulating so the eventual db.update at
+                // turn end persists only the corrected reply.
+                fullContent = "";
               }
               if (evt.content) {
                 if (reasoningStartedAt && !reasoningEndedAt) {
