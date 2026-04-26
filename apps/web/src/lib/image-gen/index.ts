@@ -202,21 +202,36 @@ async function callImagesGenerations(
   baseUrl: string,
   model: string,
   size: string,
-  prompt: string
+  prompt: string,
+  referenceImages: string[]
 ): Promise<ImageGenResult> {
+  // Doubao Seedream's image-to-image / multi-reference path is a
+  // top-level `image` field on the same /images/generations endpoint —
+  // string for a single ref, array for multi-ref fusion. DALL-E doesn't
+  // support reference images on this endpoint, so when a non-Doubao
+  // provider is configured under `volc` we silently drop the refs
+  // (model would 400 otherwise). Practical effect: this branch is
+  // image-to-image-capable only when pointed at Doubao.
+  const body: Record<string, unknown> = {
+    model,
+    prompt,
+    size,
+    response_format: "url",
+    n: 1,
+  };
+  if (referenceImages.length === 1) {
+    body.image = referenceImages[0];
+  } else if (referenceImages.length > 1) {
+    body.image = referenceImages;
+  }
+
   const res = await fetch(`${baseUrl}/images/generations`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      prompt,
-      size,
-      response_format: "url",
-      n: 1,
-    }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -242,10 +257,35 @@ async function callImagesGenerations(
   throw new Error("image-gen: data[0] has neither url nor b64_json");
 }
 
-export async function generateImage(prompt: string): Promise<ImageGenResult> {
+export interface GenerateImageOptions {
+  /** Image-to-image / multi-reference fusion. URLs of existing images
+   *  to use as visual references. Currently only honored when provider
+   *  is volc + the underlying model is Doubao Seedream (it accepts a
+   *  top-level `image` field on /images/generations). For openai chat
+   *  / google direct the references are dropped — those paths would
+   *  need image_url content blocks / inline_data parts respectively
+   *  to support i2i; not implemented yet. */
+  referenceImages?: string[];
+}
+
+export async function generateImage(
+  prompt: string,
+  opts?: GenerateImageOptions
+): Promise<ImageGenResult> {
   if (!prompt || !prompt.trim()) throw new Error("prompt is required");
+  const refs = opts?.referenceImages || [];
   const { apiKey, provider, baseUrl, model, size } = readEnv();
-  if (provider === "google") return callGoogleDirect(apiKey, baseUrl, model, prompt);
-  if (provider === "volc") return callImagesGenerations(apiKey, baseUrl, model, size, prompt);
+  if (provider === "google") {
+    if (refs.length > 0) {
+      throw new Error("image-to-image not implemented for google direct");
+    }
+    return callGoogleDirect(apiKey, baseUrl, model, prompt);
+  }
+  if (provider === "volc") {
+    return callImagesGenerations(apiKey, baseUrl, model, size, prompt, refs);
+  }
+  if (refs.length > 0) {
+    throw new Error("image-to-image not implemented for openai chat");
+  }
   return callOpenAIChat(apiKey, baseUrl, model, prompt);
 }

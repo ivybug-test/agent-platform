@@ -1,5 +1,5 @@
 import { db, messages, roomMembers, agents } from "@agent-platform/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { generateImage } from "@/lib/image-gen";
 import { uploadBufferToCos } from "@/lib/cos/server-upload";
 import { publishRoomEvent, getRedisClient } from "@/lib/redis";
@@ -46,10 +46,52 @@ function pickExtension(mimeType: string): string {
   return "png";
 }
 
+const MAX_REFERENCE_IMAGES = 4;
+
 const generateImageHandler: ToolHandler = async (args, ctx) => {
   const prompt = typeof args?.prompt === "string" ? args.prompt.trim() : "";
   if (!prompt) return { error: "prompt is required" };
   if (prompt.length > 1000) return { error: "prompt too long (max 1000 chars)" };
+
+  // Optional image-to-image / multi-reference inputs. Agent passes
+  // msgIds of image messages from the recent window (lifted from the
+  // [图片#N (msgId=...)] inline markers); we resolve them to COS URLs
+  // server-side, both to enforce same-room scope and to avoid trusting
+  // arbitrary URLs from the model.
+  const rawIds = Array.isArray(args?.referenceMessageIds)
+    ? (args.referenceMessageIds as unknown[]).filter(
+        (x): x is string => typeof x === "string" && x.trim().length > 0
+      )
+    : [];
+  if (rawIds.length > MAX_REFERENCE_IMAGES) {
+    return {
+      error: `too many reference images (max ${MAX_REFERENCE_IMAGES})`,
+    };
+  }
+  let referenceImageUrls: string[] = [];
+  if (rawIds.length > 0) {
+    const refRows = await db
+      .select({
+        id: messages.id,
+        roomId: messages.roomId,
+        contentType: messages.contentType,
+        content: messages.content,
+      })
+      .from(messages)
+      .where(inArray(messages.id, rawIds));
+    const byId = new Map(refRows.map((r) => [r.id, r]));
+    for (const id of rawIds) {
+      const r = byId.get(id);
+      if (!r) return { error: `reference image not found: ${id}` };
+      if (r.roomId !== ctx.roomId) {
+        return { error: `reference image is in a different room: ${id}` };
+      }
+      if (r.contentType !== "image" || !r.content) {
+        return { error: `not an image message: ${id}` };
+      }
+      referenceImageUrls.push(r.content);
+    }
+  }
 
   const rate = await checkRateLimit(ctx.userId);
   if (!rate.ok) {
@@ -82,7 +124,9 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
   // 1. Provider call
   let img;
   try {
-    img = await generateImage(prompt);
+    img = await generateImage(prompt, {
+      referenceImages: referenceImageUrls,
+    });
   } catch (err: any) {
     log.error(
       {
@@ -90,6 +134,7 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
         userId: ctx.userId,
         roomId: ctx.roomId,
         promptLen: prompt.length,
+        refCount: referenceImageUrls.length,
       },
       "imagegen.provider-error"
     );
@@ -182,7 +227,7 @@ export const imageToolDefs = [
     function: {
       name: "generate_image",
       description:
-        "Generate an image from a text prompt and post it to the room as a separate image message. Call this whenever the user wants to SEE something — not just literal '画' commands. Concrete triggers: (1) explicit drawing — 画一张 / 画一个 / 画个 / 画下 / 画 X / 来张图 / draw / paint / generate; (2) requests to see — 给我看 / 给我看看 / 给我看一下 X / 让我看看 X / 我想看看 X / 想看 X 的样子 / 看一下 X 长啥样 / show me X / let me see X; (3) image references with implied creation — 'X 长什么样 (with no source to look up)' / '搞张 X 的图' / 'X 的画面'. The image appears automatically as its own bubble; DO NOT paste the returned URL into your text reply. Just briefly say what you made (e.g. '画好了，是一只在月亮上跳的猫'). One call per user request unless they ask for variations / 'another one' / '再来一张'.",
+        "Generate an image from a text prompt (and optional reference images) and post it to the room as a separate image message. Call this whenever the user wants to SEE something — not just literal '画' commands. Concrete triggers: (1) explicit drawing — 画一张 / 画一个 / 画个 / 画下 / 画 X / 来张图 / draw / paint / generate; (2) requests to see — 给我看 / 给我看看 / 给我看一下 X / 让我看看 X / 我想看看 X / 想看 X 的样子 / 看一下 X 长啥样 / show me X / let me see X; (3) implied creation — 'X 长什么样 (with no source to look up)' / '搞张 X 的图' / 'X 的画面'; (4) IMAGE-TO-IMAGE / EDIT — 把这张图改成 X / 用这张图当底 / 改成 X 风格 / 加点 X / 把它变成 X / 这两张融合 / use this image as reference / make it look like X — pass the source image's msgId in referenceMessageIds. The image appears automatically as its own bubble; DO NOT paste the returned URL into your text reply. Just briefly say what you made. One call per request unless user asks for '再来一张' / variations.",
       parameters: {
         type: "object",
         required: ["prompt"],
@@ -190,7 +235,13 @@ export const imageToolDefs = [
           prompt: {
             type: "string",
             description:
-              "Concrete English or Chinese description: subject, action, style, mood. Avoid bracketed instructions, markdown, or 'a beautiful image of'. Cap 1000 chars.",
+              "Concrete English or Chinese description of the desired image: subject, action, style, mood. Avoid bracketed instructions, markdown, or 'a beautiful image of'. For image-to-image / edit, describe what to CHANGE or ADD relative to the reference (e.g. '把背景换成赛博朋克霓虹街道,主角不变'). Cap 1000 chars.",
+          },
+          referenceMessageIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional msgIds of image messages in this room to use as visual references for image-to-image generation. Read these from the inline '[图片#N (msgId=xxx)]' markers above. Pass when the user asks to MODIFY an existing image (改 / 加 / 变成 / 用这张), apply a STYLE to it, or FUSE multiple images. 1-4 ids supported; each must be an image message in the SAME room. Omit for plain text-to-image.",
           },
         },
       },
