@@ -68,7 +68,7 @@ export const voiceToolDefs = [
               "audiobook_female_1",
             ],
             description:
-              "Optional override for the agent's default voice (set by the user on the /me page). Pick from the enum to match the moment — e.g. female-shaonv (少女) for a playful / cute reply, male-qn-qingse (青涩少年) for a softer male, female-yujie (御姐) for a confident / sultry tone, audiobook_female_1 (有声书女声) for narration / story-telling, audiobook_male_1 (有声书男声) for serious narration. OMIT this field for normal replies — the user's chosen voice is the right default. Only override when the content has an obvious vocal character mismatch with the default voice (animal-character roleplay / story narrator / specific gender request like '用男声说一遍').",
+              "Optional override for the agent's default voice (set by the user on the /me page). OMIT this field for normal replies — the user's chosen voice is the right default. PASS one of the enum values when ANY of these triggers fire: (a) directional ask — '用男声/女声/温柔的声音/老成的声音' / 'sound like X / use a male voice'; (b) generic switch ask — '换一种声音 / 换个声音 / 换个音色 / 试试别的声音 / 用另一种声音 / try a different voice / switch voice' (pick anything from the enum that fits the message tone, ANY change is the point); (c) roleplay vocal-character mismatch — story narrator (audiobook_male_1 / audiobook_female_1), playing a young female character (female-shaonv 少女), confident female (female-yujie 御姐), older / mature woman (female-chengshu 成熟女性), gentle young male (male-qn-qingse 青涩少年), sharp / professional male (male-qn-jingying 精英青年). For (b) the user just wants a change, so don't agonize — pick any voice that isn't obviously wrong for the content and ship it.",
           },
         },
       },
