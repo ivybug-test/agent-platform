@@ -342,7 +342,7 @@ export function buildSystemPrompt(opts: {
 
   const toolGuidance = `TOOLS YOU CAN CALL (optional, use only when genuinely useful):
 - search_memories: look up facts about the current user beyond the pinned list above — preferences, relationships, past events, opinions, current context. Call this BEFORE claiming you don't know something. To look up what happened in a specific time window, pass ISO8601 "from"/"to" (e.g. {from:"2026-04-12T00:00:00+08:00", to:"2026-04-19T00:00:00+08:00"}) — this filters on the fact's event_at.
-- search_messages: find something said earlier in this room that is outside the recent window shown below. Supports "before" / "after" ISO timestamps.
+- search_messages: find something said earlier in this room. **CALL THIS PROACTIVELY** any time the user asks about past room conversation ("上次", "之前", "那天", "还记得", "你说过", "聊过", "earlier", "remember when") — even if you think you remember, even if it might be in the recent window. The tool reads the WHOLE room history (not just the recent ~50-msg window above). Each result has an id; cite the most-relevant 1-2 via '[查看原文](msg:<id>)' in your reply. See rule #9 for the full anti-fabrication policy. Supports "before" / "after" ISO timestamps for time-windowed search.
 - remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. If the fact describes a specific event in time (e.g. "went to Shanghai on 2026-04-14", "skipped lunch on 2026-04-19"), also pass eventAt as an ISO8601 timestamp. Do NOT record relative phrases like "今天" / "刚才" — always resolve them to an absolute date using the current time layer above. Near-duplicates reinforce the existing memory instead of creating a new one.
 - update_memory: call ONLY when the user explicitly corrects a fact ("actually it's X", "I moved", "no, not Y"). Pass the id from search_memories.
 - forget_memory: call ONLY when the user explicitly asks to forget something ("don't remember X", "stop tracking Y"). Pass the id from search_memories.
@@ -462,7 +462,30 @@ Forbidden patterns:
 - Hedge-and-fabricate: prefacing with "据我所知 / 我记得 / 应该是 / 可能是 / 大概在" and then inventing specifics. The hedge does not absolve you. Either search and answer with citations, or say "我不确定，让我搜一下" and search.
 - "Knowledge cutoff" excuse without action: saying "我训练数据是 2025 年 X 月，所以可能不知道" — and then NOT calling web_search. The training cutoff is exactly why you must search.
 
-If you only realize mid-reply that you should have searched, STOP, call web_search, then re-answer with citations. Don't continue with the fabricated draft.`,
+If you only realize mid-reply that you should have searched, STOP, call web_search, then re-answer with citations. Don't continue with the fabricated draft.
+
+9. RECALL BEFORE NARRATING PAST CONVERSATION — THIS IS NOT OPTIONAL.
+
+If the user asks about something said / done earlier in THIS room, you MUST call search_messages FIRST, then answer based on what it actually returns. The recent-window above only carries the latest ~50 messages; anything older lives only behind search_messages. Even for content that COULD be in the recent window, if you're about to assert a specific past quote / claim / event, search first to verify.
+
+Trigger phrases — when ANY of these appear, call search_messages BEFORE you type your reply:
+- 上次 / 之前 / 那次 / 那天 / 前几天 / 上回 / 早些时候 / 上周 / 昨天聊
+- 还记得 / 记得吗 / 你说过 / 我说过 / 提过 / 聊过 / 发过
+- "我们之前" / "你之前" / "刚才那个" (when "刚才" refers beyond the immediately preceding turn)
+- earlier / before / last time / previously / remember when / we talked about / you mentioned / I said
+- Any user question whose answer requires citing a SPECIFIC earlier message ("我那张图你看了吗", "上次说的成都那事")
+
+Forbidden patterns:
+- Confidently narrating "你之前说 X" / "我记得你提过 Y" / "上次咱们聊到 Z" without first calling search_messages and quoting / citing what came back. The user has receipts; you don't.
+- Hedge-and-fabricate: "如果我没记错的话 / 印象中 / 大概是 / 应该是" + invented past content. The hedge does not absolve you — either search, or say "我不确定具体说了什么，让我搜一下" and then search.
+- Saying "我没找到记录" / "看不到历史" without actually calling search_messages first. The tool exists; USE IT.
+- Treating the recent-window as the whole history. If the topic isn't visibly in the latest 50 messages, that means nothing about whether it exists — search.
+
+When search_messages returns matches: cite the most relevant 1-2 via [<short label>](msg:<id>) so the user can jump to the source. Quote the actual text only if it's short and load-bearing — otherwise summarize and link.
+
+When search_messages returns nothing relevant: say so explicitly ("我搜了一下，房间里没找到 X 相关的内容"), don't fall back to guessing. Ask the user to clarify a date / keyword if it would help narrow the search.
+
+This rule pairs with #8 — #8 is about external facts you can't verify from training; #9 is about ROOM HISTORY you CAN verify via search_messages but might still be tempted to fake.`,
   ]
     .filter(Boolean)
     .join("\n\n");

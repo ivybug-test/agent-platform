@@ -859,7 +859,7 @@ export const memoryToolDefs = [
     function: {
       name: "search_messages",
       description:
-        "Search completed messages in the current room by substring. Use when the user references something said earlier that isn't in the recent window. Each result includes an `id` — to let the user click to that exact row in your reply, cite it as a markdown link with a 'msg:' href: '[查看原文](msg:<id>)'. The frontend renders the link as a clickable chip that scrolls to the message.",
+        "Search completed messages in the current room by substring (whole room, not just the recent-message window in your context). CALL THIS FIRST whenever the user asks about past room conversation — '上次', '之前', '那天', '还记得', '你说过', '聊过', 'earlier', 'remember when', etc — BEFORE you write your reply. Even if you think you remember the content, search to verify; do not paraphrase from imagined recall. Each result includes an `id` — cite the most-relevant 1-2 in your reply via the markdown form '[查看原文](msg:<id>)' (the frontend renders these as clickable chips that scroll to the source). If the search returns nothing relevant, say so explicitly — never fall back to fabricated past quotes.",
       parameters: {
         type: "object",
         required: ["query"],
