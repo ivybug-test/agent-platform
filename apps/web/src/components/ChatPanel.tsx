@@ -296,6 +296,116 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // Populated from the first agent message we see; chat already enforces
   // single-agent-per-room so this is stable.
   const agentIdRef = useRef<string | null>(null);
+
+  // Sentence-level streaming TTS queue. Refs (not state) because we want
+  // synchronous read/write inside the SSE loop and inside playTts onEnd
+  // callbacks without re-renders. The whole queue exists per-agent-reply:
+  // resetTtsQueue() is called on every new sendMessage so a fresh reply
+  // starts at cursor 0.
+  //   ttsCursorRef    — chars of the current agent reply already submitted
+  //                     to MiniMax. Next chunk is content.slice(cursor).
+  //   ttsBusyRef      — true while a /api/tts request is open / playing.
+  //                     Prevents racing playTts() calls (which otherwise
+  //                     abort each other in streaming-player).
+  //   liveAgentTextRef — latest accumulated `content` for the in-flight
+  //                     agent message. Read by onEnd to find the next
+  //                     sentence even though the closure is stale.
+  //   ttsCanceledRef  — flipped true on user interruption so an in-flight
+  //                     onEnd doesn't kick off the next chunk after we
+  //                     stopped.
+  //   voiceModeRef    — fresh access to voiceMode without stale closures.
+  const ttsCursorRef = useRef(0);
+  const ttsBusyRef = useRef(false);
+  const liveAgentTextRef = useRef("");
+  const ttsCanceledRef = useRef(false);
+  const isStreamingRef = useRef(false);
+  const voiceModeRef = useRef(false);
+  useEffect(() => {
+    voiceModeRef.current = voiceMode;
+  }, [voiceMode]);
+
+  const resetTtsQueue = () => {
+    ttsCursorRef.current = 0;
+    ttsBusyRef.current = false;
+    liveAgentTextRef.current = "";
+    ttsCanceledRef.current = false;
+  };
+
+  /** Pull the next playable chunk out of liveAgentTextRef and send to
+   *  TTS if one is available and we're idle. Picks a chunk ending at
+   *  the next sentence boundary (Chinese 。？！ / English .!? / newline);
+   *  on the final flush (or after 80 unbroken chars) takes whatever is
+   *  left. Recurses through whitespace-only chunks so they don't stall
+   *  the queue. */
+  const tryAdvanceTts = (finalFlush = false) => {
+    if (!voiceModeRef.current) return;
+    if (ttsCanceledRef.current) return;
+    if (ttsBusyRef.current) return;
+
+    const full = liveAgentTextRef.current;
+    const remaining = full.slice(ttsCursorRef.current);
+    if (!remaining) return;
+
+    let chunk: string | null = null;
+    const sentMatch = remaining.match(/^([\s\S]*?[。！？!?\n])/);
+    if (sentMatch) {
+      chunk = sentMatch[1];
+    } else if (finalFlush || remaining.length > 80) {
+      chunk = remaining;
+    }
+    if (!chunk) return;
+
+    const cleaned = stripMarkdownForTts(chunk);
+    ttsCursorRef.current += chunk.length;
+
+    if (!cleaned.trim()) {
+      // Pure markdown / whitespace — skip and keep looking.
+      tryAdvanceTts(finalFlush);
+      return;
+    }
+
+    ttsBusyRef.current = true;
+    setIsPlaying(true);
+    setTtsError(null);
+    playTts({
+      body: { text: cleaned, agentId: agentIdRef.current },
+      onEnd: () => {
+        ttsBusyRef.current = false;
+        if (ttsCanceledRef.current) {
+          setIsPlaying(false);
+          return;
+        }
+        // More content may have arrived during playback. Recurse to
+        // grab the next chunk; if there's nothing left and the SSE
+        // stream is already closed, we're truly done.
+        tryAdvanceTts(!isStreamingRef.current);
+        if (!ttsBusyRef.current) setIsPlaying(false);
+      },
+      onError: (err) => {
+        ttsBusyRef.current = false;
+        // Stop the queue — repeating the same upstream error every
+        // sentence would just spam the toast.
+        ttsCanceledRef.current = true;
+        setIsPlaying(false);
+        const raw = err?.message || String(err);
+        if (/abort/i.test(raw)) return;
+        let shown = "TTS 失败";
+        if (/2061|plan/i.test(raw)) {
+          shown = "TTS 套餐未开通或当日配额已满";
+        } else if (/2049|api key|invalid.*key/i.test(raw)) {
+          shown = "TTS 鉴权失败";
+        } else if (/429|rate/i.test(raw)) {
+          shown = "TTS 频率被限，稍后再试";
+        } else if (/502|503|504|timeout/i.test(raw)) {
+          shown = "TTS 服务暂时无响应";
+        } else {
+          shown = "TTS 失败：" + raw.replace(/^.*?:\s*/, "").slice(0, 60);
+        }
+        setTtsError(shown);
+      },
+    });
+  };
+
   useEffect(() => {
     if (!roomId) return;
     try {
@@ -305,8 +415,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       setVoiceMode(false);
     }
     // Switching room always kills playback in flight.
+    ttsCanceledRef.current = true;
     stopAllTts();
     setIsPlaying(false);
+    resetTtsQueue();
   }, [roomId]);
   const toggleVoiceMode = () => {
     setVoiceMode((prev) => {
@@ -317,6 +429,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       // Turning OFF mid-playback aborts immediately. Turning ON does not
       // retroactively play prior messages — only new replies trigger TTS.
       if (!next) {
+        ttsCanceledRef.current = true;
         stopAllTts();
         setIsPlaying(false);
       }
@@ -324,12 +437,14 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     });
   };
   const stopPlayback = () => {
+    ttsCanceledRef.current = true;
     stopAllTts();
     setIsPlaying(false);
   };
   // Cleanup on unmount — drop any audio that was still playing.
   useEffect(() => {
     return () => {
+      ttsCanceledRef.current = true;
       stopAllTts();
     };
   }, []);
@@ -603,8 +718,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
     // User typed → interrupt any in-flight TTS. The agent's about to
     // produce a new reply; the old one is no longer interesting.
+    ttsCanceledRef.current = true;
     stopAllTts();
     setIsPlaying(false);
+    // Reset the per-reply TTS queue so the upcoming agent reply starts
+    // fresh at cursor 0.
+    resetTtsQueue();
+    isStreamingRef.current = true;
 
     // Snapshot the staged quote so user can clear/replace it while we're
     // mid-flight without leaving the optimistic message holding a stale
@@ -714,6 +834,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                 };
                 return updated;
               });
+              // Sentence-level streaming TTS: append to the buffer the
+              // queue reads from, then poke it. If a sentence boundary
+              // landed in this chunk, MiniMax gets the work immediately
+              // instead of waiting for the whole reply to finish.
+              liveAgentTextRef.current += parsed.content;
+              tryAdvanceTts(false);
             }
           } catch {}
         }
@@ -731,56 +857,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       });
     } finally {
       setIsStreaming(false);
-      // Voice mode kicks in after the text is fully streamed. Read the
-      // freshly-completed message off the latest state via setMessages
-      // (closure here would see stale data) and pipe its text to TTS.
-      // We read voiceMode off a fresh snapshot via setVoiceMode so the
-      // user toggling it off mid-stream still suppresses playback.
-      setVoiceMode((vmCurrent) => {
-        if (vmCurrent) {
-          setMessages((prevMsgs) => {
-            const last = prevMsgs[prevMsgs.length - 1];
-            const clean =
-              last && last.senderType === "agent"
-                ? stripMarkdownForTts(last.content)
-                : "";
-            if (clean) {
-              setIsPlaying(true);
-              setTtsError(null);
-              playTts({
-                body: {
-                  text: clean,
-                  agentId: agentIdRef.current,
-                },
-                onEnd: () => setIsPlaying(false),
-                onError: (err) => {
-                  setIsPlaying(false);
-                  // User-facing summary of common provider errors.
-                  // Provider shape: "minimax 2061: token plan not support model"
-                  // / "minimax 2049: invalid api key" / "tts request failed: 502 ..."
-                  const raw = err?.message || String(err);
-                  if (/abort/i.test(raw)) return; // user-initiated, no toast
-                  let shown = "TTS 失败";
-                  if (/2061|plan/i.test(raw)) {
-                    shown = "TTS 套餐未开通或当日配额已满";
-                  } else if (/2049|api key|invalid.*key/i.test(raw)) {
-                    shown = "TTS 鉴权失败";
-                  } else if (/429|rate/i.test(raw)) {
-                    shown = "TTS 频率被限，稍后再试";
-                  } else if (/502|503|504|timeout/i.test(raw)) {
-                    shown = "TTS 服务暂时无响应";
-                  } else {
-                    shown = "TTS 失败：" + raw.replace(/^.*?:\s*/, "").slice(0, 60);
-                  }
-                  setTtsError(shown);
-                },
-              });
-            }
-            return prevMsgs;
-          });
-        }
-        return vmCurrent;
-      });
+      // Mark the SSE stream closed so tryAdvanceTts knows it can flush
+      // any unterminated trailing text (text without a sentence-ending
+      // punctuation), and kick the queue once more in case the last
+      // chunk arrived mid-sentence and is now the entire remainder.
+      isStreamingRef.current = false;
+      tryAdvanceTts(true);
       onChatComplete?.();
     }
   };
