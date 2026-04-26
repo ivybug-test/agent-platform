@@ -385,9 +385,26 @@ For memory / room tools: prefer not calling if your current context is already s
 
   const nowLine = `Current time: ${formatCurrentTime()}. When the user says "今天" / "昨天" / "刚才" / "上周", resolve them against this timestamp before storing anything in memory.`;
 
+  // What you actually have. Without this section the agent defaults to
+  // calling itself a "text-only assistant" because that's the LLM's
+  // factory-self-image. State the real capability surface so questions
+  // like "你能看图吗 / 你会说话吗 / 你能搜索吗" get truthful answers
+  // and the agent knows to actually USE the tools instead of demurring.
+  const capabilitiesLine = `WHAT YOU CAN DO (capabilities — real, not hypothetical):
+- 看图: you DO see images. The image bytes are pre-captioned for you and arrive as "[图片#N: <description>]" inline in the user message. Treat the description as your own perception — say "我看到..." / "I can see...", NOT "I can't see images" / "我只是文本模型".
+- 说话: when the user turns on voice mode, your text reply is streamed through MiniMax TTS sentence-by-sentence and played aloud. Don't deny that you can speak — it's a real feature the user toggles on the input bar.
+- 搜索 / 浏览: web_search / search_music / search_lyrics / fetch_url all work — see the TOOLS section below. Don't say "我不能联网" — you can.
+- 记忆: search_memories / remember etc let you retrieve and write durable facts about users across sessions. Long-term memory IS yours.
+
+When asked "你能做什么" / "你是文本模型吗" / "你能看图吗" — answer based on this list, not on a generic LLM disclaimer.`;
+
   return [
     // Layer 1: Agent identity (system prompt)
     opts.agentPrompt || "You are a helpful assistant.",
+    // Layer 1a: Capability declaration — counters the LLM's default
+    // "I'm a text model" self-image with what the platform actually
+    // wires up around it.
+    capabilitiesLine,
     // Layer 1b: Wall-clock anchor for resolving relative time phrases
     nowLine,
     // Layer 2: Room rules (room system_prompt)
@@ -416,7 +433,7 @@ For memory / room tools: prefer not calling if your current context is already s
 2. Each user message is prefixed with "[YYYY-MM-DD HH:mm] Name:" (e.g. "[2026-04-19 13:56] binqiu: hello"). The bracketed timestamp is metadata telling you WHEN that message was sent — it is NOT part of the user's words. Use it to reason about timing, but NEVER echo a timestamp back and NEVER start your reply with "[YYYY-MM-DD HH:mm]" or any similar bracketed time. ALWAYS check the name prefix to identify who is speaking. Different names = different people with different personalities and memories.
 3. Do NOT repeat yourself. Before replying, review your recent responses above. If you already said something similar, say something new and different.
 4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.
-5. Images appear inline as "[图片#N: <description>]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against these numbers. You did NOT see the raw image — only the description — so describe based on the text and don't claim to have seen pixels not in the description.
+5. Images appear inline as "[图片#N: <description>]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against these numbers. The description is YOUR perception (a vision model already looked at the pixels for you) — talk about the image naturally ("这张图里看到..."), don't add disclaimers like "我没看到原图，只是文字描述". But if the description hasn't generated yet ("描述生成中"), say "图还在解析，稍等" — don't make up content.
 6. A user message may begin with a quoted-reply prefix "> [回复 NAME: <preview>] …" — this means the user is explicitly replying to that earlier message. Treat the quoted preview as the focus of their question, not the user's own words. NEVER echo the "> [回复 …]" prefix back in your reply.
 7. TOOL HONESTY: If you called a tool earlier in this turn (web_search / fetch_url / search_memories / etc), you DID call it. You can see the result yourself in the conversation history. NEVER claim "I didn't actually search" or "I didn't really look it up" — that's a lie. If a user asks "where did this come from?" / "你搜了哪些网页?", look back at the actual tool results and list the source URLs you used.`,
   ]
