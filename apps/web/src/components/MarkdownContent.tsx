@@ -1,12 +1,19 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 /** Render chat-bubble markdown. Sized for the chat-bubble context — headings
  *  shrunk so they don't blow up the line height, tables compacted, code
  *  styled inline, links open in a new tab. Streaming-safe: react-markdown
- *  re-parses every render, partial syntax (unclosed bold, half table) just
- *  renders as raw text until the rest arrives. */
-export default function MarkdownContent({ children }: { children: string }) {
+ *  re-parses partial syntax (unclosed bold, half table) as raw text until
+ *  the rest arrives.
+ *
+ *  Wrapped in React.memo so we only re-parse when `children` (the markdown
+ *  source) actually changes. With 1000+ chat bubbles each holding a
+ *  MarkdownContent, an unmemoed parent (e.g. ChatPanel re-rendering on
+ *  every keystroke) would re-parse every bubble's markdown N times — the
+ *  primary cause of the input-lag-with-history symptom. */
+function MarkdownContentInner({ children }: { children: string }) {
   if (!children) return null;
   return (
     // `break-words` + the explicit anywhere wrap on <a>/<code> below
@@ -141,3 +148,6 @@ export default function MarkdownContent({ children }: { children: string }) {
     </div>
   );
 }
+
+const MarkdownContent = memo(MarkdownContentInner);
+export default MarkdownContent;

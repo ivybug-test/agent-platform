@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { useSession } from "next-auth/react";
 import { io, Socket } from "socket.io-client";
 import { sendImageMessage } from "@/lib/upload-image";
@@ -9,7 +9,6 @@ import MarkdownContent from "./MarkdownContent";
 import {
   play as playTts,
   stopAll as stopAllTts,
-  stripMarkdownForTts,
 } from "@/lib/audio/streaming-player";
 
 /** Pull every http(s) URL out of a message body. Trailing CJK and ASCII
@@ -322,12 +321,207 @@ interface Message {
    *  start with `pending: true` and resolve as the matching tool_result
    *  arrives. */
   toolInvocations?: ToolInvocation[];
+  /** Set when the agent called the speak tool — bubble gets a 🔊 play
+   *  button. Live-streamed in via tool_result; persisted via
+   *  metadata.audio so the button survives reload. */
+  audio?: { text: string; voiceId?: string };
 }
 
 interface ChatPanelProps {
   roomId: string;
   onChatComplete?: () => void;
 }
+
+// -----------------------------------------------------------------------------
+// MessageBubble: extracted out of messages.map and React.memo'd so a
+// keystroke in the input doesn't force 1000+ markdown re-parses. Memo
+// only kicks in when the parent passes stable refs / primitives — see
+// the useCallback wrapping in ChatPanel below.
+// -----------------------------------------------------------------------------
+
+interface MessageBubbleProps {
+  msg: Message;
+  /** Previous message's createdAt — used purely to decide whether to
+   *  draw the day divider. Primitive so memo's shallow compare works. */
+  prevCreatedAt: string | undefined;
+  agentName: string;
+  currentUserId: string | null;
+  /** True when the row's action menu is the currently-open one. Pulled
+   *  out as a primitive so non-open bubbles don't re-render when
+   *  someone else opens theirs. */
+  isMenuOpen: boolean;
+  /** True when this bubble's audio is the one currently playing. */
+  isPlaying: boolean;
+  /** True only for the live-streaming "thinking" panel of the latest
+   *  agent reply (drives the auto-expand + pulsing label). False for
+   *  every other bubble, so they stay memoed. */
+  isStreamingThinking: boolean;
+  onContextMenu: (id: string) => void;
+  onLongPressStart: (id: string) => void;
+  onLongPressCancel: () => void;
+  onJumpToMessage: (id: string) => void;
+  onBeginQuote: (m: Message) => void;
+  onCloseMenu: () => void;
+  onToggleAudio: (id: string, text: string, voiceId?: string) => void;
+}
+
+function MessageBubbleInner({
+  msg,
+  prevCreatedAt,
+  agentName,
+  currentUserId,
+  isMenuOpen,
+  isPlaying,
+  isStreamingThinking,
+  onContextMenu,
+  onLongPressStart,
+  onLongPressCancel,
+  onJumpToMessage,
+  onBeginQuote,
+  onCloseMenu,
+  onToggleAudio,
+}: MessageBubbleProps) {
+  const isMe = msg.senderType === "user" && msg.senderId === currentUserId;
+  const isAgent = msg.senderType === "agent";
+  const displayName = isMe
+    ? "我"
+    : msg.senderName || (isAgent ? agentName : "用户");
+  const bubbleColor = isAgent
+    ? "chat-bubble-neutral"
+    : isMe
+      ? "chat-bubble-primary"
+      : colorForUser(msg.senderId || "unknown");
+  const showDayDivider =
+    msg.createdAt && (!prevCreatedAt || dayKey(prevCreatedAt) !== dayKey(msg.createdAt));
+  const timeLabel = fmtTime(msg.createdAt);
+  // Cache the URL-extraction regex pass — it runs once per content
+  // string change, not on every parent re-render.
+  const urls = useMemo(() => extractUrls(msg.content), [msg.content]);
+
+  return (
+    <div id={msg.id ? `msg-${msg.id}` : undefined} className="rounded transition-shadow">
+      {showDayDivider && (
+        <div className="flex justify-center my-3">
+          <span className="text-[10px] px-2 py-0.5 rounded bg-base-300/60 text-base-content/50">
+            {dayDividerLabel(msg.createdAt)}
+          </span>
+        </div>
+      )}
+      <div className={`chat ${isMe ? "chat-end" : "chat-start"} relative`}>
+        <div className="chat-header text-xs opacity-60 mb-0.5">
+          {displayName}
+          {timeLabel && (
+            <time className="ml-1.5 opacity-60 text-[10px]">{timeLabel}</time>
+          )}
+        </div>
+        <div
+          className={`chat-bubble ${bubbleColor} text-sm select-none [-webkit-touch-callout:none] [-webkit-user-select:none]`}
+          onContextMenu={(e) => {
+            if (!msg.id) return;
+            e.preventDefault();
+            onContextMenu(msg.id);
+          }}
+          onTouchStart={() => msg.id && onLongPressStart(msg.id)}
+          onTouchEnd={onLongPressCancel}
+          onTouchMove={onLongPressCancel}
+          onTouchCancel={onLongPressCancel}
+        >
+          {msg.replyTo && <QuoteBlock reply={msg.replyTo} onJump={onJumpToMessage} />}
+          {isImageMessage(msg) ? (
+            <a href={msg.content} target="_blank" rel="noopener noreferrer">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={msg.content}
+                alt="sent image"
+                className="max-w-[240px] max-h-[320px] rounded object-contain"
+                loading="lazy"
+              />
+            </a>
+          ) : (
+            <>
+              {isAgent && msg.toolInvocations && msg.toolInvocations.length > 0 && (
+                <ToolInvocationsCard invocations={msg.toolInvocations} />
+              )}
+              {msg.reasoning && (
+                <ThinkingPanel
+                  reasoning={msg.reasoning}
+                  reasoningMs={msg.reasoningMs}
+                  streaming={isStreamingThinking}
+                />
+              )}
+              {/* Agent replies are markdown; user messages are plain text
+                  with whitespace preserved so a leading "-" doesn't get
+                  list-bulleted. */}
+              {isAgent ? (
+                <MarkdownContent>{msg.content}</MarkdownContent>
+              ) : (
+                <div className="whitespace-pre-wrap">{msg.content}</div>
+              )}
+              {isAgent && msg.audio && msg.id && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onToggleAudio(msg.id!, msg.audio!.text, msg.audio!.voiceId)
+                  }
+                  className="mt-1.5 flex items-center gap-1.5 px-2.5 h-7 rounded-full text-xs bg-base-100/60 border border-base-content/20 hover:bg-base-content/5 transition-colors select-none"
+                  title={isPlaying ? "停止" : "播放语音"}
+                >
+                  <span aria-hidden>{isPlaying ? "⏹" : "🔊"}</span>
+                  <span>{isPlaying ? "播放中…" : "语音"}</span>
+                </button>
+              )}
+              {urls.map((u) => (
+                <LinkPreviewCard key={u} url={u} />
+              ))}
+            </>
+          )}
+        </div>
+        {isMenuOpen && msg.id && (
+          // Floats above the bubble (iMessage-style reaction bar) so it
+          // doesn't get hidden by anything below.
+          <div
+            className={`absolute z-20 ${isMe ? "right-1" : "left-1"} -top-9 flex bg-base-100 border border-base-300 rounded-full shadow-lg text-xs overflow-hidden divide-x divide-base-300`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
+              onClick={() => onBeginQuote(msg)}
+            >
+              引用
+            </button>
+            {!isImageMessage(msg) && (
+              <button
+                type="button"
+                className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
+                onClick={() => {
+                  navigator.clipboard?.writeText(msg.content).catch(() => {});
+                  onCloseMenu();
+                }}
+              >
+                复制
+              </button>
+            )}
+            {isImageMessage(msg) && (
+              <button
+                type="button"
+                className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
+                onClick={() => {
+                  window.open(msg.content, "_blank", "noopener");
+                  onCloseMenu();
+                }}
+              >
+                新标签打开
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const MessageBubble = memo(MessageBubbleInner);
 
 const bubbleColors = [
   "chat-bubble-primary",
@@ -460,16 +654,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     });
   };
 
-  // Per-room voice mode toggle. When on, every agent reply auto-plays
-  // through TTS after the text stream finishes. User interruptions
-  // (sending new message, toggling off, switching room) abort the
-  // in-flight playback and DO NOT resume — the next agent reply will
-  // spawn a fresh TTS session.
-  const [voiceMode, setVoiceMode] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
-  // Last TTS error — surfaced as a toast above the input dock for ~4s so
-  // failures (no plan, quota exceeded, network blip) don't leave the
-  // user wondering why nothing played.
+  // Click-to-play TTS. The user no longer toggles a "voice mode" — the
+  // agent's `speak` tool decides whether a reply has audio, and the
+  // bubble gets a 🔊 button you can tap. Only one bubble plays at a
+  // time; clicking another (or the playing one) calls stopAll first.
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+  // Last TTS error — surfaced as a toast above the input dock for ~4s.
   const [ttsError, setTtsError] = useState<string | null>(null);
   useEffect(() => {
     if (!ttsError) return;
@@ -481,117 +671,33 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // single-agent-per-room so this is stable.
   const agentIdRef = useRef<string | null>(null);
 
-  // Sentence-level streaming TTS queue. Refs (not state) because we want
-  // synchronous read/write inside the SSE loop and inside playTts onEnd
-  // callbacks without re-renders. The whole queue exists per-agent-reply:
-  // resetTtsQueue() is called on every new sendMessage so a fresh reply
-  // starts at cursor 0.
-  //   ttsCursorRef    — chars of the current agent reply already submitted
-  //                     to MiniMax. Next chunk is content.slice(cursor).
-  //   ttsBusyRef      — true while a /api/tts request is open / playing.
-  //                     Prevents racing playTts() calls (which otherwise
-  //                     abort each other in streaming-player).
-  //   liveAgentTextRef — latest accumulated `content` for the in-flight
-  //                     agent message. Read by onEnd to find the next
-  //                     sentence even though the closure is stale.
-  //   ttsCanceledRef  — flipped true on user interruption so an in-flight
-  //                     onEnd doesn't kick off the next chunk after we
-  //                     stopped.
-  //   voiceModeRef    — fresh access to voiceMode without stale closures.
-  const ttsCursorRef = useRef(0);
-  const ttsBusyRef = useRef(false);
-  const liveAgentTextRef = useRef("");
-  const ttsCanceledRef = useRef(false);
-  const isStreamingRef = useRef(false);
-  const voiceModeRef = useRef(false);
-  // Defensive dup-suppression. Each chunk we ship to MiniMax is
-  // identified by its starting cursor in the agent's reply; if
-  // tryAdvanceTts somehow gets called twice for the same start cursor
-  // (React strict-mode reentry, an SSE proxy duplicating events,
-  // whatever else), we play it once and then ignore the second call.
-  // Cleared per-reply alongside the rest of the queue.
-  const playedCursorsRef = useRef<Set<number>>(new Set());
-  useEffect(() => {
-    voiceModeRef.current = voiceMode;
-  }, [voiceMode]);
-
-  const resetTtsQueue = () => {
-    ttsCursorRef.current = 0;
-    ttsBusyRef.current = false;
-    liveAgentTextRef.current = "";
-    ttsCanceledRef.current = false;
-    playedCursorsRef.current = new Set();
-  };
-
-  /** Pull the next playable chunk out of liveAgentTextRef and send to
-   *  TTS if one is available and we're idle. Picks a chunk ending at
-   *  the next sentence boundary (Chinese 。？！ / English .!? / newline);
-   *  on the final flush (or after 80 unbroken chars) takes whatever is
-   *  left. Recurses through whitespace-only chunks so they don't stall
-   *  the queue. */
-  const tryAdvanceTts = (finalFlush = false) => {
-    if (!voiceModeRef.current) return;
-    if (ttsCanceledRef.current) return;
-    if (ttsBusyRef.current) return;
-
-    const full = liveAgentTextRef.current;
-    const remaining = full.slice(ttsCursorRef.current);
-    if (!remaining) return;
-
-    let chunk: string | null = null;
-    const sentMatch = remaining.match(/^([\s\S]*?[。！？!?\n])/);
-    if (sentMatch) {
-      chunk = sentMatch[1];
-    } else if (finalFlush || remaining.length > 80) {
-      chunk = remaining;
-    }
-    if (!chunk) return;
-
-    const cleaned = stripMarkdownForTts(chunk);
-    const startCursor = ttsCursorRef.current;
-    ttsCursorRef.current += chunk.length;
-
-    if (!cleaned.trim()) {
-      // Pure markdown / whitespace — skip and keep looking.
-      tryAdvanceTts(finalFlush);
+  /** Play (or stop, if it's the one playing) the audio attached to an
+   *  agent message. Replies without `metadata.audio` don't get a button
+   *  in the first place, so callers can assume `text` is set. */
+  const toggleAudioPlayback = useCallback((
+    messageId: string,
+    text: string,
+    voiceId?: string
+  ) => {
+    if (playingMessageId === messageId) {
+      stopAllTts();
+      setPlayingMessageId(null);
       return;
     }
-
-    if (playedCursorsRef.current.has(startCursor)) {
-      // Same chunk already shipped to MiniMax once. This shouldn't
-      // happen — log it so we can see which path is misbehaving.
-      console.warn(
-        "[tts] dup chunk suppressed",
-        { startCursor, len: chunk.length, preview: cleaned.slice(0, 30) }
-      );
-      tryAdvanceTts(finalFlush);
-      return;
-    }
-    playedCursorsRef.current.add(startCursor);
-
-    ttsBusyRef.current = true;
-    setIsPlaying(true);
+    stopAllTts();
+    setPlayingMessageId(messageId);
     setTtsError(null);
     playTts({
-      body: { text: cleaned, agentId: agentIdRef.current },
+      body: {
+        text,
+        agentId: agentIdRef.current,
+        ...(voiceId ? { voiceId } : {}),
+      },
       onEnd: () => {
-        ttsBusyRef.current = false;
-        if (ttsCanceledRef.current) {
-          setIsPlaying(false);
-          return;
-        }
-        // More content may have arrived during playback. Recurse to
-        // grab the next chunk; if there's nothing left and the SSE
-        // stream is already closed, we're truly done.
-        tryAdvanceTts(!isStreamingRef.current);
-        if (!ttsBusyRef.current) setIsPlaying(false);
+        setPlayingMessageId((cur) => (cur === messageId ? null : cur));
       },
       onError: (err) => {
-        ttsBusyRef.current = false;
-        // Stop the queue — repeating the same upstream error every
-        // sentence would just spam the toast.
-        ttsCanceledRef.current = true;
-        setIsPlaying(false);
+        setPlayingMessageId((cur) => (cur === messageId ? null : cur));
         const raw = err?.message || String(err);
         if (/abort/i.test(raw)) return;
         let shown = "TTS 失败";
@@ -609,47 +715,16 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         setTtsError(shown);
       },
     });
-  };
+  }, []);
 
+  // Switching room kills any audio in flight. Same on unmount.
   useEffect(() => {
     if (!roomId) return;
-    try {
-      const saved = localStorage.getItem(`voice-mode-${roomId}`);
-      setVoiceMode(saved === "on");
-    } catch {
-      setVoiceMode(false);
-    }
-    // Switching room always kills playback in flight.
-    ttsCanceledRef.current = true;
     stopAllTts();
-    setIsPlaying(false);
-    resetTtsQueue();
+    setPlayingMessageId(null);
   }, [roomId]);
-  const toggleVoiceMode = () => {
-    setVoiceMode((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(`voice-mode-${roomId}`, next ? "on" : "off");
-      } catch {}
-      // Turning OFF mid-playback aborts immediately. Turning ON does not
-      // retroactively play prior messages — only new replies trigger TTS.
-      if (!next) {
-        ttsCanceledRef.current = true;
-        stopAllTts();
-        setIsPlaying(false);
-      }
-      return next;
-    });
-  };
-  const stopPlayback = () => {
-    ttsCanceledRef.current = true;
-    stopAllTts();
-    setIsPlaying(false);
-  };
-  // Cleanup on unmount — drop any audio that was still playing.
   useEffect(() => {
     return () => {
-      ttsCanceledRef.current = true;
       stopAllTts();
     };
   }, []);
@@ -666,6 +741,11 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // matching tool_result event back to its placeholder invocation. Cleared
   // each time a new agent message starts.
   const pendingToolCallIds = useRef<Map<string, string>>(new Map());
+  // Same keys as pendingToolCallIds but value is the raw args JSON
+  // string. Needed for tools whose args matter at resolution time
+  // (e.g. `speak` reads its `text`); tracked for ALL tool_calls so we
+  // don't have to special-case visibility filters here.
+  const pendingToolArgs = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
     setMessages([]);
@@ -689,6 +769,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           reasoning: r.metadata?.reasoning,
           reasoningMs: r.metadata?.reasoningMs,
           toolInvocations: r.metadata?.toolInvocations,
+          audio: r.metadata?.audio,
           replyToMessageId: r.replyToMessageId ?? null,
           replyTo: r.replyTo ?? null,
         }));
@@ -729,6 +810,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         reasoning: r.metadata?.reasoning,
         reasoningMs: r.metadata?.reasoningMs,
         toolInvocations: r.metadata?.toolInvocations,
+        audio: r.metadata?.audio,
       }));
     for (const m of fetched) {
       if (m.id) seenIds.current.add(m.id);
@@ -766,6 +848,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           reasoning: r.metadata?.reasoning,
           reasoningMs: r.metadata?.reasoningMs,
           toolInvocations: r.metadata?.toolInvocations,
+          audio: r.metadata?.audio,
           replyToMessageId: r.replyToMessageId ?? null,
           replyTo: r.replyTo ?? null,
         }));
@@ -928,15 +1011,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     const text = input.trim();
     if (!text || isStreaming) return;
 
-    // User typed → interrupt any in-flight TTS. The agent's about to
-    // produce a new reply; the old one is no longer interesting.
-    ttsCanceledRef.current = true;
+    // User typed → cut any audio currently playing. They're moving on
+    // and the previous bubble is no longer the focus.
     stopAllTts();
-    setIsPlaying(false);
-    // Reset the per-reply TTS queue so the upcoming agent reply starts
-    // fresh at cursor 0.
-    resetTtsQueue();
-    isStreamingRef.current = true;
+    setPlayingMessageId(null);
 
     // Snapshot the staged quote so user can clear/replace it while we're
     // mid-flight without leaving the optimistic message holding a stale
@@ -975,6 +1053,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
       reasoningStartRef.current = 0;
       pendingToolCallIds.current.clear();
+      pendingToolArgs.current.clear();
       setMessages((prev) => [
         ...prev,
         {
@@ -1047,12 +1126,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                 };
                 return updated;
               });
-              // Sentence-level streaming TTS: append to the buffer the
-              // queue reads from, then poke it. If a sentence boundary
-              // landed in this chunk, MiniMax gets the work immediately
-              // instead of waiting for the whole reply to finish.
-              liveAgentTextRef.current += parsed.content;
-              tryAdvanceTts(false);
             }
             // Tool calls — push an optimistic pending row when the call
             // starts; resolve it in place when the matching tool_result
@@ -1064,8 +1137,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                 name: string;
                 args: string;
               };
+              // Track name + args for ALL tool_calls — `speak` needs
+              // them at tool_result time even though it doesn't show
+              // up in the visible-tools card.
+              pendingToolCallIds.current.set(tc.id, tc.name);
+              pendingToolArgs.current.set(tc.id, tc.args);
               if (VISIBLE_TOOLS.has(tc.name)) {
-                pendingToolCallIds.current.set(tc.id, tc.name);
                 setMessages((prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
@@ -1092,7 +1169,34 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               };
               const knownName =
                 pendingToolCallIds.current.get(tr.id) || tr.name || "";
+              const knownArgs = pendingToolArgs.current.get(tr.id) || "";
               pendingToolCallIds.current.delete(tr.id);
+              pendingToolArgs.current.delete(tr.id);
+              // `speak` resolution: live-attach the audio metadata to
+              // the in-flight agent message so the 🔊 button shows up
+              // right when the tool fires, not only after reload.
+              // stream.ts persists the same blob server-side.
+              if (knownName === "speak" && tr.ok && knownArgs) {
+                try {
+                  const args = JSON.parse(knownArgs);
+                  if (typeof args?.text === "string" && args.text.trim()) {
+                    setMessages((prev) => {
+                      const updated = [...prev];
+                      const last = updated[updated.length - 1];
+                      updated[updated.length - 1] = {
+                        ...last,
+                        audio: {
+                          text: args.text.trim(),
+                          ...(typeof args?.voiceId === "string"
+                            ? { voiceId: args.voiceId }
+                            : {}),
+                        },
+                      };
+                      return updated;
+                    });
+                  }
+                } catch {}
+              }
               if (knownName && VISIBLE_TOOLS.has(knownName)) {
                 setMessages((prev) => {
                   const updated = [...prev];
@@ -1142,12 +1246,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       });
     } finally {
       setIsStreaming(false);
-      // Mark the SSE stream closed so tryAdvanceTts knows it can flush
-      // any unterminated trailing text (text without a sentence-ending
-      // punctuation), and kick the queue once more in case the last
-      // chunk arrived mid-sentence and is now the entire remainder.
-      isStreamingRef.current = false;
-      tryAdvanceTts(true);
       onChatComplete?.();
     }
   };
@@ -1187,26 +1285,29 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     }
   };
 
-  const startLongPress = (m: Message) => {
-    if (!m.id) return;
+  // All handlers below pass through to memoed MessageBubble — they MUST
+  // be stable references (useCallback with [] deps where possible),
+  // otherwise every re-render of ChatPanel would invalidate every
+  // bubble's memo and we're back to 1000 markdown re-parses per
+  // keystroke. Setters from useState and refs are guaranteed stable.
+  const startLongPress = useCallback((id: string) => {
     if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = setTimeout(() => {
-      setMenuForId(m.id!);
-    }, 450);
-  };
-  const cancelLongPress = () => {
+    longPressTimerRef.current = setTimeout(() => setMenuForId(id), 450);
+  }, []);
+  const cancelLongPress = useCallback(() => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
-  };
-  const openMenuViaContextMenu = (e: React.MouseEvent, m: Message) => {
-    if (!m.id) return;
-    e.preventDefault();
-    setMenuForId(m.id);
-  };
+  }, []);
+  const openMenuViaContextMenu = useCallback((id: string) => {
+    setMenuForId(id);
+  }, []);
+  const closeMenu = useCallback(() => {
+    setMenuForId(null);
+  }, []);
 
-  const beginQuote = (m: Message) => {
+  const beginQuote = useCallback((m: Message) => {
     if (!m.id) return;
     setReplyTarget({
       id: m.id,
@@ -1215,17 +1316,16 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       contentType: m.contentType,
     });
     setMenuForId(null);
-    // Focus the input so the user can keep typing immediately.
     requestAnimationFrame(() => textareaRef.current?.focus());
-  };
+  }, []);
 
-  const jumpToMessage = (id: string) => {
+  const jumpToMessage = useCallback((id: string) => {
     const el = document.getElementById(`msg-${id}`);
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("ring-2", "ring-primary/60");
     setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
-  };
+  }, []);
 
   // Click-anywhere closes the open action menu.
   useEffect(() => {
@@ -1256,154 +1356,31 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           </p>
         )}
         {messages.map((msg, i) => {
-          const isMe = msg.senderType === "user" && msg.senderId === currentUserId;
+          // Stable per-message key: prefer the persisted id, fall back
+          // to index for the brief window before the optimistic message
+          // gets a server id. Index-as-key is OK here because we only
+          // ever append/replace-in-place — never reorder.
+          const key = msg.id || `idx-${i}`;
           const isAgent = msg.senderType === "agent";
-          const displayName = isMe
-            ? "我"
-            : msg.senderName || (isAgent ? agentName : "用户");
-          const bubbleColor = isAgent
-            ? "chat-bubble-neutral"
-            : isMe
-              ? "chat-bubble-primary"
-              : colorForUser(msg.senderId || "unknown");
-
-          // Day divider: inserted whenever this message crosses to a new
-          // calendar day in Asia/Shanghai compared to the previous message.
-          const prev = i > 0 ? messages[i - 1] : null;
-          const showDayDivider =
-            msg.createdAt && (!prev || dayKey(prev.createdAt) !== dayKey(msg.createdAt));
-
-          const timeLabel = fmtTime(msg.createdAt);
-
+          const isLast = i === messages.length - 1;
           return (
-            <div key={i} id={msg.id ? `msg-${msg.id}` : undefined} className="rounded transition-shadow">
-              {showDayDivider && (
-                <div className="flex justify-center my-3">
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-base-300/60 text-base-content/50">
-                    {dayDividerLabel(msg.createdAt)}
-                  </span>
-                </div>
-              )}
-              <div className={`chat ${isMe ? "chat-end" : "chat-start"} relative`}>
-                <div className="chat-header text-xs opacity-60 mb-0.5">
-                  {displayName}
-                  {timeLabel && (
-                    <time className="ml-1.5 opacity-60 text-[10px]">
-                      {timeLabel}
-                    </time>
-                  )}
-                </div>
-                <div
-                  className={`chat-bubble ${bubbleColor} text-sm select-none [-webkit-touch-callout:none] [-webkit-user-select:none]`}
-                  onContextMenu={(e) => openMenuViaContextMenu(e, msg)}
-                  onTouchStart={() => startLongPress(msg)}
-                  onTouchEnd={cancelLongPress}
-                  onTouchMove={cancelLongPress}
-                  onTouchCancel={cancelLongPress}
-                >
-                  {msg.replyTo && (
-                    <QuoteBlock reply={msg.replyTo} onJump={jumpToMessage} />
-                  )}
-                  {isImageMessage(msg) ? (
-                    <a href={msg.content} target="_blank" rel="noopener noreferrer">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={msg.content}
-                        alt="sent image"
-                        className="max-w-[240px] max-h-[320px] rounded object-contain"
-                        loading="lazy"
-                      />
-                    </a>
-                  ) : (
-                    <>
-                      {isAgent &&
-                        msg.toolInvocations &&
-                        msg.toolInvocations.length > 0 && (
-                          <ToolInvocationsCard invocations={msg.toolInvocations} />
-                        )}
-                      {msg.reasoning && (
-                        <ThinkingPanel
-                          reasoning={msg.reasoning}
-                          reasoningMs={msg.reasoningMs}
-                          // The latest agent message is "active" while
-                          // the panel itself has reasoning but no answer
-                          // text yet — auto-expand and animate the label.
-                          streaming={
-                            isAgent &&
-                            isStreaming &&
-                            i === messages.length - 1 &&
-                            !msg.content
-                          }
-                        />
-                      )}
-                      {/* Agent replies are markdown (headings, lists,
-                          tables, **bold**, [links]); user messages are
-                          plain text — render them as preserved-whitespace
-                          to avoid bullet-glyph hijacking from a stray "-".
-                          react-markdown handles partial syntax during
-                          streaming gracefully. */}
-                      {isAgent ? (
-                        <MarkdownContent>{msg.content}</MarkdownContent>
-                      ) : (
-                        <div className="whitespace-pre-wrap">{msg.content}</div>
-                      )}
-                      {extractUrls(msg.content).map((u) => (
-                        <LinkPreviewCard key={u} url={u} />
-                      ))}
-                    </>
-                  )}
-                </div>
-                {menuForId && menuForId === msg.id && (
-                  // Floats ABOVE the bubble (iMessage-style reaction bar)
-                  // so it doesn't get hidden by anything below — and so
-                  // that the now-suppressed native long-press menu, if it
-                  // somehow leaks through, can't cover us.
-                  <div
-                    className={`absolute z-20 ${isMe ? "right-1" : "left-1"} -top-9 flex bg-base-100 border border-base-300 rounded-full shadow-lg text-xs overflow-hidden divide-x divide-base-300`}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      type="button"
-                      className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
-                      onClick={() => beginQuote(msg)}
-                    >
-                      引用
-                    </button>
-                    {/* Replacement for native callout's "复制" — only on
-                        text messages; image bubbles don't need it. */}
-                    {!isImageMessage(msg) && (
-                      <button
-                        type="button"
-                        className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
-                        onClick={() => {
-                          navigator.clipboard
-                            ?.writeText(msg.content)
-                            .catch(() => {});
-                          setMenuForId(null);
-                        }}
-                      >
-                        复制
-                      </button>
-                    )}
-                    {/* Replacement for native "在新标签打开 / 保存图片" —
-                        only on image bubbles. window.open keeps it inside
-                        the menu's stopPropagation flow. */}
-                    {isImageMessage(msg) && (
-                      <button
-                        type="button"
-                        className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
-                        onClick={() => {
-                          window.open(msg.content, "_blank", "noopener");
-                          setMenuForId(null);
-                        }}
-                      >
-                        新标签打开
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
+            <MessageBubble
+              key={key}
+              msg={msg}
+              prevCreatedAt={i > 0 ? messages[i - 1].createdAt : undefined}
+              agentName={agentName}
+              currentUserId={currentUserId ?? null}
+              isMenuOpen={!!msg.id && menuForId === msg.id}
+              isPlaying={!!msg.id && playingMessageId === msg.id}
+              isStreamingThinking={isAgent && isStreaming && isLast && !msg.content}
+              onContextMenu={openMenuViaContextMenu}
+              onLongPressStart={startLongPress}
+              onLongPressCancel={cancelLongPress}
+              onJumpToMessage={jumpToMessage}
+              onBeginQuote={beginQuote}
+              onCloseMenu={closeMenu}
+              onToggleAudio={toggleAudioPlayback}
+            />
           );
         })}
         {typingUsers.size > 0 && (
@@ -1503,29 +1480,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               <span aria-hidden>🧠</span>
               <span>深度思考</span>
             </button>
-            <button
-              type="button"
-              onClick={isPlaying ? stopPlayback : toggleVoiceMode}
-              disabled={isStreaming && !voiceMode && !isPlaying}
-              className={`flex items-center gap-1.5 px-3 h-7 rounded-full text-xs transition-colors ${
-                isPlaying
-                  ? "bg-error/20 text-error border border-error/40"
-                  : voiceMode
-                    ? "bg-primary/20 text-primary border border-primary/40"
-                    : "bg-transparent text-base-content/70 border border-base-content/20 hover:bg-base-content/5"
-              }`}
-              title={
-                isPlaying
-                  ? "正在播放 — 点击停止"
-                  : voiceMode
-                    ? "语音模式开 — 点击关闭"
-                    : "语音模式 — 点击开启（agent 回复后自动朗读）"
-              }
-            >
-              <span aria-hidden>{isPlaying ? "⏹" : "🔊"}</span>
-              <span>{isPlaying ? "停止" : "语音"}</span>
-            </button>
-
             <div className="flex-1" />
 
             {/* "+" opens the OS-native file picker. iOS / Android show
