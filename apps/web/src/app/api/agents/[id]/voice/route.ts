@@ -1,7 +1,7 @@
 import "@/lib/env";
 import { NextRequest } from "next/server";
-import { db, agents, roomMembers, rooms } from "@agent-platform/db";
-import { and, eq } from "drizzle-orm";
+import { db, agents } from "@agent-platform/db";
+import { eq } from "drizzle-orm";
 import { getRequiredUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -9,10 +9,11 @@ export const dynamic = "force-dynamic";
 /** PATCH /api/agents/[id]/voice
  *  body: { voiceProvider, voiceId, voiceName } (all optional / nullable)
  *
- *  Authorization: caller must share a room with this agent (room
- *  membership is the project's de-facto "you can configure this agent"
- *  signal — agents aren't owned by individual users). Pass null on any
- *  field to clear it (revert to default voice). */
+ *  Voice is a property of the agent itself (not of any room the agent
+ *  happens to be in), so any authenticated user can configure it — the
+ *  whole product currently runs on a single shared agent and the
+ *  setting is global. Pass null on any field to clear it (revert to
+ *  the active provider's default voice). */
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -21,36 +22,6 @@ export async function PATCH(
   if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id: agentId } = await params;
-
-  // Membership check: caller is in some room that contains this agent.
-  const [share] = await db
-    .select({ roomId: roomMembers.roomId })
-    .from(roomMembers)
-    .innerJoin(rooms, eq(rooms.id, roomMembers.roomId))
-    .where(
-      and(
-        eq(roomMembers.memberId, agentId),
-        eq(roomMembers.memberType, "agent")
-      )
-    )
-    .limit(1);
-  if (!share) {
-    return Response.json({ error: "agent not found" }, { status: 404 });
-  }
-  const [membership] = await db
-    .select()
-    .from(roomMembers)
-    .where(
-      and(
-        eq(roomMembers.roomId, share.roomId),
-        eq(roomMembers.memberId, user.id),
-        eq(roomMembers.memberType, "user")
-      )
-    )
-    .limit(1);
-  if (!membership) {
-    return Response.json({ error: "Forbidden" }, { status: 403 });
-  }
 
   const body = await req.json().catch(() => null);
   const voiceProvider = stringOrNull(body?.voiceProvider);
@@ -67,6 +38,10 @@ export async function PATCH(
       voiceId: agents.voiceId,
       voiceName: agents.voiceName,
     });
+
+  if (!row) {
+    return Response.json({ error: "agent not found" }, { status: 404 });
+  }
 
   return Response.json(row);
 }

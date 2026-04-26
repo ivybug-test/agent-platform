@@ -1,42 +1,21 @@
 import "@/lib/env";
-import { db, agents, roomMembers } from "@agent-platform/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { db, agents } from "@agent-platform/db";
 import { getRequiredUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/agents — list every agent the current user shares a room
- *  with, plus its saved voice settings. Used by the /me page's voice
- *  picker card. Returns an empty list when the user has no rooms or
- *  no agents in any of their rooms. */
+/** GET /api/agents — list every agent in the system + its current voice
+ *  settings. Used by the /me page's voice picker card.
+ *
+ *  Agents are a product-wide resource (this is a single-agent product
+ *  shared across all rooms / all users), so any authenticated user can
+ *  see and configure them. We deliberately don't filter by "rooms I
+ *  share with this agent" — that scoping made the picker disappear
+ *  whenever the agent hadn't been bound to one of the user's rooms,
+ *  even though the voice setting is global. */
 export async function GET() {
   const user = await getRequiredUser();
   if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
-
-  // Two-step: rooms I'm in → agents in those rooms.
-  const myRooms = await db
-    .select({ roomId: roomMembers.roomId })
-    .from(roomMembers)
-    .where(
-      and(
-        eq(roomMembers.memberId, user.id),
-        eq(roomMembers.memberType, "user")
-      )
-    );
-  const roomIds = myRooms.map((r) => r.roomId);
-  if (roomIds.length === 0) return Response.json({ agents: [] });
-
-  const agentMembers = await db
-    .select({ agentId: roomMembers.memberId })
-    .from(roomMembers)
-    .where(
-      and(
-        inArray(roomMembers.roomId, roomIds),
-        eq(roomMembers.memberType, "agent")
-      )
-    );
-  const agentIds = [...new Set(agentMembers.map((a) => a.agentId))];
-  if (agentIds.length === 0) return Response.json({ agents: [] });
 
   const rows = await db
     .select({
@@ -47,7 +26,7 @@ export async function GET() {
       voiceName: agents.voiceName,
     })
     .from(agents)
-    .where(inArray(agents.id, agentIds));
+    .orderBy(agents.createdAt);
 
   return Response.json({ agents: rows });
 }
