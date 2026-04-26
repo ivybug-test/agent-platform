@@ -1414,8 +1414,16 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               // text bubble, which is always at len-1, so the SSE
               // append keeps targeting the text bubble.
               if (knownName === "generate_image" && tr.ok && tr.data) {
+                // tr.data is the FULL handler return value (agent-runtime
+                // wraps it as-is). image-tools.ts returns `{ data: {
+                // messageId, queued, provider } }` — same `{ data: ... }`
+                // wrapping pattern web_search etc use — so the actual
+                // payload lives at tr.data.data, not tr.data.
+                const payload = (tr.data as any)?.data ?? tr.data;
                 const newId =
-                  typeof tr.data.messageId === "string" ? tr.data.messageId : "";
+                  typeof payload?.messageId === "string"
+                    ? payload.messageId
+                    : "";
                 if (newId && !seenIds.current.has(newId)) {
                   seenIds.current.add(newId);
                   // Pull the prompt out of the agent's tool_call args so
