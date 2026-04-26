@@ -1262,6 +1262,32 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               // the in-flight agent message so the 🔊 button shows up
               // right when the tool fires, not only after reload.
               // stream.ts persists the same blob server-side.
+              // generate_image: insert the image bubble as a NEW
+              // message right when tool_result arrives. Doing it here
+              // (rather than waiting for the Redis broadcast →
+              // realtime-gateway → Socket.IO path) means the
+              // originating user always sees their image, even when
+              // the gateway service isn't running. seenIds.add prevents
+              // the eventual Redis echo (if any) from rendering twice.
+              if (knownName === "generate_image" && tr.ok && tr.data) {
+                const url = typeof tr.data.url === "string" ? tr.data.url : "";
+                const newId = typeof tr.data.messageId === "string" ? tr.data.messageId : "";
+                if (url && newId && !seenIds.current.has(newId)) {
+                  seenIds.current.add(newId);
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      id: newId,
+                      senderType: "agent",
+                      senderId: agentIdRef.current,
+                      senderName: agentName,
+                      content: url,
+                      contentType: "image",
+                      createdAt: new Date().toISOString(),
+                    },
+                  ]);
+                }
+              }
               if (knownName === "speak" && tr.ok && knownArgs) {
                 try {
                   const args = JSON.parse(knownArgs);

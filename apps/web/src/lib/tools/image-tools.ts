@@ -203,13 +203,17 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
     "imagegen.complete"
   );
 
-  // The image bubble already renders in the chat. The agent only needs
-  // to know it succeeded so its follow-up text reply ("画好了 — ...") is
-  // grounded in reality. Keep this payload tiny — full URL is fine
-  // because the model occasionally wants to mention "I posted an image
-  // for you" but we DON'T want it inlining the URL as markdown.
+  // Return the message id alongside the URL so the originating client
+  // can render the image bubble directly off the SSE tool_result
+  // event — without depending on realtime-gateway / Socket.IO being
+  // up. (For other room members, the publishRoomEvent above is still
+  // the path; if the gateway isn't running they see it on the next
+  // refresh.) The agent gets the URL too so its follow-up text reply
+  // ("画好了 — ...") is grounded in reality, but the prompt asks it
+  // NOT to inline the URL.
   return {
     data: {
+      messageId: row.id,
       url: upload.url,
       provider: "nanobanana",
       modelText: img.modelText || undefined,
