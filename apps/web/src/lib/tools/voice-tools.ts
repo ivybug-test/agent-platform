@@ -26,7 +26,7 @@ export const voiceToolDefs = [
     function: {
       name: "speak",
       description:
-        "Mark this reply as having a spoken/audio version. Call ONLY when the user explicitly asks you to speak / 用语音回复 / 念一下 / say it aloud. The text you pass is what gets played when the user taps the 🔊 button on your bubble — it can be shorter or more conversational than the visible written reply (e.g. drop markdown, expand abbreviations). After calling this you should still write a normal text reply; the audio is supplementary, not a replacement. One call per reply.",
+        "Mark this reply as having a spoken/audio version. Call this whenever the user wants something heard, NOT just when they say the literal word '语音'. Concrete triggers: (1) explicit voice asks — 用语音 / 念一下 / 说一遍 / 朗读 / say it aloud / read it to me; (2) imitation / sound effects — 学猫叫 / 学狗叫 / 学 X 的声音 / 模仿 X / mimic / impersonate; (3) singing — 唱一段 / 唱首歌 / sing X / hum X; (4) short utterances the user clearly wants vocalised — 说 'hello' / 跟我说 X / 说句话 / say hi; (5) anything where your written reply is itself a sound (\"喵喵喵\", \"汪~\", \"嘿嘿\") — call speak with the same text so the user can actually hear it. When in doubt, prefer calling speak — a play button the user ignores is far less bad than missing one when they wanted to hear it. The text passed becomes the audio when the user taps 🔊; it can be shorter / more conversational than the visible reply (drop markdown, expand abbreviations). After calling, still write a normal text reply (or just the same content as the speak text for short utterances). One call per reply.",
       parameters: {
         type: "object",
         required: ["text"],
