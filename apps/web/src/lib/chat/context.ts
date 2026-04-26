@@ -433,7 +433,7 @@ When asked "你能做什么" / "你是文本模型吗" / "你能看图吗" — a
     // Layer 6: User context + rules
     `IMPORTANT RULES:
 1. The message you are replying to was sent by: ${opts.currentUserName}. Respond ONLY to ${opts.currentUserName}'s latest message. Do NOT confuse them with other users.
-2. Each user message is prefixed with "[YYYY-MM-DD HH:mm] Name:" (e.g. "[2026-04-19 13:56] binqiu: hello"). The bracketed timestamp is metadata telling you WHEN that message was sent — it is NOT part of the user's words. Use it to reason about timing, but NEVER echo a timestamp back and NEVER start your reply with "[YYYY-MM-DD HH:mm]" or any similar bracketed time. ALWAYS check the name prefix to identify who is speaking. Different names = different people with different personalities and memories.
+2. Each user message is prefixed with "[YYYY-MM-DD HH:mm] (msgId=xxx) Name:" (e.g. "[2026-04-19 13:56] (msgId=abc-123-...) binqiu: hello"). The bracketed timestamp is metadata telling you WHEN that message was sent — NOT part of the user's words. The (msgId=...) is the unique id of THIS message — use it when you want to cite this exact message (see CITATION below). NEVER echo a timestamp or msgId in raw form back to the user; never start your reply with any of these bracketed prefixes. ALWAYS check the Name prefix to identify who is speaking. Different names = different people with different personalities and memories.
 3. Do NOT repeat yourself. Before replying, review your recent responses above. If you already said something similar, say something new and different.
 4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.
 5. Images appear inline as "[图片#N (msgId=xxx)]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against N. To know what's IN the image, call read_image with the messageId — only when the user's question depends on its contents. Once read_image returns a caption, talk about the image naturally ("这张图里看到..."), don't add "我只是看了文字描述" disclaimers. If read_image returns { caption: null, status: "processing" }, say "图还在解析，稍等" — don't fabricate. If the user's current message isn't actually about an old image sitting in the recent window, just ignore the marker.
@@ -466,7 +466,11 @@ If you only realize mid-reply that you should have searched, STOP, call web_sear
 
 9. RECALL BEFORE NARRATING PAST CONVERSATION — THIS IS NOT OPTIONAL.
 
-If the user asks about something said / done earlier in THIS room, you MUST call search_messages FIRST, then answer based on what it actually returns. The recent-window above only carries the latest ~50 messages; anything older lives only behind search_messages. Even for content that COULD be in the recent window, if you're about to assert a specific past quote / claim / event, search first to verify.
+You can identify any user message in this room by its msgId. Two sources:
+  (a) Recent window: every user message in the conversation above carries an inline (msgId=...) — you have these ids without doing anything. To cite "the latest message", "上面那张图", "刚才说的那条" — pull the msgId straight from the prefix and use [text](msg:<id>) in your reply.
+  (b) Older than the recent window: call search_messages — it scans the whole room and each result has an "id" field.
+
+If the user asks about something said / done earlier in this room, you MUST verify before narrating. For content that's visibly in the recent window, cite by msgId from the prefix. For content older than the window — or anywhere you're not sure — call search_messages FIRST, then answer based on what it actually returns. Do NOT invent past quotes; do NOT pretend a topic wasn't discussed if you didn't search.
 
 Trigger phrases — when ANY of these appear, call search_messages BEFORE you type your reply:
 - 上次 / 之前 / 那次 / 那天 / 前几天 / 上回 / 早些时候 / 上周 / 昨天聊
@@ -677,6 +681,12 @@ export function buildLLMMessages(
           : "";
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
         const qPrefix = m.replyToMessageId ? quotePrefix(m.replyToMessageId) : "";
+        // Inline (msgId=...) on every user message so the agent can
+        // cite recent rows directly via [text](msg:<id>) without first
+        // calling search_messages — which requires a query string and
+        // can't answer "the latest message" anyway. Image markers
+        // already carried the id; this generalizes the pattern.
+        const idPrefix = m.id ? `(msgId=${m.id}) ` : "";
         if (m.contentType === "image" && m.content) {
           // Image bytes never reach the chat LLM. Inline a bare marker
           // with the message id; the agent calls `read_image(messageId)`
@@ -688,14 +698,19 @@ export function buildLLMMessages(
           const visionText = `[图片#${imageSeq} (msgId=${m.id})]`;
           return {
             role: "user" as const,
-            content: `${qPrefix}${tsPrefix}${name}: ${visionText}` as LLMMessageContent,
+            content: `${qPrefix}${tsPrefix}${idPrefix}${name}: ${visionText}` as LLMMessageContent,
           };
         }
         return {
           role: "user" as const,
-          content: `${qPrefix}${tsPrefix}${name}: ${m.content}` as LLMMessageContent,
+          content: `${qPrefix}${tsPrefix}${idPrefix}${name}: ${m.content}` as LLMMessageContent,
         };
       }
+      // Agent's own past replies stay clean — leading metadata on an
+      // assistant turn is the kind of thing the LLM mimics in its next
+      // reply ("(msgId=...) ..." would leak into output). When user
+      // asks about something the agent said, search_messages can find
+      // it (it scans the whole room, agent-included).
       return {
         role: "assistant" as const,
         content: m.content as LLMMessageContent,

@@ -1041,6 +1041,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     stopAllTts();
     setPlayingMessageId(null);
 
+    // Force a snap-to-bottom for the upcoming optimistic message + agent
+    // reply, even if the user had scrolled up (e.g. clicked a citation
+    // chip earlier). Pressing send is an unambiguous "I'm engaging with
+    // the latest", so the auto-scroll gate flips back on regardless of
+    // current scroll position.
+    shouldAutoScroll.current = true;
+
     // Snapshot the staged quote so user can clear/replace it while we're
     // mid-flight without leaving the optimistic message holding a stale
     // reference.
@@ -1298,6 +1305,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       return;
     }
     setIsUploading(true);
+    // Same scroll-snap reasoning as sendMessage — engaging with send
+    // means we want to see the new bubble regardless of current
+    // scroll position.
+    shouldAutoScroll.current = true;
     const stagedReply = replyTarget;
     // Mint the id up-front so the optimistic image bubble has it from
     // first paint — keeps long-press / quote / scroll-to-jump working
@@ -1379,29 +1390,55 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
    *  When the target hasn't been loaded yet (agent cited a message
    *  via search_messages that's older than the recent window we
    *  loaded), keep calling loadOlderMessages until it appears OR
-   *  we've hit the top of the room. Cap attempts so a bogus id
-   *  doesn't loop forever. */
+   *  we've hit the top of the room. */
   const jumpToMessage = useCallback(async (id: string) => {
     if (!id) return;
-    const tryHighlight = (): boolean => {
-      const el = document.getElementById(`msg-${id}`);
-      if (!el) return false;
+    // The auto-scroll-to-bottom effect would otherwise fight us:
+    // loadOlderMessages mutates messages, the effect runs, sees
+    // shouldAutoScroll=true (when user happened to be near bottom
+    // before clicking the chip) and yanks us back down. Suppress for
+    // the duration of this jump; if the user is already near bottom
+    // after the jump completes, the scroll handler will flip it back
+    // on the next scroll event.
+    shouldAutoScroll.current = false;
+
+    const highlight = (el: HTMLElement) => {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
       el.classList.add("ring-2", "ring-primary/60");
       setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
-      return true;
     };
-    if (tryHighlight()) return;
-    // Slow path: load older pages until found or room start reached.
-    // 12 batches × 50 msgs = 600 msgs of headroom — more than enough
-    // for any practical citation, while bounded so a bad id can't
-    // pin the UI loading forever.
+
+    // Poll the DOM for up to `ms` waiting for the target id to appear.
+    // One rAF after setMessages isn't always enough — concurrent-mode
+    // commits can land on a later frame, and a fresh batch of 50
+    // bubbles takes real time to paint with React.memo'd children.
+    const waitForEl = async (ms: number): Promise<HTMLElement | null> => {
+      const start = performance.now();
+      while (performance.now() - start < ms) {
+        const el = document.getElementById(`msg-${id}`);
+        if (el) return el;
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      }
+      return null;
+    };
+
+    // Fast path — already loaded.
+    const fast = document.getElementById(`msg-${id}`);
+    if (fast) {
+      highlight(fast);
+      return;
+    }
+    // Slow path. Each iteration: load older page, give the DOM up to
+    // 500ms to commit + paint, retry. Cap at 12 batches (≈600 msgs)
+    // so a bogus id can't pin the UI loading forever.
     for (let i = 0; i < 12; i++) {
       if (!hasMoreRef.current) break;
       await loadOlderRef.current();
-      // Wait one paint so the new bubbles are in the DOM.
-      await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      if (tryHighlight()) return;
+      const el = await waitForEl(500);
+      if (el) {
+        highlight(el);
+        return;
+      }
     }
     console.warn("[jump-to-message] not found in this room:", id);
   }, []);
