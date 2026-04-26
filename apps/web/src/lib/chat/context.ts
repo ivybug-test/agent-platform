@@ -397,6 +397,7 @@ For memory / room tools: prefer not calling if your current context is already s
 - 说话: you can attach a spoken/audio version to your reply via the speak(text) tool. Call this when the user explicitly asks you to speak / 用语音 / 念一下 / say it aloud. The visible text reply still goes out as normal; the user gets a 🔊 button on your bubble that plays your speak text when tapped. Don't say "我不能说话" — you can.
 - 搜索 / 浏览: web_search / search_music / search_lyrics / fetch_url all work — see the TOOLS section below. Don't say "我不能联网" — you can.
 - 记忆: search_memories / remember etc let you retrieve and write durable facts about users across sessions. Long-term memory IS yours.
+- 引用聊天记录: when you reference a specific earlier message (via search_messages, or because the user quoted one), embed it as a markdown link with a "msg:" href: '[查看原文](msg:<messageId>)' or '[Sasha 上次说的那句](msg:<messageId>)'. The user clicks → page scrolls + highlights that exact row. Use this for "你之前说过 X" / "你那天发的图" — anywhere a citation helps the user see the source. Don't dump raw msgIds at the user otherwise.
 
 When asked "你能做什么" / "你是文本模型吗" / "你能看图吗" — answer based on this list, not on a generic LLM disclaimer.`;
 
@@ -436,8 +437,14 @@ When asked "你能做什么" / "你是文本模型吗" / "你能看图吗" — a
 3. Do NOT repeat yourself. Before replying, review your recent responses above. If you already said something similar, say something new and different.
 4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.
 5. Images appear inline as "[图片#N (msgId=xxx)]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against N. To know what's IN the image, call read_image with the messageId — only when the user's question depends on its contents. Once read_image returns a caption, talk about the image naturally ("这张图里看到..."), don't add "我只是看了文字描述" disclaimers. If read_image returns { caption: null, status: "processing" }, say "图还在解析，稍等" — don't fabricate. If the user's current message isn't actually about an old image sitting in the recent window, just ignore the marker.
-6. A user message may begin with a quoted-reply prefix "> [回复 NAME: <preview>] …" — this means the user is explicitly replying to that earlier message. Treat the quoted preview as the focus of their question, not the user's own words. NEVER echo the "> [回复 …]" prefix back in your reply.
+6. A user message may begin with a quoted-reply prefix "> [回复 NAME (msgId=xxx): <preview>] …" — this means the user is explicitly replying to that earlier message. Treat the quoted preview as the focus of their question, not the user's own words. The msgId in the prefix is the exact id of the quoted message; you may pass it to read_image (if the quote was an image) or cite it in your reply (see CITATION below). NEVER echo the "> [回复 …]" prefix back verbatim.
 7. TOOL HONESTY: If you called a tool earlier in this turn (web_search / fetch_url / search_memories / etc), you DID call it. You can see the result yourself in the conversation history. NEVER claim "I didn't actually search" or "I didn't really look it up" — that's a lie. If a user asks "where did this come from?" / "你搜了哪些网页?", look back at the actual tool results and list the source URLs you used.
+
+CITATION (linking back to earlier messages): when you tell the user about something they said earlier — pulled in via search_messages, referenced from a quote prefix's msgId, or recalled from context — embed it as a markdown link with the special "msg:" href: '[查看原文](msg:<messageId>)'. Examples:
+  - "你上次说过 [想去成都](msg:abc-123-...)"
+  - "群里那张图 [图片#3](msg:def-456-...) 我看过了"
+  - "刚才 [Sasha 提的那句](msg:ghi-789-...) 我同意"
+The frontend renders these as clickable chips that scroll the page to the exact row. NEVER paste a bare 'msg:abc-123' or a UUID at the user — always wrap it in markdown link form. Cite at MOST the most-relevant 1-2 messages; flooding the reply with citations defeats the purpose.
 
 8. SEARCH BEFORE ANSWERING TIME-SENSITIVE QUESTIONS — THIS IS NOT OPTIONAL.
 
@@ -618,17 +625,19 @@ export function buildLLMMessages(
         : "User";
     let preview: string;
     if (target.contentType === "image") {
-      // Stay consistent with the inline marker: identify by N + msgId,
-      // don't leak the caption into the quote chip. If the agent
-      // actually needs to know what's in the quoted image it can call
-      // read_image with this messageId.
+      // Stay consistent with the inline marker: identify by N + msgId.
+      // Image quotes carry no caption — agent calls read_image if it
+      // wants to know what's in there.
       const seq = imageSeqByMessageId.get(replyId);
-      preview = `图片#${seq ?? "?"} (msgId=${replyId})`;
+      preview = `图片#${seq ?? "?"}`;
     } else {
       const oneLine = (target.content || "").replace(/\s+/g, " ").trim();
       preview = oneLine.length > 80 ? oneLine.slice(0, 80) + "…" : oneLine;
     }
-    return `> [回复 ${targetName}: ${preview}]\n`;
+    // Always include msgId so the agent can unambiguously tie the
+    // quote back to a specific row (and cite it via [text](msg:<id>)
+    // in its reply if useful).
+    return `> [回复 ${targetName} (msgId=${replyId}): ${preview}]\n`;
   }
 
   return [

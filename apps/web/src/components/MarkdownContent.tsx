@@ -63,17 +63,47 @@ function MarkdownContentInner({ children }: { children: string }) {
               {children}
             </li>
           ),
-          a: ({ children, href, ...p }) => (
-            <a
-              className="link link-primary break-all"
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              {...p}
-            >
-              {children}
-            </a>
-          ),
+          a: ({ children, href, ...p }) => {
+            // Special "msg:<id>" href — agent's way of citing an earlier
+            // message in the room. Render as a clickable chip that
+            // scrolls + briefly highlights the target row instead of a
+            // plain link. Self-contained so MarkdownContent stays
+            // memo-safe (no callbacks passed in).
+            if (href?.startsWith("msg:")) {
+              const targetId = href.slice(4);
+              return (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 mx-0.5 rounded bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors text-xs align-baseline"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    const el = document.getElementById(`msg-${targetId}`);
+                    if (!el) return;
+                    el.scrollIntoView({ behavior: "smooth", block: "center" });
+                    el.classList.add("ring-2", "ring-primary/60");
+                    setTimeout(
+                      () => el.classList.remove("ring-2", "ring-primary/60"),
+                      1200
+                    );
+                  }}
+                >
+                  <span aria-hidden>↗</span>
+                  <span>{children}</span>
+                </button>
+              );
+            }
+            return (
+              <a
+                className="link link-primary break-all"
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                {...p}
+              >
+                {children}
+              </a>
+            );
+          },
           code: ({ children, className, ...p }) => {
             const isBlock = /language-/.test(className || "");
             if (isBlock) {

@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
   const user = await getRequiredUser();
   if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { roomId, imageUrl, replyToMessageId } = await req.json();
+  const { roomId, imageUrl, replyToMessageId, messageId } = await req.json();
   if (!roomId || !imageUrl) {
     return Response.json({ error: "Missing roomId or imageUrl" }, { status: 400 });
   }
@@ -26,6 +26,11 @@ export async function POST(req: NextRequest) {
     typeof replyToMessageId === "string" && replyToMessageId.length > 0
       ? replyToMessageId
       : null;
+  // Optional client-generated UUID — same purpose as in /api/chat: lets
+  // the optimistic image bubble keep the same id the server persists.
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const clientMsgId =
+    typeof messageId === "string" && uuidRe.test(messageId) ? messageId : undefined;
 
   // Sanity-check URL: must be https, must point at a cos.myqcloud.com host.
   try {
@@ -57,6 +62,7 @@ export async function POST(req: NextRequest) {
   const [row] = await db
     .insert(messages)
     .values({
+      ...(clientMsgId ? { id: clientMsgId } : {}),
       roomId,
       senderType: "user",
       senderId: user.id,

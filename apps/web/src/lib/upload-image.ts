@@ -113,11 +113,15 @@ export interface ImageMessageResult {
   } | null;
 }
 
-/** End-to-end: compress → upload to COS → persist image message on server. */
+/** End-to-end: compress → upload to COS → persist image message on server.
+ *  Pass `messageId` to bind the optimistic bubble's id to the server-
+ *  side row — without it the optimistic bubble has no id (long-press /
+ *  quote / scroll-to don't work until refresh). */
 export async function sendImageMessage(
   file: File,
   roomId: string,
-  replyToMessageId?: string | null
+  replyToMessageId?: string | null,
+  messageId?: string
 ): Promise<ImageMessageResult> {
   if (!file.type.startsWith("image/")) throw new Error("not an image");
   if (file.size > MAX_UPLOAD_BYTES) throw new Error("file too large");
@@ -128,7 +132,12 @@ export async function sendImageMessage(
   const res = await fetch("/api/messages/image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ roomId, imageUrl, replyToMessageId: replyToMessageId ?? null }),
+    body: JSON.stringify({
+      roomId,
+      imageUrl,
+      replyToMessageId: replyToMessageId ?? null,
+      ...(messageId ? { messageId } : {}),
+    }),
   });
   if (!res.ok) throw new Error(`persist failed: ${res.status}`);
   const data = await res.json();

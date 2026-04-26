@@ -43,10 +43,28 @@ export async function POST(req: NextRequest) {
   const user = await getRequiredUser();
   if (!user) return new Response("Unauthorized", { status: 401 });
 
-  const { roomId, content, model, replyToMessageId } = await req.json();
+  const {
+    roomId,
+    content,
+    model,
+    replyToMessageId,
+    // Client-generated UUIDs. Letting the browser mint ids up-front
+    // means the optimistic message it just rendered already has the
+    // same id the server will persist — long-press / quote / scroll-to
+    // all work BEFORE the round-trip lands. We accept whatever uuid
+    // shape the client sends; if absent or malformed, fall back to
+    // server-side defaultRandom().
+    userMessageId,
+    agentMessageId,
+  } = await req.json();
   if (!roomId || !content) {
     return new Response("Missing roomId or content", { status: 400 });
   }
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const acceptId = (v: unknown): string | undefined =>
+    typeof v === "string" && uuidRe.test(v) ? v : undefined;
+  const userMsgId = acceptId(userMessageId);
+  const agentMsgIdFromClient = acceptId(agentMessageId);
   // Frontend sends "flash" | "pro" — anything else collapses to flash so a
   // stale client cookie can't poke at unknown variants.
   const mode: "flash" | "pro" = model === "pro" ? "pro" : "flash";
@@ -75,6 +93,7 @@ export async function POST(req: NextRequest) {
 
   // Save user message
   const [userMsg] = await db.insert(messages).values({
+    ...(userMsgId ? { id: userMsgId } : {}),
     roomId,
     senderType: "user",
     senderId: user.id,
@@ -184,6 +203,7 @@ export async function POST(req: NextRequest) {
   const [agentMsg] = await db
     .insert(messages)
     .values({
+      ...(agentMsgIdFromClient ? { id: agentMsgIdFromClient } : {}),
       roomId,
       senderType: "agent",
       senderId: agent?.id,

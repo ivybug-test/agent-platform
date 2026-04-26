@@ -859,7 +859,7 @@ export const memoryToolDefs = [
     function: {
       name: "search_messages",
       description:
-        "Search completed messages in the current room by substring. Use when the user references something said earlier that isn't in the recent window.",
+        "Search completed messages in the current room by substring. Use when the user references something said earlier that isn't in the recent window. Each result includes an `id` — to let the user click to that exact row in your reply, cite it as a markdown link with a 'msg:' href: '[查看原文](msg:<id>)'. The frontend renders the link as a clickable chip that scrolls to the message.",
       parameters: {
         type: "object",
         required: ["query"],

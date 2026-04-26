@@ -1021,7 +1021,18 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     // reference.
     const stagedReply = replyTarget;
 
+    // Mint UUIDs for the user message AND the agent placeholder upfront,
+    // and tell the server to use them. Without this the optimistic
+    // bubbles have no id until refresh — which means long-press / quote
+    // / scroll-to-jump are all broken on freshly-sent messages. seenIds
+    // tracks them too so the Redis echo doesn't double-render.
+    const userMessageId = crypto.randomUUID();
+    const agentMessageId = crypto.randomUUID();
+    seenIds.current.add(userMessageId);
+    seenIds.current.add(agentMessageId);
+
     const userMsg: Message = {
+      id: userMessageId,
       senderType: "user",
       senderId: currentUserId || null,
       senderName: session?.user?.name || "You",
@@ -1044,6 +1055,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           content: text,
           model,
           replyToMessageId: stagedReply?.id ?? null,
+          userMessageId,
+          agentMessageId,
         }),
       });
 
@@ -1057,6 +1070,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       setMessages((prev) => [
         ...prev,
         {
+          id: agentMessageId,
           senderType: "agent",
           senderId: null,
           senderName: agentName,
@@ -1260,9 +1274,13 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     }
     setIsUploading(true);
     const stagedReply = replyTarget;
+    // Mint the id up-front so the optimistic image bubble has it from
+    // first paint — keeps long-press / quote / scroll-to-jump working
+    // without waiting for the server round-trip.
+    const messageId = crypto.randomUUID();
+    seenIds.current.add(messageId);
     try {
-      const msg = await sendImageMessage(file, roomId, stagedReply?.id ?? null);
-      seenIds.current.add(msg.id);
+      const msg = await sendImageMessage(file, roomId, stagedReply?.id ?? null, messageId);
       setReplyTarget(null);
       setMessages((prev) => [
         ...prev,
