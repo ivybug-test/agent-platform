@@ -557,7 +557,12 @@ interface ContextMessage {
   content: string;
   contentType?: string | null;
   createdAt?: Date | string | null;
-  metadata?: { vision?: { caption?: string } } | null;
+  metadata?: {
+    vision?: { caption?: string };
+    /** Set when the agent called the speak tool. Drives rule #10's
+     *  retroactive [平台备注] detection of fake-tool-use claims. */
+    audio?: { text: string; voiceId?: string };
+  } | null;
   replyToMessageId?: string | null;
 }
 
