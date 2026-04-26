@@ -100,7 +100,27 @@ export function play(opts: PlayOptions): PlayHandle {
   audio.addEventListener("ended", () => cleanup(true));
   audio.addEventListener("error", () => {
     if (stopped) return;
-    opts.onError?.(new Error("audio element error"));
+    // MediaError.code values: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED.
+    // ABORTED fires when something tore down the element mid-play (e.g. our
+    // own cleanup raced ahead of this listener) — that's not a real error,
+    // suppress it instead of toasting. The other three are genuine and we
+    // surface the code + browser-supplied message so the toast tells us
+    // whether this is decode / network / format. */
+    const me = audio.error;
+    if (me && me.code === MediaError.MEDIA_ERR_ABORTED) {
+      cleanup(false);
+      return;
+    }
+    const codeName =
+      me?.code === MediaError.MEDIA_ERR_NETWORK
+        ? "NETWORK"
+        : me?.code === MediaError.MEDIA_ERR_DECODE
+          ? "DECODE"
+          : me?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+            ? "SRC_NOT_SUPPORTED"
+            : `code=${me?.code ?? "?"}`;
+    const detail = me?.message ? ` ${me.message}` : "";
+    opts.onError?.(new Error(`audio element error (${codeName})${detail}`));
     cleanup(false);
   });
 
