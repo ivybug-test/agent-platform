@@ -74,10 +74,13 @@ function MarkdownContentInner({ children }: { children: string }) {
           ),
           a: ({ children, href, ...p }) => {
             // Special "msg:<id>" href — agent's way of citing an earlier
-            // message in the room. Render as a clickable chip that
-            // scrolls + briefly highlights the target row instead of a
-            // plain link. Self-contained so MarkdownContent stays
-            // memo-safe (no callbacks passed in).
+            // message in the room. Render as a clickable chip that asks
+            // ChatPanel to scroll + highlight the target row. We
+            // dispatch a window event instead of taking a callback prop
+            // so MarkdownContent stays self-contained (memo-stable).
+            // ChatPanel listens and runs the load-older-and-retry loop
+            // — citations from search_messages may point at messages
+            // outside the recent window.
             if (href?.startsWith("msg:")) {
               const targetId = href.slice(4);
               return (
@@ -86,13 +89,10 @@ function MarkdownContentInner({ children }: { children: string }) {
                   className="inline-flex items-center gap-0.5 px-1.5 py-0.5 mx-0.5 rounded bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors text-xs align-baseline"
                   onClick={(e) => {
                     e.preventDefault();
-                    const el = document.getElementById(`msg-${targetId}`);
-                    if (!el) return;
-                    el.scrollIntoView({ behavior: "smooth", block: "center" });
-                    el.classList.add("ring-2", "ring-primary/60");
-                    setTimeout(
-                      () => el.classList.remove("ring-2", "ring-primary/60"),
-                      1200
+                    window.dispatchEvent(
+                      new CustomEvent("agentplatform:jump-to-message", {
+                        detail: targetId,
+                      })
                     );
                   }}
                 >

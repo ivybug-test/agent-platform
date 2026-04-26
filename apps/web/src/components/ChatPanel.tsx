@@ -1362,13 +1362,63 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, []);
 
-  const jumpToMessage = useCallback((id: string) => {
-    const el = document.getElementById(`msg-${id}`);
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    el.classList.add("ring-2", "ring-primary/60");
-    setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
+  // Refs over hasMore / loadOlderMessages because jumpToMessage's
+  // useCallback has [] deps (we want a stable reference for memo
+  // efficiency and DOM event listeners) but its inner loop has to
+  // observe FRESH values across awaits.
+  const hasMoreRef = useRef(false);
+  const loadOlderRef = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    hasMoreRef.current = hasMore;
+  }, [hasMore]);
+  useEffect(() => {
+    loadOlderRef.current = loadOlderMessages;
+  }, [loadOlderMessages]);
+
+  /** Scroll to the message DOM node and briefly ring-highlight it.
+   *  When the target hasn't been loaded yet (agent cited a message
+   *  via search_messages that's older than the recent window we
+   *  loaded), keep calling loadOlderMessages until it appears OR
+   *  we've hit the top of the room. Cap attempts so a bogus id
+   *  doesn't loop forever. */
+  const jumpToMessage = useCallback(async (id: string) => {
+    if (!id) return;
+    const tryHighlight = (): boolean => {
+      const el = document.getElementById(`msg-${id}`);
+      if (!el) return false;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-primary/60");
+      setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
+      return true;
+    };
+    if (tryHighlight()) return;
+    // Slow path: load older pages until found or room start reached.
+    // 12 batches × 50 msgs = 600 msgs of headroom — more than enough
+    // for any practical citation, while bounded so a bad id can't
+    // pin the UI loading forever.
+    for (let i = 0; i < 12; i++) {
+      if (!hasMoreRef.current) break;
+      await loadOlderRef.current();
+      // Wait one paint so the new bubbles are in the DOM.
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      if (tryHighlight()) return;
+    }
+    console.warn("[jump-to-message] not found in this room:", id);
   }, []);
+
+  // Citation chips inside MarkdownContent live outside the React tree
+  // we control directly (custom <a> renderer). They dispatch a window
+  // event on click instead of calling props — keeps MarkdownContent
+  // memo-stable. Listener funnels into the same jumpToMessage path
+  // QuoteBlock uses, so chips and quotes share the load-older retry.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const e = ev as CustomEvent<string>;
+      if (typeof e.detail === "string") jumpToMessage(e.detail);
+    };
+    window.addEventListener("agentplatform:jump-to-message", handler);
+    return () => window.removeEventListener("agentplatform:jump-to-message", handler);
+  }, [jumpToMessage]);
 
   // Click-anywhere closes the open action menu.
   useEffect(() => {
