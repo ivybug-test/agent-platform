@@ -107,11 +107,18 @@ export const minimaxProvider: TTSProvider = {
 /** Decode MiniMax's SSE event stream into raw mp3 bytes.
  *
  *  Each SSE chunk looks like `data: {"data":{"audio":"<hex>"},...}\n\n`.
- *  We pull `audio` (hex string), convert to bytes, and emit. The final
- *  event has `is_final: true` and no audio. */
+ *  We pull `audio` (hex string), convert to bytes, and emit.
+ *
+ *  ⚠️ MiniMax's final event has `is_final: true` AND repeats the full
+ *  audio payload in `data.audio` (with a fresh ID3 header — the whole
+ *  thing, not a delta). Earlier docs claimed it had no audio; reality
+ *  disagrees. If we forward those bytes, the audio plays through twice
+ *  — once via the streamed chunks, once via the final dump. Skip
+ *  whatever audio comes attached to is_final. */
 function makeSseAudioTransformer(): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   let buffer = "";
+  let finalSeen = false;
   return new TransformStream({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -126,6 +133,14 @@ function makeSseAudioTransformer(): TransformStream<Uint8Array, Uint8Array> {
             data?: { audio?: string };
             is_final?: boolean;
           };
+          // Once we've seen a final marker, drop any subsequent audio
+          // payloads — they're the full re-dump that would replay the
+          // whole utterance.
+          if (finalSeen) continue;
+          if (evt.is_final) {
+            finalSeen = true;
+            continue;
+          }
           const hex = evt.data?.audio;
           if (hex) {
             const bytes = hexToBytes(hex);
