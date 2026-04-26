@@ -350,11 +350,55 @@ interface Message {
    *  button. Live-streamed in via tool_result; persisted via
    *  metadata.audio so the button survives reload. */
   audio?: { text: string; voiceId?: string };
+  /** Async generate_image placeholder state. Drives the "正在生成"
+   *  bubble's prompt + phase + elapsed-time UI. Cleared (or ignored
+   *  via contentType swap) once the BG task swaps the message to
+   *  contentType="image" with a real URL in content. */
+  imageGen?: { prompt?: string; phase?: string; startedAt?: string };
 }
 
 interface ChatPanelProps {
   roomId: string;
   onChatComplete?: () => void;
+}
+
+/** Spinner card shown while async generate_image is in flight. Reads
+ *  the phase / prompt from imageGen metadata; ticks an elapsed-second
+ *  counter once a second so the user can see something is moving even
+ *  if phase updates from the server are sparse / blocked by realtime-
+ *  gateway being down. */
+function ImagePendingPlaceholder({
+  prompt,
+  phase,
+  startedAt,
+}: {
+  prompt?: string;
+  phase?: string;
+  startedAt?: string;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = startedAt ? new Date(startedAt).getTime() : Date.now();
+    const tick = () =>
+      setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+  return (
+    <div className="flex flex-col gap-1.5 w-[220px] min-h-[140px] rounded bg-base-100/40 border border-dashed border-base-content/30 px-3 py-2.5 text-xs opacity-90">
+      <div className="flex items-center gap-2">
+        <span className="loading loading-spinner loading-sm"></span>
+        <span className="font-medium">{phase || "生成中"}</span>
+        <span className="ml-auto opacity-60">{elapsed}s</span>
+      </div>
+      {prompt && (
+        <div className="opacity-70 leading-snug line-clamp-3 text-[11px]">
+          🎨 {prompt}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // -----------------------------------------------------------------------------
@@ -423,6 +467,11 @@ function MessageBubbleInner({
   // string change, not on every parent re-render.
   const urls = useMemo(() => extractUrls(msg.content), [msg.content]);
 
+  // Long-press tolerance: tiny finger jitter shouldn't kill the timer.
+  // Cancel only once the touch has moved >10px from where it landed,
+  // matching iMessage / WeChat behavior.
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+
   return (
     <div
       id={msg.id ? `msg-${msg.id}` : undefined}
@@ -457,20 +506,42 @@ function MessageBubbleInner({
             e.preventDefault();
             onContextMenu(msg.id);
           }}
-          onTouchStart={() => msg.id && onLongPressStart(msg.id)}
-          onTouchEnd={onLongPressCancel}
-          onTouchMove={onLongPressCancel}
-          onTouchCancel={onLongPressCancel}
+          onTouchStart={(e) => {
+            if (!msg.id) return;
+            const t = e.touches[0];
+            touchStartRef.current = t
+              ? { x: t.clientX, y: t.clientY }
+              : null;
+            onLongPressStart(msg.id);
+          }}
+          onTouchMove={(e) => {
+            const start = touchStartRef.current;
+            if (!start) return;
+            const t = e.touches[0];
+            if (!t) return;
+            const dx = t.clientX - start.x;
+            const dy = t.clientY - start.y;
+            if (Math.hypot(dx, dy) > 10) {
+              touchStartRef.current = null;
+              onLongPressCancel();
+            }
+          }}
+          onTouchEnd={() => {
+            touchStartRef.current = null;
+            onLongPressCancel();
+          }}
+          onTouchCancel={() => {
+            touchStartRef.current = null;
+            onLongPressCancel();
+          }}
         >
           {msg.replyTo && <QuoteBlock reply={msg.replyTo} onJump={onJumpToMessage} />}
           {msg.contentType === "image-pending" ? (
-            // Async generate_image placeholder while the BG task runs.
-            // Same footprint as a real image bubble so the layout
-            // doesn't jump when the URL lands.
-            <div className="flex items-center justify-center w-[200px] h-[200px] rounded bg-base-100/40 border border-dashed border-base-content/30 gap-2 text-xs opacity-70">
-              <span className="loading loading-spinner loading-sm"></span>
-              <span>生成中…</span>
-            </div>
+            <ImagePendingPlaceholder
+              prompt={msg.imageGen?.prompt}
+              phase={msg.imageGen?.phase}
+              startedAt={msg.imageGen?.startedAt || msg.createdAt}
+            />
           ) : msg.contentType === "image-failed" ? (
             <div className="px-3 py-2 rounded bg-error/10 border border-error/30 text-xs text-error max-w-[240px]">
               {msg.content || "(生成失败)"}
@@ -818,6 +889,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           reasoningMs: r.metadata?.reasoningMs,
           toolInvocations: r.metadata?.toolInvocations,
           audio: r.metadata?.audio,
+          imageGen: r.metadata?.imageGen,
           replyToMessageId: r.replyToMessageId ?? null,
           replyTo: r.replyTo ?? null,
         }));
@@ -859,6 +931,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         reasoningMs: r.metadata?.reasoningMs,
         toolInvocations: r.metadata?.toolInvocations,
         audio: r.metadata?.audio,
+        imageGen: r.metadata?.imageGen,
       }));
     for (const m of fetched) {
       if (m.id) seenIds.current.add(m.id);
@@ -897,6 +970,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           reasoningMs: r.metadata?.reasoningMs,
           toolInvocations: r.metadata?.toolInvocations,
           audio: r.metadata?.audio,
+          imageGen: r.metadata?.imageGen,
           replyToMessageId: r.replyToMessageId ?? null,
           replyTo: r.replyTo ?? null,
         }));
@@ -968,6 +1042,30 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       // event for other room members). Update by id, don't insert.
       if (event.type === "message-updated") {
         if (!msg.id) return;
+        // Phase updates for image-pending bubbles arrive as
+        // message-updated events but the broadcast itself doesn't
+        // carry imageGen metadata — to avoid bloating every event
+        // payload, we re-fetch /api/messages/<id> and merge in.
+        // (Cheap: only fires when there's actually an in-flight
+        // image we already know about.)
+        if (msg.contentType === "image-pending") {
+          fetch(`/api/messages/${msg.id}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+              if (!data?.message) return;
+              const ig = data.message.metadata?.imageGen;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msg.id ? { ...m, imageGen: ig ?? m.imageGen } : m
+                )
+              );
+            })
+            .catch(() => {});
+          return;
+        }
+        // Final swap (image / image-failed) — content has the real
+        // URL or the failure / cancel reason. Replace in place,
+        // imageGen no longer relevant once the bubble settles.
         setMessages((prev) =>
           prev.map((m) =>
             m.id === msg.id
@@ -975,6 +1073,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                   ...m,
                   content: msg.content ?? m.content,
                   contentType: msg.contentType ?? m.contentType,
+                  imageGen: undefined,
                 }
               : m
           )
@@ -1319,6 +1418,17 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                   typeof tr.data.messageId === "string" ? tr.data.messageId : "";
                 if (newId && !seenIds.current.has(newId)) {
                   seenIds.current.add(newId);
+                  // Pull the prompt out of the agent's tool_call args so
+                  // the placeholder bubble can show it under the spinner.
+                  let promptShown: string | undefined;
+                  try {
+                    const a = JSON.parse(knownArgs || "{}");
+                    if (typeof a?.prompt === "string") {
+                      promptShown =
+                        a.prompt.length > 80 ? a.prompt.slice(0, 80) + "…" : a.prompt;
+                    }
+                  } catch {}
+                  const startedAt = new Date().toISOString();
                   setMessages((prev) => {
                     const insertAt = Math.max(0, prev.length - 1);
                     const next = [...prev];
@@ -1329,7 +1439,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                       senderName: agentName,
                       content: "",
                       contentType: "image-pending",
-                      createdAt: new Date().toISOString(),
+                      createdAt: startedAt,
+                      imageGen: {
+                        prompt: promptShown,
+                        phase: "排队中",
+                        startedAt,
+                      },
                     });
                     return next;
                   });
@@ -1606,6 +1721,74 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     window.addEventListener("agentplatform:jump-to-message", handler);
     return () => window.removeEventListener("agentplatform:jump-to-message", handler);
   }, [jumpToMessage]);
+
+  // Poll fallback for in-flight generate_image placeholders. Without
+  // realtime-gateway, the BG-promise's "message-updated" Redis event
+  // never reaches the browser — so the spinner spins forever and the
+  // final image only shows on next page reload. Polling /api/messages/
+  // <id> every 3s closes that gap (and also picks up phase changes
+  // when the gateway IS up but Socket.IO has lagged).
+  //
+  // The dependency array tracks just the COUNT of pending bubbles so
+  // we restart the loop when one finishes / a new one appears, not on
+  // every messages mutation. We poll all pending ids in parallel each
+  // tick and bail out as soon as none are left.
+  const pendingImageCount = messages.filter(
+    (m) => m.contentType === "image-pending" && m.id
+  ).length;
+  useEffect(() => {
+    if (pendingImageCount === 0) return;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      const targets = messages
+        .filter((m) => m.contentType === "image-pending" && m.id)
+        .map((m) => m.id!);
+      if (targets.length === 0) return;
+      const updates = await Promise.all(
+        targets.map(async (id) => {
+          try {
+            const res = await fetch(`/api/messages/${id}`);
+            if (!res.ok) return null;
+            const d = await res.json();
+            return d?.message;
+          } catch {
+            return null;
+          }
+        })
+      );
+      if (stopped) return;
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (!m.id) return m;
+          const u = updates.find((u) => u && u.id === m.id);
+          if (!u) return m;
+          // Final swap or failure — replace contentType + content.
+          if (u.contentType !== "image-pending") {
+            return {
+              ...m,
+              content: u.content,
+              contentType: u.contentType,
+              imageGen: undefined,
+            };
+          }
+          // Phase change — merge metadata.imageGen if newer.
+          const ig = u.metadata?.imageGen;
+          if (ig && ig.phase !== m.imageGen?.phase) {
+            return { ...m, imageGen: ig };
+          }
+          return m;
+        })
+      );
+    };
+    const interval = setInterval(tick, 3000);
+    // Tick immediately so we don't wait 3s for the first refresh.
+    tick();
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [pendingImageCount, messages]);
 
   // Click-anywhere closes the open action menu.
   useEffect(() => {

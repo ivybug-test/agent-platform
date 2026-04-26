@@ -131,7 +131,10 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
   // "image-pending" tells the frontend to render a spinner / "生成中"
   // instead of a real <img>. Status stays "streaming" until either
   // the BG promise updates it to completed (with a real URL) or it's
-  // cancelled / fails.
+  // cancelled / fails. metadata.imageGen carries prompt + phase so
+  // the bubble shows what's being drawn + how far along.
+  const startedAtIso = new Date().toISOString();
+  const truncatedPrompt = prompt.length > 80 ? prompt.slice(0, 80) + "…" : prompt;
   const [row] = await db
     .insert(messages)
     .values({
@@ -141,6 +144,13 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
       content: "",
       contentType: "image-pending",
       status: "streaming",
+      metadata: {
+        imageGen: {
+          prompt: truncatedPrompt,
+          phase: "排队中",
+          startedAt: startedAtIso,
+        },
+      },
     })
     .returning();
 
@@ -171,13 +181,50 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
   inFlightImageGens.set(row.id, ac);
   const startedAt = Date.now();
 
+  // Inline helper: bump the placeholder's metadata.imageGen.phase and
+  // re-broadcast. Frontend listens for "message-updated" events and
+  // patches by id, swapping the phase string under the spinner.
+  const setPhase = async (phase: string) => {
+    if (ac.signal.aborted) return;
+    await db
+      .update(messages)
+      .set({
+        metadata: {
+          imageGen: {
+            prompt: truncatedPrompt,
+            phase,
+            startedAt: startedAtIso,
+          },
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(messages.id, row.id))
+      .catch(() => {});
+    publishRoomEvent({
+      type: "message-updated",
+      roomId: ctx.roomId,
+      triggeredBy: ctx.userId,
+      message: {
+        id: row.id,
+        senderType: "agent",
+        senderId: agentId,
+        senderName: agentName,
+        content: "",
+        contentType: "image-pending",
+        status: "streaming",
+      },
+    });
+  };
+
   void (async () => {
     try {
+      await setPhase("Doubao 渲染中");
       const img = await generateImage(prompt, {
         referenceImages: referenceImageUrls,
         signal: ac.signal,
       });
       if (ac.signal.aborted) throw new DOMException("aborted", "AbortError");
+      await setPhase("保存中");
       const upload = await uploadBufferToCos(img.bytes, {
         contentType: img.mimeType,
         keyPrefix: `agent-images/${ctx.roomId}/${agentId}`,

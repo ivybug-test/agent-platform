@@ -65,6 +65,22 @@ export interface MessageMetadata {
      *  used (resolved by /api/tts from agentId). */
     voiceId?: string;
   };
+  /** Set on placeholder messages while the async generate_image task
+   *  is in flight. Drives the bubble's "正在生成 / 上传 / 完成" UI
+   *  copy and gives the agent enough context (via buildLLMMessages)
+   *  to track its own pending jobs across turns. Cleared once the
+   *  message lands as contentType="image" (final URL in content).  */
+  imageGen?: {
+    /** Truncated copy of the prompt the agent passed in, shown under
+     *  the spinner so the user can sanity-check what's being drawn. */
+    prompt?: string;
+    /** Free-form Chinese phase string the BG promise updates as it
+     *  progresses: "排队中" → "Doubao 渲染中" → "保存中" → final swap. */
+    phase?: string;
+    /** ISO timestamp of when the placeholder was first inserted; the
+     *  bubble computes elapsed time on the client side. */
+    startedAt?: string;
+  };
 }
 
 // Enums
