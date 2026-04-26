@@ -927,7 +927,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                   )}
                 </div>
                 <div
-                  className={`chat-bubble ${bubbleColor} text-sm select-text`}
+                  className={`chat-bubble ${bubbleColor} text-sm select-none [-webkit-touch-callout:none] [-webkit-user-select:none]`}
                   onContextMenu={(e) => openMenuViaContextMenu(e, msg)}
                   onTouchStart={() => startLongPress(msg)}
                   onTouchEnd={cancelLongPress}
@@ -982,17 +982,52 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                   )}
                 </div>
                 {menuForId && menuForId === msg.id && (
+                  // Floats ABOVE the bubble (iMessage-style reaction bar)
+                  // so it doesn't get hidden by anything below — and so
+                  // that the now-suppressed native long-press menu, if it
+                  // somehow leaks through, can't cover us.
                   <div
-                    className={`absolute z-20 ${isMe ? "right-2" : "left-2"} -bottom-8 bg-base-100 border border-base-300 rounded-lg shadow-lg text-xs overflow-hidden`}
+                    className={`absolute z-20 ${isMe ? "right-1" : "left-1"} -top-9 flex bg-base-100 border border-base-300 rounded-full shadow-lg text-xs overflow-hidden divide-x divide-base-300`}
                     onClick={(e) => e.stopPropagation()}
                   >
                     <button
                       type="button"
-                      className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300 w-full text-left"
+                      className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
                       onClick={() => beginQuote(msg)}
                     >
                       引用
                     </button>
+                    {/* Replacement for native callout's "复制" — only on
+                        text messages; image bubbles don't need it. */}
+                    {!isImageMessage(msg) && (
+                      <button
+                        type="button"
+                        className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
+                        onClick={() => {
+                          navigator.clipboard
+                            ?.writeText(msg.content)
+                            .catch(() => {});
+                          setMenuForId(null);
+                        }}
+                      >
+                        复制
+                      </button>
+                    )}
+                    {/* Replacement for native "在新标签打开 / 保存图片" —
+                        only on image bubbles. window.open keeps it inside
+                        the menu's stopPropagation flow. */}
+                    {isImageMessage(msg) && (
+                      <button
+                        type="button"
+                        className="px-3 py-1.5 hover:bg-base-200 active:bg-base-300"
+                        onClick={() => {
+                          window.open(msg.content, "_blank", "noopener");
+                          setMenuForId(null);
+                        }}
+                      >
+                        新标签打开
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
