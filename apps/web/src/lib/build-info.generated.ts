@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
-    "sha": "6228e29",
-    "subject": "Quote-reply, image numbering, agent-name consistency, tool honesty",
-    "date": "2026-04-25T23:07:07+08:00"
+    "sha": "1f29d1b",
+    "subject": "Fix Postgres connection exhaustion + slow polling cadence",
+    "date": "2026-04-26T18:40:37+08:00"
   },
   {
-    "sha": "04ef628",
-    "subject": "Vision: caption-once async, chat stays text-only on DeepSeek",
-    "date": "2026-04-25T22:30:58+08:00"
+    "sha": "a3adbec",
+    "subject": "speak: same CALL-TOOL-FIRST hardening as generate_image",
+    "date": "2026-04-26T18:36:34+08:00"
   },
   {
-    "sha": "ddb2373",
-    "subject": "Document pro→flash fallback + flash thinking suppression in CHANGELOG",
-    "date": "2026-04-25T21:47:49+08:00"
+    "sha": "30aaa6d",
+    "subject": "generate_image: read tr.data.data + anti-fake-call prompt + retroactive note",
+    "date": "2026-04-26T18:31:41+08:00"
   }
 ];

@@ -483,7 +483,17 @@ function MessageBubbleInner({
       // haven't been measured yet (the actual height is used once it
       // first scrolls into view). 120px is a rough average for a
       // 1-3 line bubble.
-      className="rounded transition-shadow [content-visibility:auto] [contain-intrinsic-size:auto_120px]"
+      //
+      // Drop the directive while the action menu is open for this
+      // bubble — content-visibility:auto applies paint containment,
+      // which clips the menu (it floats at -top-9, outside the
+      // wrapper's box). Only one bubble at a time is in this state,
+      // so the perf cost is negligible.
+      className={
+        isMenuOpen
+          ? "rounded transition-shadow"
+          : "rounded transition-shadow [content-visibility:auto] [contain-intrinsic-size:auto_120px]"
+      }
     >
       {showDayDivider && (
         <div className="flex justify-center my-3">
