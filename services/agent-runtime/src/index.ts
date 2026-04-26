@@ -78,7 +78,11 @@ interface AccumulatedToolCall {
   args: string;
 }
 
-const TOOL_CALL_TIMEOUT_MS = 15000;
+// 30s. Web search tool chains do Bocha → optional Tavily fallback, plus
+// remote provider RTT — cumulative slow case can comfortably exceed 15s
+// on a CN box hitting Tavily. Hitting the timeout is the most common
+// way users see a generic "tool call failed" with no detail.
+const TOOL_CALL_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_TOOL_ROUNDS = 5;
 const HARD_TOOL_ROUND_CAP = 10;
 // Cap the final answer at 4096 tokens. DeepSeek's `max_tokens` only
@@ -363,6 +367,7 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
         let ok = false;
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), TOOL_CALL_TIMEOUT_MS);
+        let parsedResult: unknown = null;
         try {
           const res = await fetch(toolCallbackUrl, {
             method: "POST",
@@ -379,6 +384,11 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           const text = await res.text();
           ok = res.ok;
           toolResultContent = text || JSON.stringify({ ok });
+          try {
+            parsedResult = text ? JSON.parse(text) : null;
+          } catch {
+            parsedResult = null;
+          }
           log.info(
             { round, tool: tc.name, status: res.status, bytes: text.length },
             "tool.result"
@@ -387,11 +397,17 @@ app.post<{ Body: ChatBody }>("/chat", async (request, reply) => {
           toolResultContent = JSON.stringify({
             error: err?.message || "tool call failed",
           });
+          parsedResult = { error: err?.message || "tool call failed" };
           log.error({ round, tool: tc.name, err }, "tool.error");
         } finally {
           clearTimeout(timer);
         }
-        sendEvent({ tool_result: { id: tc.id, ok } });
+        // Forward the parsed JSON so the web layer can render search hits in
+        // the chat UI. `name` is included so the client doesn't have to track
+        // call ids back to the earlier `tool_call` event.
+        sendEvent({
+          tool_result: { id: tc.id, name: tc.name, ok, data: parsedResult },
+        });
         messages.push({
           role: "tool",
           tool_call_id: tc.id,

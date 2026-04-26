@@ -185,7 +185,7 @@ function ToolInvocationsCard({ invocations }: { invocations: ToolInvocation[] })
             <summary className="flex items-center gap-1 list-none [&::-webkit-details-marker]:hidden">
               <span>{isFetch ? "📄" : "🔎"}</span>
               <span className={inv.pending ? "animate-pulse" : ""}>{summary}</span>
-              {!inv.pending && (hits.length > 0 || isFetch) && (
+              {!inv.pending && (hits.length > 0 || isFetch || inv.error) && (
                 <span className="opacity-60">▾</span>
               )}
             </summary>
@@ -223,7 +223,9 @@ function ToolInvocationsCard({ invocations }: { invocations: ToolInvocation[] })
               </div>
             )}
             {inv.error && (
-              <div className="mt-1 pl-1 opacity-60">{inv.error}</div>
+              <div className="mt-1 pl-1 text-error/80 break-all">
+                错误：{inv.error}
+              </div>
             )}
           </details>
         );
