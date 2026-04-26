@@ -139,9 +139,47 @@ const tavilyProvider: SearchProvider = {
   },
 };
 
+// MiniMax Coding Plan search. Endpoint: POST /v1/coding_plan/search
+// returns { organic: [{title, link, snippet, date}], related_searches, base_resp }
+// Note the field is `link` not `url`, and HTTP 200 may still carry an
+// error in base_resp.status_code.
+const minimaxProvider: SearchProvider = {
+  name: "minimax",
+  async search(query, max) {
+    const apiKey = process.env.MINIMAX_API_KEY;
+    if (!apiKey) throw new Error("MINIMAX_API_KEY not configured");
+    const host =
+      process.env.MINIMAX_CODING_PLAN_HOST || "https://api.minimaxi.com";
+    const res = await fetch(`${host}/v1/coding_plan/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "MM-API-Source": "agent-platform",
+      },
+      body: JSON.stringify({ q: query }),
+    });
+    if (!res.ok) throw new Error(`minimax ${res.status}`);
+    const data = (await res.json()) as {
+      organic?: Array<{ title?: string; link?: string; snippet?: string }>;
+      base_resp?: { status_code?: number; status_msg?: string };
+    };
+    const code = data.base_resp?.status_code;
+    if (typeof code === "number" && code !== 0) {
+      throw new Error(`minimax ${code}: ${data.base_resp?.status_msg ?? ""}`);
+    }
+    return (data.organic ?? []).slice(0, max).map((it) => ({
+      title: it.title ?? "",
+      url: it.link ?? "",
+      snippet: trimSnippet(it.snippet ?? ""),
+    }));
+  },
+};
+
 const PROVIDERS: Record<string, SearchProvider> = {
   bocha: bochaProvider,
   tavily: tavilyProvider,
+  minimax: minimaxProvider,
 };
 
 interface ProviderChain {
@@ -150,7 +188,7 @@ interface ProviderChain {
 }
 
 function getProviderChain(): ProviderChain | null {
-  const primaryName = (process.env.WEB_SEARCH_PRIMARY || "bocha").toLowerCase();
+  const primaryName = (process.env.WEB_SEARCH_PRIMARY || "minimax").toLowerCase();
   const fallbackName = (process.env.WEB_SEARCH_FALLBACK || "").toLowerCase();
   const primary = PROVIDERS[primaryName];
   if (!primary) return null;
@@ -165,6 +203,7 @@ function getProviderChain(): ProviderChain | null {
 function isConfigured(p: SearchProvider): boolean {
   if (p.name === "bocha") return !!process.env.BOCHA_API_KEY;
   if (p.name === "tavily") return !!process.env.TAVILY_API_KEY;
+  if (p.name === "minimax") return !!process.env.MINIMAX_API_KEY;
   return false;
 }
 
