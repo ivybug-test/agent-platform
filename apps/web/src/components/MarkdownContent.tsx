@@ -1,5 +1,5 @@
 import { memo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 /** Render chat-bubble markdown. Sized for the chat-bubble context — headings
@@ -22,6 +22,15 @@ function MarkdownContentInner({ children }: { children: string }) {
     <div className="markdown-body text-sm leading-relaxed break-words [overflow-wrap:anywhere]">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        // Allow our custom "msg:<id>" scheme through the URL sanitizer
+        // (default react-markdown only passes http/https/mailto/tel/...
+        // and rewrites everything else to "javascript:void(0)" — that's
+        // why agent citations were rendering but the click did nothing).
+        // We still pass other URLs through the default safety check by
+        // returning them unchanged; only msg: gets the bypass.
+        urlTransform={(value) =>
+          typeof value === "string" && value.startsWith("msg:") ? value : defaultUrlTransform(value)
+        }
         components={{
           h1: ({ children, ...p }) => (
             <h3 className="font-bold text-base mt-2 mb-1" {...p}>
