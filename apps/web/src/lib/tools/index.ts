@@ -4,6 +4,8 @@ export type ToolHandler = (args: any, ctx: ToolContext) => Promise<unknown>;
 
 import { memoryToolHandlers, memoryToolDefs } from "./memory-tools";
 import { webSearchToolHandlers, webSearchToolDefs } from "./web-search-tools";
+import { voiceToolHandlers, voiceToolDefs } from "./voice-tools";
+import { imageReadToolHandlers, imageReadToolDefs } from "./image-read-tools";
 
 /**
  * Registry of tools the agent can call. Entries keyed by the OpenAI
@@ -15,10 +17,17 @@ export const toolRegistry: Record<string, ToolHandler> = {
   _echo: async (args) => ({ echoed: args }),
   ...memoryToolHandlers,
   ...webSearchToolHandlers,
+  ...voiceToolHandlers,
+  ...imageReadToolHandlers,
 };
 
 /** OpenAI-shaped tool definitions passed to agent-runtime in the /chat body. */
-export const agentToolDefs = [...memoryToolDefs, ...webSearchToolDefs];
+export const agentToolDefs = [
+  ...memoryToolDefs,
+  ...webSearchToolDefs,
+  ...voiceToolDefs,
+  ...imageReadToolDefs,
+];
 
 export function getTool(name: string): ToolHandler | undefined {
   return toolRegistry[name];

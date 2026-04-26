@@ -265,22 +265,3 @@ async function playViaMse(
     }
   }
 }
-
-/** Strip Markdown noise that doesn't read aloud well — fences, links,
- *  list bullets, headers. The TTS engine will pronounce e.g. "[link
- *  text](url)" verbatim if we don't pre-process. */
-export function stripMarkdownForTts(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/!?\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/^\s*[-*+]\s+/gm, "")
-    .replace(/^\s*\d+\.\s+/gm, "")
-    .replace(/\[\[song:[^\]]*\]\]/g, "")
-    .replace(/https?:\/\/\S+/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}

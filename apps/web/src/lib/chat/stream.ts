@@ -151,6 +151,10 @@ export async function streamAgentResponse(
   // filtered out at persistence time.
   const pendingToolCalls = new Map<string, { name: string; args: string }>();
   const toolInvocations: ToolInvocation[] = [];
+  // `speak` tool result → metadata.audio. Captured here so the play
+  // button survives reload (the live SSE branch in ChatPanel mirrors
+  // this on its own state for immediate feedback).
+  let audioPayload: { text: string; voiceId?: string } | null = null;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -209,6 +213,22 @@ export async function streamAgentResponse(
                     )
                   );
                 }
+                if (name === "speak" && evt.tool_result.ok && argsJson) {
+                  try {
+                    const parsed = JSON.parse(argsJson) as {
+                      text?: unknown;
+                      voiceId?: unknown;
+                    };
+                    if (typeof parsed.text === "string" && parsed.text.trim()) {
+                      audioPayload = {
+                        text: parsed.text.trim(),
+                        ...(typeof parsed.voiceId === "string"
+                          ? { voiceId: parsed.voiceId }
+                          : {}),
+                      };
+                    }
+                  } catch {}
+                }
                 pendingToolCalls.delete(evt.tool_result.id);
               }
             } catch {}
@@ -235,13 +255,14 @@ export async function streamAgentResponse(
               ? Date.now() - reasoningStartedAt
               : 0;
         // Only attach a metadata blob when there's a reason to (reasoning
-        // trace or tool calls to display). Plain non-pro / no-tool turns
-        // still leave the column NULL.
+        // trace, tool-result card, or audio button). Plain non-pro /
+        // no-tool turns still leave the column NULL.
         const metadata =
-          fullReasoning || toolInvocations.length > 0
+          fullReasoning || toolInvocations.length > 0 || audioPayload
             ? {
                 ...(fullReasoning ? { reasoning: fullReasoning, reasoningMs } : {}),
                 ...(toolInvocations.length > 0 ? { toolInvocations } : {}),
+                ...(audioPayload ? { audio: audioPayload } : {}),
               }
             : undefined;
 

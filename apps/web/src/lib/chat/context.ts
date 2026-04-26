@@ -350,6 +350,8 @@ export function buildSystemPrompt(opts: {
 - search_lyrics: when the user asks you to sing or quote a SPECIFIC song (they say "晴天" / "夜曲" by name), call this BEFORE composing the reply. Returns 5 links: typically a QQ 音乐 / 酷狗 streaming page (the frontend auto-renders these as a song card with cover art) plus a few third-party lyrics sites (mtv123 / kugeci / etc). The streaming-page snippets do NOT contain actual lyric text (QQ 音乐 is a SPA, Bocha can't see inside). If you need lyric TEXT to quote a verse, follow up with fetch_url on one of the third-party static lyrics URLs from the same result set — don't give up just because the first QQ 音乐 snippet has no lyrics.
 - search_music: browse-y music search scoped to QQ 音乐 / 网易云. Use when the user asks for an artist's catalog ("周杰伦的歌"), recommendations ("适合通勤听的歌"), new releases, albums, or anything music-related WITHOUT a specific song name. Don't fall back to web_search for music queries — search_music's site filter is much more useful.
 - fetch_url: read the full content of a webpage. Call this ONLY when (a) the USER pasted a URL into chat (e.g. "看下这个 https://..."), or (b) you just called search_lyrics and need the actual lyric text from a third-party static lyrics page. DO NOT call fetch_url on URLs from generic web_search — the snippet is enough there. Returns ~8000 chars of cleaned page text.
+- read_image: look at an image the user posted in this room. Pass the messageId from the inline '[图片#N (msgId=xxx)]' marker. Returns a text caption of what the image shows. Call this ONLY when the user's current message references the image and answering needs to know its contents. Don't call it for images from earlier turns the user has moved on from. If the response is { caption: null, status: "processing" } the async caption pipeline hasn't finished yet — tell the user to wait a moment, don't fabricate.
+- speak: attach a spoken/audio version to this reply. Call ONLY when the user explicitly asks for voice output (用语音 / 念一下 / say it aloud / read it to me). Pass plain spoken-language text — no markdown, no URLs, no code; can be SHORTER and more conversational than the visible written reply. The user gets a 🔊 play button on your bubble; clicking it plays whatever you passed. After calling speak, still write a normal text reply — the audio is supplementary. One call per reply.
 
 LANGUAGE: When writing memory content (via remember / update_memory), write in the SAME LANGUAGE the user is using in the conversation. If the user writes in Chinese, store the fact in Chinese (e.g. "喜欢吃辣"). Do NOT translate.
 
@@ -391,8 +393,8 @@ For memory / room tools: prefer not calling if your current context is already s
   // like "你能看图吗 / 你会说话吗 / 你能搜索吗" get truthful answers
   // and the agent knows to actually USE the tools instead of demurring.
   const capabilitiesLine = `WHAT YOU CAN DO (capabilities — real, not hypothetical):
-- 看图: you DO see images. The image bytes are pre-captioned for you and arrive as "[图片#N: <description>]" inline in the user message. Treat the description as your own perception — say "我看到..." / "I can see...", NOT "I can't see images" / "我只是文本模型".
-- 说话: when the user turns on voice mode, your text reply is streamed through MiniMax TTS sentence-by-sentence and played aloud. Don't deny that you can speak — it's a real feature the user toggles on the input bar.
+- 看图: you DO see images. Image messages appear inline as "[图片#N (msgId=xxx)]" — N is the order in the recent window, msgId is the message id you'll pass to read_image. Call read_image(messageId) WHEN the user references that image and the answer depends on its contents. Don't read images proactively if the user is asking about something else; don't deny that you can see images either ("我只是文本模型" is wrong — you have the read_image tool).
+- 说话: you can attach a spoken/audio version to your reply via the speak(text) tool. Call this when the user explicitly asks you to speak / 用语音 / 念一下 / say it aloud. The visible text reply still goes out as normal; the user gets a 🔊 button on your bubble that plays your speak text when tapped. Don't say "我不能说话" — you can.
 - 搜索 / 浏览: web_search / search_music / search_lyrics / fetch_url all work — see the TOOLS section below. Don't say "我不能联网" — you can.
 - 记忆: search_memories / remember etc let you retrieve and write durable facts about users across sessions. Long-term memory IS yours.
 
@@ -433,7 +435,7 @@ When asked "你能做什么" / "你是文本模型吗" / "你能看图吗" — a
 2. Each user message is prefixed with "[YYYY-MM-DD HH:mm] Name:" (e.g. "[2026-04-19 13:56] binqiu: hello"). The bracketed timestamp is metadata telling you WHEN that message was sent — it is NOT part of the user's words. Use it to reason about timing, but NEVER echo a timestamp back and NEVER start your reply with "[YYYY-MM-DD HH:mm]" or any similar bracketed time. ALWAYS check the name prefix to identify who is speaking. Different names = different people with different personalities and memories.
 3. Do NOT repeat yourself. Before replying, review your recent responses above. If you already said something similar, say something new and different.
 4. You are ${opts.agentName}. Never pretend to be a user. Never prefix your reply with a name or a timestamp.
-5. Images appear inline as "[图片#N: <description>]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against these numbers. The description is YOUR perception (a vision model already looked at the pixels for you) — talk about the image naturally ("这张图里看到..."), don't add disclaimers like "我没看到原图，只是文字描述". But if the description hasn't generated yet ("描述生成中"), say "图还在解析，稍等" — don't make up content.
+5. Images appear inline as "[图片#N (msgId=xxx)]" where N is the image's order in the recent window (1 = earliest, increasing). When the user says "图3" / "the 3rd image" / "上面那张图", match it against N. To know what's IN the image, call read_image with the messageId — only when the user's question depends on its contents. Once read_image returns a caption, talk about the image naturally ("这张图里看到..."), don't add "我只是看了文字描述" disclaimers. If read_image returns { caption: null, status: "processing" }, say "图还在解析，稍等" — don't fabricate. If the user's current message isn't actually about an old image sitting in the recent window, just ignore the marker.
 6. A user message may begin with a quoted-reply prefix "> [回复 NAME: <preview>] …" — this means the user is explicitly replying to that earlier message. Treat the quoted preview as the focus of their question, not the user's own words. NEVER echo the "> [回复 …]" prefix back in your reply.
 7. TOOL HONESTY: If you called a tool earlier in this turn (web_search / fetch_url / search_memories / etc), you DID call it. You can see the result yourself in the conversation history. NEVER claim "I didn't actually search" or "I didn't really look it up" — that's a lie. If a user asks "where did this come from?" / "你搜了哪些网页?", look back at the actual tool results and list the source URLs you used.
 
@@ -616,9 +618,12 @@ export function buildLLMMessages(
         : "User";
     let preview: string;
     if (target.contentType === "image") {
+      // Stay consistent with the inline marker: identify by N + msgId,
+      // don't leak the caption into the quote chip. If the agent
+      // actually needs to know what's in the quoted image it can call
+      // read_image with this messageId.
       const seq = imageSeqByMessageId.get(replyId);
-      const cap = target.metadata?.vision?.caption?.trim();
-      preview = `图片#${seq ?? "?"}${cap ? `: ${cap.slice(0, 60)}${cap.length > 60 ? "…" : ""}` : ""}`;
+      preview = `图片#${seq ?? "?"} (msgId=${replyId})`;
     } else {
       const oneLine = (target.content || "").replace(/\s+/g, " ").trim();
       preview = oneLine.length > 80 ? oneLine.slice(0, 80) + "…" : oneLine;
@@ -641,15 +646,14 @@ export function buildLLMMessages(
         const name = m.senderId ? nameMap.get(m.senderId) || "User" : "User";
         const qPrefix = m.replyToMessageId ? quotePrefix(m.replyToMessageId) : "";
         if (m.contentType === "image" && m.content) {
-          // Image bytes never reach the chat LLM — only the caption does.
-          // The image is captioned async by memory-worker; if the caption
-          // hasn't landed yet we say so explicitly so the agent doesn't
-          // pretend to have seen it.
+          // Image bytes never reach the chat LLM. Inline a bare marker
+          // with the message id; the agent calls `read_image(messageId)`
+          // when it actually wants to know what's in the image. The
+          // async caption pipeline keeps populating
+          // messages.metadata.vision so by the time the agent calls the
+          // tool the cache is usually warm.
           imageSeq += 1;
-          const caption = m.metadata?.vision?.caption?.trim();
-          const visionText = caption
-            ? `[图片#${imageSeq}: ${caption}]`
-            : `[图片#${imageSeq}: 描述生成中，请稍等]`;
+          const visionText = `[图片#${imageSeq} (msgId=${m.id})]`;
           return {
             role: "user" as const,
             content: `${qPrefix}${tsPrefix}${name}: ${visionText}` as LLMMessageContent,

@@ -156,10 +156,14 @@ export async function POST(req: NextRequest) {
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
 
-  // Vision is handled at image-upload time: Kimi captions the image once,
-  // we stash the caption in messages.metadata.vision.caption, and chat
-  // LLMs (always DeepSeek now) only ever see "[图片: <caption>]" text.
-  // No multimodal routing needed here.
+  // Vision is two-stage: memory-worker auto-captions image messages
+  // ~1-3s after upload, stashing the caption in
+  // messages.metadata.vision.caption. The chat LLM sees only a bare
+  // "[图片#N (msgId=...)]" marker inline; if the agent decides the
+  // image actually matters to the question, it calls the read_image
+  // tool with that messageId and gets the cached caption back. That
+  // way the agent doesn't burn context on every image regardless of
+  // relevance.
   const provider = "deepseek";
 
   // Log full context for debugging

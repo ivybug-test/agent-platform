@@ -55,6 +55,16 @@ export interface MessageMetadata {
   /** Search/fetch tool calls made while producing this reply. Rendered as
    *  a "已搜索 N 个网页" card above the bubble. */
   toolInvocations?: ToolInvocation[];
+  /** Set when the agent called the `speak` tool while producing this
+   *  reply. Frontend renders a 🔊 play button on the bubble and on
+   *  click hits /api/tts with this exact text (which can differ from
+   *  the visual reply — typically shorter, no markdown). */
+  audio?: {
+    text: string;
+    /** Optional voice override; when absent the agent's saved voice is
+     *  used (resolved by /api/tts from agentId). */
+    voiceId?: string;
+  };
 }
 
 // Enums
