@@ -1,6 +1,6 @@
 import { db, messages, roomMembers, agents } from "@agent-platform/db";
 import { and, eq, inArray } from "drizzle-orm";
-import { generateImage } from "@/lib/image-gen";
+import { generateImage, fetchImageBytes } from "@/lib/image-gen";
 import { uploadBufferToCos } from "@/lib/cos/server-upload";
 import { publishRoomEvent, getRedisClient } from "@/lib/redis";
 import { createLogger } from "@agent-platform/logger";
@@ -219,29 +219,35 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
   void (async () => {
     try {
       await setPhase("Doubao 渲染中");
+      // Phase 1: hit Doubao with urlOnly=true. Skips the bytes-fetch
+      // that used to add ~1-2s to perceived latency. We get back
+      // entry.url (TOS, signed for 24h) — long enough to cover the
+      // re-host step that runs in parallel below.
       const img = await generateImage(prompt, {
         referenceImages: referenceImageUrls,
         signal: ac.signal,
+        urlOnly: true,
       });
       if (ac.signal.aborted) throw new DOMException("aborted", "AbortError");
-      await setPhase("保存中");
-      const upload = await uploadBufferToCos(img.bytes, {
-        contentType: img.mimeType,
-        keyPrefix: `agent-images/${ctx.roomId}/${agentId}`,
-        ext: pickExtension(img.mimeType),
-      });
-      if (ac.signal.aborted) throw new DOMException("aborted", "AbortError");
+      const providerUrl = img.url;
+      if (!providerUrl) {
+        throw new Error("provider returned no URL — fast path requires it");
+      }
 
+      // Phase 2A: flip the placeholder to a real image bubble pointing
+      // at the provider URL. User sees the image now (~16s after they
+      // asked instead of ~21s waiting for our COS re-host). Clear
+      // metadata.imageGen so the spinner card is gone for good.
       await db
         .update(messages)
         .set({
-          content: upload.url,
+          content: providerUrl,
           contentType: "image",
           status: "completed",
+          metadata: {},
           updatedAt: new Date(),
         })
         .where(eq(messages.id, row.id));
-
       publishRoomEvent({
         type: "message-updated",
         roomId: ctx.roomId,
@@ -251,24 +257,73 @@ const generateImageHandler: ToolHandler = async (args, ctx) => {
           senderType: "agent",
           senderId: agentId,
           senderName: agentName,
-          content: upload.url,
+          content: providerUrl,
           contentType: "image",
           status: "completed",
         },
       });
-
       log.info(
         {
           userId: ctx.userId,
           roomId: ctx.roomId,
           agentId,
           messageId: row.id,
-          bytes: img.bytes.length,
+          stage: "provider-url",
           durationMs: Date.now() - startedAt,
           promptLen: prompt.length,
         },
-        "imagegen.complete"
+        "imagegen.shown"
       );
+
+      // Phase 2B: re-host to COS in the background so the bubble's URL
+      // stays valid past the provider's 24h TTL. If this step fails or
+      // is aborted, the user already has a working image — just leave
+      // the row at the provider URL and log a warning. Worst-case the
+      // image breaks 24h later (degraded but recoverable).
+      try {
+        const fetched = await fetchImageBytes(providerUrl);
+        if (ac.signal.aborted) return;
+        const upload = await uploadBufferToCos(fetched.bytes, {
+          contentType: fetched.mimeType,
+          keyPrefix: `agent-images/${ctx.roomId}/${agentId}`,
+          ext: pickExtension(fetched.mimeType),
+        });
+        await db
+          .update(messages)
+          .set({ content: upload.url, updatedAt: new Date() })
+          .where(eq(messages.id, row.id));
+        publishRoomEvent({
+          type: "message-updated",
+          roomId: ctx.roomId,
+          triggeredBy: ctx.userId,
+          message: {
+            id: row.id,
+            senderType: "agent",
+            senderId: agentId,
+            senderName: agentName,
+            content: upload.url,
+            contentType: "image",
+            status: "completed",
+          },
+        });
+        log.info(
+          {
+            messageId: row.id,
+            stage: "rehosted",
+            durationMs: Date.now() - startedAt,
+            bytes: fetched.bytes.length,
+          },
+          "imagegen.rehost-complete"
+        );
+      } catch (rehostErr: any) {
+        log.warn(
+          {
+            messageId: row.id,
+            err: rehostErr?.message,
+          },
+          "imagegen.rehost-failed-leaving-provider-url"
+        );
+      }
     } catch (err: any) {
       const aborted =
         err?.name === "AbortError" || ac.signal.aborted;

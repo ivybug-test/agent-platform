@@ -1723,16 +1723,21 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   }, [jumpToMessage]);
 
   // Poll fallback for in-flight generate_image placeholders. Without
-  // realtime-gateway, the BG-promise's "message-updated" Redis event
-  // never reaches the browser — so the spinner spins forever and the
-  // final image only shows on next page reload. Polling /api/messages/
-  // <id> every 3s closes that gap (and also picks up phase changes
-  // when the gateway IS up but Socket.IO has lagged).
+  // realtime-gateway the BG-promise's "message-updated" Redis event
+  // never reaches the browser — the spinner spins forever and the
+  // final image only shows on next page reload. Poll
+  // /api/messages/<id> every 3s; also picks up phase changes when
+  // the gateway IS up but Socket.IO has lagged.
   //
-  // The dependency array tracks just the COUNT of pending bubbles so
-  // we restart the loop when one finishes / a new one appears, not on
-  // every messages mutation. We poll all pending ids in parallel each
-  // tick and bail out as soon as none are left.
+  // CRITICAL: deps are [pendingImageCount] ONLY — adding `messages`
+  // makes the effect re-run on every setMessages call (e.g. each
+  // agent-text-streaming chunk) which clears the previous interval
+  // before it ever ticks. The inner closure reads messages via a ref
+  // so it still sees the latest list.
+  const messagesRef = useRef(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
   const pendingImageCount = messages.filter(
     (m) => m.contentType === "image-pending" && m.id
   ).length;
@@ -1741,7 +1746,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     let stopped = false;
     const tick = async () => {
       if (stopped) return;
-      const targets = messages
+      const targets = messagesRef.current
         .filter((m) => m.contentType === "image-pending" && m.id)
         .map((m) => m.id!);
       if (targets.length === 0) return;
@@ -1763,7 +1768,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           if (!m.id) return m;
           const u = updates.find((u) => u && u.id === m.id);
           if (!u) return m;
-          // Final swap or failure — replace contentType + content.
           if (u.contentType !== "image-pending") {
             return {
               ...m,
@@ -1772,7 +1776,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               imageGen: undefined,
             };
           }
-          // Phase change — merge metadata.imageGen if newer.
           const ig = u.metadata?.imageGen;
           if (ig && ig.phase !== m.imageGen?.phase) {
             return { ...m, imageGen: ig };
@@ -1782,13 +1785,12 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       );
     };
     const interval = setInterval(tick, 3000);
-    // Tick immediately so we don't wait 3s for the first refresh.
     tick();
     return () => {
       stopped = true;
       clearInterval(interval);
     };
-  }, [pendingImageCount, messages]);
+  }, [pendingImageCount]);
 
   // Click-anywhere closes the open action menu.
   useEffect(() => {

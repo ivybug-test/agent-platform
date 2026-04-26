@@ -29,7 +29,15 @@
  *  bytes. */
 
 interface ImageGenResult {
-  bytes: Buffer;
+  /** Provider-hosted URL of the image. Set when the provider returns
+   *  one (Doubao Seedream's TOS URL — 24h TTL — counts), useful for
+   *  showing the image to the user FAST while we re-host to durable
+   *  storage in parallel. May be undefined for providers that only
+   *  return inline bytes (Google direct, OpenAI chat with base64). */
+  url?: string;
+  /** Raw image bytes. Always present unless `urlOnly` was passed; in
+   *  that mode the caller fetches the URL itself (or skips it). */
+  bytes?: Buffer;
   mimeType: string;
   /** Whatever text the model returned alongside the image. Often empty,
    *  but some providers include a one-line description. The tool surfaces
@@ -204,7 +212,8 @@ async function callImagesGenerations(
   size: string,
   prompt: string,
   referenceImages: string[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  urlOnly?: boolean
 ): Promise<ImageGenResult> {
   // Doubao Seedream's image-to-image / multi-reference path is a
   // top-level `image` field on the same /images/generations endpoint —
@@ -246,8 +255,19 @@ async function callImagesGenerations(
   if (!entry) throw new Error("image-gen: response missing data[0]");
 
   if (entry.url) {
+    if (urlOnly) {
+      // Fast path — let the caller display this provider URL right
+      // away and re-host to durable storage in parallel. mimeType
+      // guessed from extension; the caller doesn't need it for
+      // display, only for COS upload (which fetches bytes itself
+      // and reads the response Content-Type header anyway).
+      const guessedMime = /\.png(\?|$)/i.test(entry.url) ? "image/png"
+        : /\.webp(\?|$)/i.test(entry.url) ? "image/webp"
+        : "image/jpeg";
+      return { url: entry.url, mimeType: guessedMime, modelText: "" };
+    }
     const fetched = await fetchRemoteImage(entry.url);
-    return { ...fetched, modelText: "" };
+    return { url: entry.url, ...fetched, modelText: "" };
   }
   if (entry.b64_json) {
     return {
@@ -259,6 +279,13 @@ async function callImagesGenerations(
   throw new Error("image-gen: data[0] has neither url nor b64_json");
 }
 
+/** Public helper: download a remote image URL into bytes for COS
+ *  upload. Used by image-tools.ts to do the durable re-host AFTER
+ *  the user has already seen the provider URL. */
+export async function fetchImageBytes(url: string): Promise<{ bytes: Buffer; mimeType: string }> {
+  return fetchRemoteImage(url);
+}
+
 export interface GenerateImageOptions {
   referenceImages?: string[];
   /** Caller cancels in-flight gen via AbortController.signal — fetch
@@ -266,6 +293,12 @@ export interface GenerateImageOptions {
    *  volc path for now (the only one we run async/cancellable in
    *  practice via image-tools.ts); other paths ignore. */
   signal?: AbortSignal;
+  /** Skip the bytes-fetch on the volc path so the caller can show the
+   *  provider URL to the user immediately and re-host to durable
+   *  storage off-thread. Returns ImageGenResult.url + mimeType but
+   *  NO bytes; ignored on Google / OpenAI paths (they only return
+   *  inline base64). */
+  urlOnly?: boolean;
 }
 
 export async function generateImage(
@@ -282,7 +315,9 @@ export async function generateImage(
     return callGoogleDirect(apiKey, baseUrl, model, prompt);
   }
   if (provider === "volc") {
-    return callImagesGenerations(apiKey, baseUrl, model, size, prompt, refs, opts?.signal);
+    return callImagesGenerations(
+      apiKey, baseUrl, model, size, prompt, refs, opts?.signal, opts?.urlOnly
+    );
   }
   if (refs.length > 0) {
     throw new Error("image-to-image not implemented for openai chat");
