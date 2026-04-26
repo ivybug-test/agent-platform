@@ -487,9 +487,10 @@ const searchLyrics: ToolHandler = async (args, ctx) => {
   const song = typeof args?.song === "string" ? args.song.trim() : "";
   const artist = typeof args?.artist === "string" ? args.artist.trim() : "";
   if (!song) return { error: "song is required" };
-  // Domestic music sites first — Bocha / Tavily both honour the site:
-  // operator. A small site-bias is worth a lot for the singing flow.
-  const query = `${song}${artist ? " " + artist : ""} 歌词 site:y.qq.com OR site:music.163.com`;
+  // Bocha doesn't honour `site:` operators (treats them as plain
+  // text), but it DOES rank platform-name keywords aggressively. So
+  // append "QQ音乐 歌词" and Bocha returns mostly y.qq.com links.
+  const query = `${song}${artist ? " " + artist : ""} 歌词 QQ音乐`;
   const out = await runSearch(query, MAX_RESULTS_CAP, ctx.userId);
   return out;
 };
@@ -503,7 +504,10 @@ const searchLyrics: ToolHandler = async (args, ctx) => {
 const searchMusic: ToolHandler = async (args, ctx) => {
   const query = typeof args?.query === "string" ? args.query.trim() : "";
   if (!query) return { error: "query is required" };
-  const scoped = `${query} site:y.qq.com OR site:music.163.com`;
+  // Same Bocha quirk: append platform names as keywords (NOT `site:`
+  // operators). "周杰伦 QQ音乐" → all 5 hits on y.qq.com; the same
+  // query with `site:y.qq.com` returns 0 hits.
+  const scoped = `${query} QQ音乐 网易云音乐`;
   const out = await runSearch(scoped, MAX_RESULTS_CAP, ctx.userId);
   return out;
 };
