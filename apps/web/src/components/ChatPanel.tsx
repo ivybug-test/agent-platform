@@ -424,7 +424,18 @@ function MessageBubbleInner({
   const urls = useMemo(() => extractUrls(msg.content), [msg.content]);
 
   return (
-    <div id={msg.id ? `msg-${msg.id}` : undefined} className="rounded transition-shadow">
+    <div
+      id={msg.id ? `msg-${msg.id}` : undefined}
+      // content-visibility: auto lets the browser skip layout / paint
+      // for bubbles that are off-screen — buys most of the perf win
+      // virtualization would, with no schema or scroll-machinery
+      // changes. contain-intrinsic-size reserves a placeholder height
+      // so scrollbar / scrollTop math stays stable on bubbles that
+      // haven't been measured yet (the actual height is used once it
+      // first scrolls into view). 120px is a rough average for a
+      // 1-3 line bubble.
+      className="rounded transition-shadow [content-visibility:auto] [contain-intrinsic-size:auto_120px]"
+    >
       {showDayDivider && (
         <div className="flex justify-center my-3">
           <span className="text-[10px] px-2 py-0.5 rounded bg-base-300/60 text-base-content/50">
@@ -1006,15 +1017,35 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
 
   // Auto-scroll to bottom only when near bottom (not when loading older messages)
   const shouldAutoScroll = useRef(true);
+  // Pop a "↓ 最新" floating button when the user is far enough above
+  // bottom that fresh messages would scroll off-screen — useful after
+  // tapping a citation chip / scrolling up to read history. State (not
+  // ref) so the button can render conditionally; the setter no-ops
+  // when the value would be identical, so this isn't a per-scroll
+  // re-render.
+  const [farFromBottom, setFarFromBottom] = useState(false);
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     const handleUserScroll = () => {
       const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
       shouldAutoScroll.current = distFromBottom < 150;
+      setFarFromBottom((prev) => {
+        const next = distFromBottom > 500;
+        return prev === next ? prev : next;
+      });
     };
     container.addEventListener("scroll", handleUserScroll, { passive: true });
     return () => container.removeEventListener("scroll", handleUserScroll);
+  }, []);
+
+  /** Click handler for the floating "↓ 最新" button. */
+  const jumpToBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+    shouldAutoScroll.current = true;
+    setFarFromBottom(false);
   }, []);
 
   useEffect(() => {
@@ -1403,7 +1434,24 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     shouldAutoScroll.current = false;
 
     const highlight = (el: HTMLElement) => {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Explicit scroll-to math against the known scroll container —
+      // scrollIntoView relies on the browser picking the right
+      // ancestor and animating, which has been unreliable across
+      // mobile Safari / nested flex layouts. Instant scroll first,
+      // then animate the ring; the visual cue is the ring, not the
+      // motion, so dropping smooth here is fine and removes a class
+      // of "the smooth scroll got cancelled mid-flight" failures.
+      const container = scrollContainerRef.current;
+      if (container) {
+        const offset =
+          el.offsetTop - container.clientHeight / 2 + el.offsetHeight / 2;
+        container.scrollTo({
+          top: Math.max(0, offset),
+          behavior: "auto",
+        });
+      } else {
+        el.scrollIntoView({ block: "center" });
+      }
       el.classList.add("ring-2", "ring-primary/60");
       setTimeout(() => el.classList.remove("ring-2", "ring-primary/60"), 1200);
     };
@@ -1473,7 +1521,24 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   };
 
   return (
-    <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden" data-theme="dark">
+    <div className="relative flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden" data-theme="dark">
+      {farFromBottom && (
+        // Floats above the input dock, anchored to the outer relative
+        // container. Appears once the user scrolls more than ~500px
+        // above bottom, vanishes again on jump or when they scroll
+        // close enough that auto-scroll-on-new-message would catch
+        // them anyway.
+        <button
+          type="button"
+          onClick={jumpToBottom}
+          className="absolute right-3 bottom-24 z-10 flex items-center gap-1 px-3 h-8 rounded-full bg-base-100 border border-base-content/30 shadow text-xs text-base-content/80 hover:bg-base-200 active:bg-base-300"
+          title="跳到最新"
+          aria-label="跳到最新"
+        >
+          <span aria-hidden>↓</span>
+          <span>最新</span>
+        </button>
+      )}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-2 py-3 md:px-4">
         {isLoadingMore && (
           <div className="flex justify-center py-3">
