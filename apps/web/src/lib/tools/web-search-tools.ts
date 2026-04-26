@@ -494,6 +494,20 @@ const searchLyrics: ToolHandler = async (args, ctx) => {
   return out;
 };
 
+/** Free-form music search scoped to QQ 音乐 / 网易云. Use for browse-y
+ *  queries that don't have a specific song name — "周杰伦的歌",
+ *  "适合开车听的歌", "最近华语流行新歌", artist discography, album
+ *  lookups, etc. search_lyrics is for "I have a specific song name and
+ *  want lyrics + a stream link"; this one is for everything else
+ *  music-related. */
+const searchMusic: ToolHandler = async (args, ctx) => {
+  const query = typeof args?.query === "string" ? args.query.trim() : "";
+  if (!query) return { error: "query is required" };
+  const scoped = `${query} site:y.qq.com OR site:music.163.com`;
+  const out = await runSearch(scoped, MAX_RESULTS_CAP, ctx.userId);
+  return out;
+};
+
 // -----------------------------------------------------------------------------
 // Exports
 // -----------------------------------------------------------------------------
@@ -501,6 +515,7 @@ const searchLyrics: ToolHandler = async (args, ctx) => {
 export const webSearchToolHandlers: Record<string, ToolHandler> = {
   web_search: webSearch,
   search_lyrics: searchLyrics,
+  search_music: searchMusic,
   fetch_url: fetchUrl,
 };
 
@@ -542,6 +557,25 @@ export const webSearchToolDefs = [
           artist: {
             type: "string",
             description: "Artist or band name (optional, but improves results).",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "search_music",
+      description:
+        "Search QQ 音乐 / 网易云 for songs / artists / albums / playlists. Use for browse-y queries that don't have a specific song title — '周杰伦的歌' / '适合通勤听的歌' / artist discography lookups / new releases / etc. Use search_lyrics instead when the user names a SPECIFIC song they want to hear or quote.",
+      parameters: {
+        type: "object",
+        required: ["query"],
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Music-related search terms. Free form — artist name, mood, genre, album, etc. Don't add 'site:' yourself; the tool already scopes to music platforms.",
           },
         },
       },
