@@ -179,7 +179,7 @@ const searchMessages: ToolHandler = async (args, ctx) => {
     .orderBy(after ? asc(messages.createdAt) : desc(messages.createdAt))
     .limit(limit);
 
-  // Resolve sender display names (user name, or "Agent" for agent messages)
+  // Resolve sender display names (user name, or "agent" for agent messages)
   const userIds = [
     ...new Set(
       rows
@@ -201,7 +201,7 @@ const searchMessages: ToolHandler = async (args, ctx) => {
       id: r.id,
       senderName:
         r.senderType === "agent"
-          ? "Agent"
+          ? "agent"
           : r.senderId
             ? nameMap.get(r.senderId) || "User"
             : "User",

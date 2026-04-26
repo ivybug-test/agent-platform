@@ -575,9 +575,9 @@ export function buildLLMMessages(
       return `> [回复了一条更早的消息（已超出最近窗口）]\n`;
     }
     const targetName = target.senderId
-      ? nameMap.get(target.senderId) || (target.senderType === "agent" ? "Agent" : "User")
+      ? nameMap.get(target.senderId) || (target.senderType === "agent" ? "agent" : "User")
       : target.senderType === "agent"
-        ? "Agent"
+        ? "agent"
         : "User";
     let preview: string;
     if (target.contentType === "image") {

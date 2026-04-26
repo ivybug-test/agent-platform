@@ -26,7 +26,7 @@ export async function streamAgentResponse(
   userId: string,
   provider: Provider = "deepseek",
   mode: DeepSeekMode = "flash",
-  agentName: string = "Assistant"
+  agentName: string = "agent"
 ): Promise<Response> {
   const toolAuth = await signToolToken({ userId, roomId });
 

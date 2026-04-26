@@ -68,8 +68,8 @@ export async function GET(req: NextRequest) {
   }));
 
   // Resolve the room's primary agent so the client can label optimistic
-  // placeholders with the real name (DB might say "Assistant", "Maya",
-  // etc.). Avoids the "Agent → Assistant" flip on every page reload.
+  // placeholders with the real name (DB might say "agent", "Maya",
+  // etc.). Avoids the "agent → Assistant" flip on every page reload.
   const [agentMember] = await db
     .select()
     .from(roomMembers)

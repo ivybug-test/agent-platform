@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
   // Load room and agent
   const [room] = await db.select().from(rooms).where(eq(rooms.id, roomId));
   const agent = await getDefaultRoomAgent(roomId);
-  const agentName = agent?.name || "Assistant";
+  const agentName = agent?.name || "agent";
 
   // Parse @mention
   const { hasMention, cleanContent } = parseMention(content, agentName);

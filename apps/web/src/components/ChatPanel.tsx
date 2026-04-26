@@ -244,10 +244,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [menuForId, setMenuForId] = useState<string | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Real agent name from the room (e.g. "Assistant", "Maya"). Loaded with
+  // Real agent name from the room (e.g. "agent", "Maya"). Loaded with
   // the message history so optimistic placeholders match what the rest of
   // the chat shows after the SSE stream resolves.
-  const [agentName, setAgentName] = useState("Assistant");
+  const [agentName, setAgentName] = useState("agent");
 
   // Per-room DeepSeek model toggle: flash (fast/cheap default) or pro
   // (thinking/reasoning). Persisted in localStorage so a user's choice
@@ -893,7 +893,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           const isAgent = msg.senderType === "agent";
           const displayName = isMe
             ? "我"
-            : msg.senderName || (isAgent ? "Agent" : "用户");
+            : msg.senderName || (isAgent ? agentName : "用户");
           const bubbleColor = isAgent
             ? "chat-bubble-neutral"
             : isMe
