@@ -346,7 +346,7 @@ export function buildSystemPrompt(opts: {
 - remember: save a new lasting fact about the user. Only for cross-session information (identity, strong preferences, relationships, significant events, values, ongoing projects). NEVER for trivia, questions to you, emotional remarks, or chit-chat. If the fact describes a specific event in time (e.g. "went to Shanghai on 2026-04-14", "skipped lunch on 2026-04-19"), also pass eventAt as an ISO8601 timestamp. Do NOT record relative phrases like "今天" / "刚才" — always resolve them to an absolute date using the current time layer above. Near-duplicates reinforce the existing memory instead of creating a new one.
 - update_memory: call ONLY when the user explicitly corrects a fact ("actually it's X", "I moved", "no, not Y"). Pass the id from search_memories.
 - forget_memory: call ONLY when the user explicitly asks to forget something ("don't remember X", "stop tracking Y"). Pass the id from search_memories.
-- web_search: search the live web. Use ONLY for current events, real-world facts, products, or links you cannot answer from memory or training. Cap 5 results. **You MUST cite the source URL inline (markdown "[标题](url)") for every concrete fact, date, or claim you take from a search result. If a claim is not supported by a returned snippet, do NOT make it. If the search returned nothing useful, say so explicitly — never fall back to hallucinated knowledge.**
+- web_search: search the live web. **Use this PROACTIVELY before answering** any question about: a specific date / version / release ("X 什么时候发布"), a specific product or company ("X 公司怎么样"), prices, recent news, current events, weather, sports scores, anything time-bounded, anything where the user's question implies they want a verified answer rather than your guess. If you find yourself about to type a specific number, date, version string, or factual claim that you can't 100% recall — search first. Hallucinating a wrong release date is worse than spending a second on a search. Do NOT preface with "据我所知" / "我记得" — search and cite. Cap 5 results. **You MUST cite the source URL inline (markdown "[标题](url)") for every concrete fact you take from a search result. If a claim isn't supported by a returned snippet, drop it. If search returned nothing useful, say so — never fall back to hallucinated knowledge.**
 - search_lyrics: when the user asks you to sing or quote a specific song, call this BEFORE composing the reply to fetch the lyrics + a QQ Music / NetEase link.
 - fetch_url: read the full content of a webpage. Call this ONLY when the USER pasted a URL into chat (e.g. "看下这个 https://..." / "what does this page say <url>"). DO NOT call fetch_url on URLs that came back from web_search — the snippet is enough. Returns ~8000 chars of cleaned page text.
 
@@ -358,7 +358,7 @@ MEMORY WRITING IN GROUP CONVERSATIONS:
 - update_memory and forget_memory can only touch the current speaker's own memories (rows the tool returns as editable). Don't try to edit other members' rows.
 - search_memories is already scoped to the current speaker. Other members' memories are not retrievable here.
 
-Prefer not calling a tool if your current context is already sufficient.`;
+For memory / room tools: prefer not calling if your current context is already sufficient. For web_search: the bar is the OPPOSITE — when in doubt about a verifiable factual question, search.`;
 
   // Room context (Phase 3): facts shared across all members of the room.
   const roomMemoriesSection =

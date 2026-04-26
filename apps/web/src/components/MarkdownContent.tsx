@@ -9,7 +9,10 @@ import remarkGfm from "remark-gfm";
 export default function MarkdownContent({ children }: { children: string }) {
   if (!children) return null;
   return (
-    <div className="markdown-body text-sm leading-relaxed">
+    // `break-words` + the explicit anywhere wrap on <a>/<code> below
+    // keep raw URLs and long tokens from blowing past the chat-bubble
+    // width — common in agent replies that cite long search-result URLs.
+    <div className="markdown-body text-sm leading-relaxed break-words [overflow-wrap:anywhere]">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -55,7 +58,7 @@ export default function MarkdownContent({ children }: { children: string }) {
           ),
           a: ({ children, href, ...p }) => (
             <a
-              className="link link-primary"
+              className="link link-primary break-all"
               href={href}
               target="_blank"
               rel="noopener noreferrer"
@@ -74,7 +77,7 @@ export default function MarkdownContent({ children }: { children: string }) {
               );
             }
             return (
-              <code className="px-1 py-0.5 rounded bg-base-content/10 text-xs" {...p}>
+              <code className="px-1 py-0.5 rounded bg-base-content/10 text-xs break-all" {...p}>
                 {children}
               </code>
             );
