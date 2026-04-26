@@ -1434,19 +1434,26 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     shouldAutoScroll.current = false;
 
     const highlight = (el: HTMLElement) => {
-      // Explicit scroll-to math against the known scroll container —
-      // scrollIntoView relies on the browser picking the right
-      // ancestor and animating, which has been unreliable across
-      // mobile Safari / nested flex layouts. Instant scroll first,
-      // then animate the ring; the visual cue is the ring, not the
-      // motion, so dropping smooth here is fine and removes a class
-      // of "the smooth scroll got cancelled mid-flight" failures.
+      // Explicit scroll-to math. el.offsetTop is relative to the
+      // element's offsetParent (nearest positioned ancestor) — that's
+      // the OUTER wrapper here (it has `relative` for the "↓ 最新"
+      // button anchor), NOT the scroll container. Using offsetTop
+      // would land us off by the scroll container's distance from the
+      // wrapper's top. getBoundingClientRect bypasses offsetParent
+      // entirely and measures actual visual positions, so converting
+      // via (elRect.top - containerRect.top + container.scrollTop)
+      // gives the exact intra-container offset regardless of which
+      // ancestor happens to be positioned.
       const container = scrollContainerRef.current;
       if (container) {
-        const offset =
-          el.offsetTop - container.clientHeight / 2 + el.offsetHeight / 2;
+        const containerRect = container.getBoundingClientRect();
+        const elRect = el.getBoundingClientRect();
+        const elTopInContainer =
+          elRect.top - containerRect.top + container.scrollTop;
+        const targetTop =
+          elTopInContainer - container.clientHeight / 2 + elRect.height / 2;
         container.scrollTo({
-          top: Math.max(0, offset),
+          top: Math.max(0, targetTop),
           behavior: "auto",
         });
       } else {
