@@ -1302,18 +1302,27 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               // placeholder messageId (queued: true) — the actual
               // gen runs server-side in the background. Insert a
               // pending bubble right here so the user sees a
-              // "生成中..." spinner without waiting for Redis. When
-              // the BG task finishes, a "message-updated" event over
-              // socket.io will swap in the real image. seenIds.add
-              // prevents the eventual Redis echo from re-inserting.
+              // "生成中..." spinner without waiting for Redis.
+              //
+              // INSERT-POSITION CRITICAL: the image bubble must NOT
+              // be the last message. The SSE `parsed.content` handler
+              // above mutates `prev[prev.length-1]` with `content:
+              // last.content + chunk` (that's how the agent's text
+              // reply accumulates). If the image bubble is at the
+              // end, all of the agent's "画着呢~" / "画好了" text
+              // gets appended to its content field — corrupting the
+              // URL. Splice the image in BEFORE the streaming agent
+              // text bubble, which is always at len-1, so the SSE
+              // append keeps targeting the text bubble.
               if (knownName === "generate_image" && tr.ok && tr.data) {
                 const newId =
                   typeof tr.data.messageId === "string" ? tr.data.messageId : "";
                 if (newId && !seenIds.current.has(newId)) {
                   seenIds.current.add(newId);
-                  setMessages((prev) => [
-                    ...prev,
-                    {
+                  setMessages((prev) => {
+                    const insertAt = Math.max(0, prev.length - 1);
+                    const next = [...prev];
+                    next.splice(insertAt, 0, {
                       id: newId,
                       senderType: "agent",
                       senderId: agentIdRef.current,
@@ -1321,8 +1330,9 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                       content: "",
                       contentType: "image-pending",
                       createdAt: new Date().toISOString(),
-                    },
-                  ]);
+                    });
+                    return next;
+                  });
                 }
               }
               if (knownName === "speak" && tr.ok && knownArgs) {
