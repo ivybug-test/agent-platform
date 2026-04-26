@@ -11,6 +11,7 @@ import {
   stopAll as stopAllTts,
   stripMarkdownForTts,
 } from "@/lib/audio/streaming-player";
+import { isHeadphonesConnected } from "@/lib/audio/headphone-check";
 
 /** Pull every http(s) URL out of a message body. Trailing CJK and ASCII
  *  punctuation gets stripped so "看看 https://example.com。" doesn't try
@@ -51,6 +52,183 @@ function ThinkingPanel({
         {reasoning}
       </div>
     </details>
+  );
+}
+
+/** Single search/fetch tool call, mirroring `ToolInvocation` from
+ *  packages/db/schema.ts. Duplicated here so the client doesn't pull a
+ *  server-side type into the bundle. */
+interface ToolHit {
+  title: string;
+  url: string;
+  snippet?: string;
+}
+interface ToolInvocation {
+  name: string;
+  query?: string;
+  results?: ToolHit[];
+  fetched?: { url: string; title?: string; charCount?: number };
+  provider?: string;
+  error?: string;
+  /** Only set on the optimistic placeholder we push when the SSE stream
+   *  delivers a tool_call but the matching tool_result hasn't arrived yet.
+   *  Persisted invocations always have a final state. */
+  pending?: boolean;
+}
+
+const TOOL_LABEL: Record<string, string> = {
+  web_search: "搜索网页",
+  search_lyrics: "搜索歌词",
+  search_music: "搜索音乐",
+  fetch_url: "读取网页",
+};
+
+const VISIBLE_TOOLS = new Set([
+  "web_search",
+  "search_lyrics",
+  "search_music",
+  "fetch_url",
+]);
+
+/** Pull the user-facing label out of a (possibly partial) JSON args
+ *  string. Tolerates malformed JSON — the SSE stream may deliver args in
+ *  chunks, and we'd rather show the card with no query than crash. */
+function queryFromArgs(name: string, argsJson: string): string | undefined {
+  if (!argsJson) return undefined;
+  try {
+    const obj = JSON.parse(argsJson) as Record<string, unknown>;
+    if (name === "search_lyrics") {
+      const song = typeof obj.song === "string" ? obj.song : "";
+      const artist = typeof obj.artist === "string" ? obj.artist : "";
+      return artist ? `${song} ${artist}` : song || undefined;
+    }
+    if (name === "fetch_url") {
+      return typeof obj.url === "string" ? obj.url : undefined;
+    }
+    return typeof obj.query === "string" ? obj.query : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Convert a raw tool_result payload (whatever the tool callback
+ *  returned) into the trimmed shape we render. Mirrors the server-side
+ *  buildInvocation in lib/chat/stream.ts. */
+function resolveToolInvocation(
+  name: string,
+  query: string | undefined,
+  payload: any,
+  ok: boolean
+): ToolInvocation {
+  const inv: ToolInvocation = { name };
+  if (query) inv.query = query;
+  if (!ok || !payload) {
+    inv.error = payload?.error || "tool call failed";
+    return inv;
+  }
+  if (name === "fetch_url") {
+    if (payload.data?.url) {
+      inv.fetched = {
+        url: payload.data.url,
+        title: payload.data.title,
+        charCount: payload.data.charCount,
+      };
+    }
+    if (payload.data?.provider) inv.provider = payload.data.provider;
+    if (payload.error) inv.error = payload.error;
+    return inv;
+  }
+  if (Array.isArray(payload.data?.results)) {
+    inv.results = payload.data.results.map((r: any) => ({
+      title: r.title || r.url,
+      url: r.url,
+      snippet: r.snippet,
+    }));
+  }
+  if (payload.data?.provider) inv.provider = payload.data.provider;
+  if (payload.error) inv.error = payload.error;
+  return inv;
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/** Compact "已搜索 N 个网页" card rendered above the agent bubble. Open it
+ *  to see each result (title, host, snippet) as a clickable row. */
+function ToolInvocationsCard({ invocations }: { invocations: ToolInvocation[] }) {
+  if (!invocations || invocations.length === 0) return null;
+  // Group invocations by tool name so the header reads "搜索网页 (3)".
+  // Most replies only call one tool, so this stays compact.
+  return (
+    <div className="mb-1 space-y-1">
+      {invocations.map((inv, idx) => {
+        const label = TOOL_LABEL[inv.name] || inv.name;
+        const hits = inv.results || [];
+        const isFetch = inv.name === "fetch_url";
+        const summary = inv.pending
+          ? `${label}中…${inv.query ? ` "${inv.query}"` : ""}`
+          : inv.error
+            ? `${label}失败${inv.query ? ` "${inv.query}"` : ""}`
+            : isFetch
+              ? `已读取 ${inv.fetched?.title || safeHost(inv.fetched?.url || "")}`
+              : `已${label} ${hits.length} 个结果${inv.query ? ` "${inv.query}"` : ""}`;
+        return (
+          <details
+            key={idx}
+            className="text-xs opacity-80 select-none cursor-pointer rounded border border-base-content/15 bg-base-100/40 px-2 py-1"
+          >
+            <summary className="flex items-center gap-1 list-none [&::-webkit-details-marker]:hidden">
+              <span>{isFetch ? "📄" : "🔎"}</span>
+              <span className={inv.pending ? "animate-pulse" : ""}>{summary}</span>
+              {!inv.pending && (hits.length > 0 || isFetch) && (
+                <span className="opacity-60">▾</span>
+              )}
+            </summary>
+            {!inv.pending && hits.length > 0 && (
+              <ol className="mt-1 space-y-1 pl-1">
+                {hits.map((h, i) => (
+                  <li key={i} className="leading-snug">
+                    <a
+                      href={h.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="link link-hover font-medium break-all"
+                    >
+                      {h.title || h.url}
+                    </a>
+                    <span className="ml-1 opacity-50">{safeHost(h.url)}</span>
+                    {h.snippet && (
+                      <div className="opacity-70 line-clamp-2">{h.snippet}</div>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {!inv.pending && isFetch && inv.fetched?.url && (
+              <div className="mt-1 pl-1 leading-snug">
+                <a
+                  href={inv.fetched.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="link link-hover break-all"
+                >
+                  {inv.fetched.title || inv.fetched.url}
+                </a>
+                <span className="ml-1 opacity-50">{safeHost(inv.fetched.url)}</span>
+              </div>
+            )}
+            {inv.error && (
+              <div className="mt-1 pl-1 opacity-60">{inv.error}</div>
+            )}
+          </details>
+        );
+      })}
+    </div>
   );
 }
 
@@ -138,6 +316,11 @@ interface Message {
    *  without a follow-up fetch. Click → scroll to source. */
   replyToMessageId?: string | null;
   replyTo?: ReplyToSnippet | null;
+  /** Search / fetch tool calls made while producing this reply. Drives
+   *  the "已搜索 N 个网页" card above the bubble. Live-stream entries
+   *  start with `pending: true` and resolve as the matching tool_result
+   *  arrives. */
+  toolInvocations?: ToolInvocation[];
 }
 
 interface ChatPanelProps {
@@ -320,6 +503,18 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const ttsCanceledRef = useRef(false);
   const isStreamingRef = useRef(false);
   const voiceModeRef = useRef(false);
+  // Per-reply gate: when the user enabled "无耳机时静音" on /me and we
+  // can't see headphones at the start of this reply, suppress TTS for
+  // the entire reply (decided once up-front so we don't keep re-checking
+  // mid-stream). True = play allowed.
+  const ttsAllowedRef = useRef(true);
+  // Defensive dup-suppression. Each chunk we ship to MiniMax is
+  // identified by its starting cursor in the agent's reply; if
+  // tryAdvanceTts somehow gets called twice for the same start cursor
+  // (React strict-mode reentry, an SSE proxy duplicating events,
+  // whatever else), we play it once and then ignore the second call.
+  // Cleared per-reply alongside the rest of the queue.
+  const playedCursorsRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     voiceModeRef.current = voiceMode;
   }, [voiceMode]);
@@ -329,6 +524,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     ttsBusyRef.current = false;
     liveAgentTextRef.current = "";
     ttsCanceledRef.current = false;
+    ttsAllowedRef.current = true;
+    playedCursorsRef.current = new Set();
   };
 
   /** Pull the next playable chunk out of liveAgentTextRef and send to
@@ -340,6 +537,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const tryAdvanceTts = (finalFlush = false) => {
     if (!voiceModeRef.current) return;
     if (ttsCanceledRef.current) return;
+    if (!ttsAllowedRef.current) return;
     if (ttsBusyRef.current) return;
 
     const full = liveAgentTextRef.current;
@@ -356,6 +554,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     if (!chunk) return;
 
     const cleaned = stripMarkdownForTts(chunk);
+    const startCursor = ttsCursorRef.current;
     ttsCursorRef.current += chunk.length;
 
     if (!cleaned.trim()) {
@@ -363,6 +562,18 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       tryAdvanceTts(finalFlush);
       return;
     }
+
+    if (playedCursorsRef.current.has(startCursor)) {
+      // Same chunk already shipped to MiniMax once. This shouldn't
+      // happen — log it so we can see which path is misbehaving.
+      console.warn(
+        "[tts] dup chunk suppressed",
+        { startCursor, len: chunk.length, preview: cleaned.slice(0, 30) }
+      );
+      tryAdvanceTts(finalFlush);
+      return;
+    }
+    playedCursorsRef.current.add(startCursor);
 
     ttsBusyRef.current = true;
     setIsPlaying(true);
@@ -457,6 +668,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // agent message starts; first {reasoning} event stamps it, first
   // {content} event closes it out into reasoningMs on the message.
   const reasoningStartRef = useRef(0);
+  // Live mapping of tool_call.id → tool name, so we can resolve the
+  // matching tool_result event back to its placeholder invocation. Cleared
+  // each time a new agent message starts.
+  const pendingToolCallIds = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
     setMessages([]);
@@ -479,6 +694,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           createdAt: r.createdAt,
           reasoning: r.metadata?.reasoning,
           reasoningMs: r.metadata?.reasoningMs,
+          toolInvocations: r.metadata?.toolInvocations,
           replyToMessageId: r.replyToMessageId ?? null,
           replyTo: r.replyTo ?? null,
         }));
@@ -518,6 +734,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         createdAt: r.createdAt,
         reasoning: r.metadata?.reasoning,
         reasoningMs: r.metadata?.reasoningMs,
+        toolInvocations: r.metadata?.toolInvocations,
       }));
     for (const m of fetched) {
       if (m.id) seenIds.current.add(m.id);
@@ -554,6 +771,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           createdAt: r.createdAt,
           reasoning: r.metadata?.reasoning,
           reasoningMs: r.metadata?.reasoningMs,
+          toolInvocations: r.metadata?.toolInvocations,
           replyToMessageId: r.replyToMessageId ?? null,
           replyTo: r.replyTo ?? null,
         }));
@@ -726,6 +944,29 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     resetTtsQueue();
     isStreamingRef.current = true;
 
+    // Headphone gate. The /me toggle "无耳机时静音" persists to localStorage;
+    // when on, we try to detect a non-speaker output device and suppress
+    // TTS for the upcoming reply if none is found. Decided once per
+    // reply, fired async so we don't block message send. The toast keeps
+    // the user from wondering why nothing played.
+    if (voiceMode) {
+      let muteNoHp = false;
+      try {
+        muteNoHp =
+          localStorage.getItem("tts-mute-without-headphones") === "true";
+      } catch {}
+      if (muteNoHp) {
+        isHeadphonesConnected().then((ok) => {
+          if (!ok) {
+            ttsAllowedRef.current = false;
+            stopAllTts();
+            setIsPlaying(false);
+            setTtsError("未检测到耳机 — 本条静音");
+          }
+        });
+      }
+    }
+
     // Snapshot the staged quote so user can clear/replace it while we're
     // mid-flight without leaving the optimistic message holding a stale
     // reference.
@@ -762,6 +1003,7 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       if (!res.ok || !res.body) throw new Error("Request failed");
 
       reasoningStartRef.current = 0;
+      pendingToolCallIds.current.clear();
       setMessages((prev) => [
         ...prev,
         {
@@ -840,6 +1082,78 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               // instead of waiting for the whole reply to finish.
               liveAgentTextRef.current += parsed.content;
               tryAdvanceTts(false);
+            }
+            // Tool calls — push an optimistic pending row when the call
+            // starts; resolve it in place when the matching tool_result
+            // event arrives. We only render search/fetch tools (memory
+            // tools stay invisible — same allowlist as stream.ts).
+            if (parsed.tool_call) {
+              const tc = parsed.tool_call as {
+                id: string;
+                name: string;
+                args: string;
+              };
+              if (VISIBLE_TOOLS.has(tc.name)) {
+                pendingToolCallIds.current.set(tc.id, tc.name);
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  const next = [...(last.toolInvocations || [])];
+                  next.push({
+                    name: tc.name,
+                    query: queryFromArgs(tc.name, tc.args),
+                    pending: true,
+                  });
+                  updated[updated.length - 1] = {
+                    ...last,
+                    toolInvocations: next,
+                  };
+                  return updated;
+                });
+              }
+            }
+            if (parsed.tool_result) {
+              const tr = parsed.tool_result as {
+                id: string;
+                name?: string;
+                ok: boolean;
+                data?: any;
+              };
+              const knownName =
+                pendingToolCallIds.current.get(tr.id) || tr.name || "";
+              pendingToolCallIds.current.delete(tr.id);
+              if (knownName && VISIBLE_TOOLS.has(knownName)) {
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  const list = [...(last.toolInvocations || [])];
+                  // Find the matching pending row (latest one for this
+                  // tool name) and replace it with the resolved data.
+                  let idx = -1;
+                  for (let i = list.length - 1; i >= 0; i--) {
+                    if (list[i].name === knownName && list[i].pending) {
+                      idx = i;
+                      break;
+                    }
+                  }
+                  const resolved = resolveToolInvocation(
+                    knownName,
+                    list[idx]?.query,
+                    tr.data,
+                    tr.ok
+                  );
+                  if (idx >= 0) {
+                    list[idx] = resolved;
+                  } else {
+                    list.push(resolved);
+                  }
+                  updated[updated.length - 1] = {
+                    ...last,
+                    toolInvocations: list,
+                  };
+                  return updated;
+                });
+              }
             }
           } catch {}
         }
@@ -1031,6 +1345,11 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
                     </a>
                   ) : (
                     <>
+                      {isAgent &&
+                        msg.toolInvocations &&
+                        msg.toolInvocations.length > 0 && (
+                          <ToolInvocationsCard invocations={msg.toolInvocations} />
+                        )}
                       {msg.reasoning && (
                         <ThinkingPanel
                           reasoning={msg.reasoning}
