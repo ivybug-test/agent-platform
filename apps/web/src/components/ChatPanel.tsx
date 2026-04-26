@@ -1792,7 +1792,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         })
       );
     };
-    const interval = setInterval(tick, 3000);
+    // 5s rather than 3s — Doubao gen is ~20s so we don't need a
+    // tighter cadence, and halving the load on /api/messages/<id>
+    // takes pressure off the Postgres connection pool.
+    const interval = setInterval(tick, 5000);
     tick();
     return () => {
       stopped = true;
@@ -1800,12 +1803,25 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     };
   }, [pendingImageCount]);
 
-  // Click-anywhere closes the open action menu.
+  // Click-anywhere closes the open action menu. We arm the listener
+  // after a short delay so the synthesized `click` that browsers fire
+  // right after `touchend` (following the long-press setTimeout that
+  // opened the menu) doesn't slam it shut on the same gesture.
   useEffect(() => {
     if (!menuForId) return;
-    const onDocClick = () => setMenuForId(null);
+    let armed = false;
+    const armTimer = setTimeout(() => {
+      armed = true;
+    }, 100);
+    const onDocClick = () => {
+      if (!armed) return;
+      setMenuForId(null);
+    };
     document.addEventListener("click", onDocClick);
-    return () => document.removeEventListener("click", onDocClick);
+    return () => {
+      clearTimeout(armTimer);
+      document.removeEventListener("click", onDocClick);
+    };
   }, [menuForId]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
