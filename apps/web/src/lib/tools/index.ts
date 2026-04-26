@@ -6,6 +6,7 @@ import { memoryToolHandlers, memoryToolDefs } from "./memory-tools";
 import { webSearchToolHandlers, webSearchToolDefs } from "./web-search-tools";
 import { voiceToolHandlers, voiceToolDefs } from "./voice-tools";
 import { imageReadToolHandlers, imageReadToolDefs } from "./image-read-tools";
+import { imageToolHandlers, imageToolDefs } from "./image-tools";
 
 /**
  * Registry of tools the agent can call. Entries keyed by the OpenAI
@@ -19,6 +20,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
   ...webSearchToolHandlers,
   ...voiceToolHandlers,
   ...imageReadToolHandlers,
+  ...imageToolHandlers,
 };
 
 /** OpenAI-shaped tool definitions passed to agent-runtime in the /chat body. */
@@ -27,6 +29,7 @@ export const agentToolDefs = [
   ...webSearchToolDefs,
   ...voiceToolDefs,
   ...imageReadToolDefs,
+  ...imageToolDefs,
 ];
 
 export function getTool(name: string): ToolHandler | undefined {

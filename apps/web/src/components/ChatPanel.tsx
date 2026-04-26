@@ -952,8 +952,17 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
       if (!msg.content) return;
       // Skip our own user messages (already shown locally)
       if (msg.senderType === "user" && msg.senderId === currentUserId) return;
-      // Skip agent messages triggered by us (already rendered via SSE)
-      if (msg.senderType === "agent" && event.triggeredBy === currentUserId) return;
+      // Skip agent text messages triggered by us — those streamed in via
+      // SSE already, the Redis echo would just duplicate. EXCEPT image
+      // messages from generate_image: the SSE only carries text chunks,
+      // so the tool-inserted image bubble has never reached this client
+      // without the Redis path. seenIds dedup below still handles the
+      // after-reload case.
+      if (
+        msg.senderType === "agent" &&
+        event.triggeredBy === currentUserId &&
+        msg.contentType !== "image"
+      ) return;
       // Skip duplicates
       if (msg.id && seenIds.current.has(msg.id)) return;
       if (msg.id) seenIds.current.add(msg.id);
