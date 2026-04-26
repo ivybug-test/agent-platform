@@ -491,7 +491,31 @@ When search_messages returns matches: cite the most relevant 1-2 via [<short lab
 
 When search_messages returns nothing relevant: say so explicitly ("我搜了一下，房间里没找到 X 相关的内容"), don't fall back to guessing. Ask the user to clarify a date / keyword if it would help narrow the search.
 
-This rule pairs with #8 — #8 is about external facts you can't verify from training; #9 is about ROOM HISTORY you CAN verify via search_messages but might still be tempted to fake.`,
+This rule pairs with #8 — #8 is about external facts you can't verify from training; #9 is about ROOM HISTORY you CAN verify via search_messages but might still be tempted to fake.
+
+10. ANTI-HALLUCINATION OF TOOL USE — never SAY you called a tool that you didn't actually call.
+
+The platform actually tracks tool calls. The user has receipts. If you write "(点 🔊 听语音版~)" in your reply but didn't emit a tool_call for speak this turn, no audio button appears and the user immediately catches you. That's a worse failure than just answering plainly.
+
+Forbidden phrases UNLESS you actually emitted the matching tool_call in THIS turn:
+- "🔊" / "(点 🔊 听语音版)" / "听语音版" / "(语音已发)" / "(语音版~)" → only after speak({text})
+- "画好了" / "图给你了" / "(图已生成)" / "看这张" / "上图~" → only after generate_image({prompt})
+- "我刚搜了一下" / "(查了下资料)" / "据搜索结果" / "翻了下资料" → only after web_search
+- "我看了那张图" / "图里有 X" → only after read_image({messageId})
+- "搜到了房间里这条" / "翻了下聊天记录" → only after search_messages
+
+Two honest options when the user requests an action that needs a tool:
+  (a) Call the tool. Then your reply CAN reference the result naturally.
+  (b) Don't call. Then your reply MUST NOT presuppose the tool ran. Just say plainly: "我说一下" / "好" / your text.
+
+NEVER DOUBLE DOWN ACROSS TURNS. If the user says "你没真调工具" / "其实没出按钮" / "图呢", they're right — trust the user, NOT your own past visible text. Admit immediately and retry the tool for real:
+  ✅ "对不起，上一轮我说有调用但实际没发出去，这次真的调一下..."
+  ❌ "我真的调了！是前端通路断了 / DB 你查一下 / 不信你点🔊!"
+The user has the receipts; defending a fake claim is a worse failure than admitting it.
+
+If a past assistant turn in this conversation has '[平台备注: ...]' appended at the end, that's the platform telling you THAT past turn hallucinated a tool call. Don't defend it. Acknowledge the failure if asked, and this turn actually call the tool.
+
+This rule pairs with #7 (TOOL HONESTY) — #7 forbids DENYING tools you DID use; #10 forbids CLAIMING tools you DID NOT use. Both: your reply must match ground truth, not what you wish you had done.`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -713,6 +737,31 @@ export function buildLLMMessages(
       // reply ("(msgId=...) ..." would leak into output). When user
       // asks about something the agent said, search_messages can find
       // it (it scans the whole room, agent-included).
+      //
+      // EXCEPTION: tool-use hallucination detox. If a past assistant
+      // turn wrote phrases that PRESUPPOSE a tool ran (🔊 / 听语音版 /
+      // etc) but the matching metadata is absent, the model
+      // hallucinated the tool call — and on the next turn it'll keep
+      // defending the fake claim ("我真的调了!"). Append a [平台备注]
+      // to that past turn's visible content so the model sees ground
+      // truth in its own context window. Combined with rule #10 in
+      // the system prompt, this breaks the doubling-down loop.
+      const halluNotes: string[] = [];
+      const cnt = m.content || "";
+      if (
+        !m.metadata?.audio &&
+        /🔊|听语音版|语音版|\(点.{0,4}听\)/.test(cnt)
+      ) {
+        halluNotes.push(
+          "你写了 '🔊 / 听语音版' 字样但本轮 metadata.audio 为空 — speak 工具没真调。这是幻觉，下轮别辩护，承认并真调一次。"
+        );
+      }
+      if (halluNotes.length > 0) {
+        return {
+          role: "assistant" as const,
+          content: `${cnt}\n\n[平台备注: ${halluNotes.join(" / ")}]` as LLMMessageContent,
+        };
+      }
       return {
         role: "assistant" as const,
         content: m.content as LLMMessageContent,
