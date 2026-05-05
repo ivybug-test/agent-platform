@@ -2,6 +2,7 @@ import { db, messages, users, userMemories } from "@agent-platform/db";
 import { eq, desc, and, isNull, isNotNull, sql } from "drizzle-orm";
 import { llmCompleteJSON } from "../llm.js";
 import { createLogger } from "@agent-platform/logger";
+import { textSimilarity } from "../text-similarity.js";
 
 const log = createLogger("memory-worker");
 
@@ -100,31 +101,6 @@ function messageBody(m: {
   const cap =
     (m.metadata as { vision?: { caption?: string } } | null)?.vision?.caption;
   return cap ? `[image: ${cap}]` : "[image: (caption pending)]";
-}
-
-/** Character-bigram Jaccard similarity (CJK-safe). */
-function textSimilarity(a: string, b: string): number {
-  const bigrams = (s: string) => {
-    const chars = [...s.toLowerCase().replace(/\s+/g, "")];
-    const map = new Map<string, number>();
-    for (let i = 0; i < chars.length - 1; i++) {
-      const bg = chars[i] + chars[i + 1];
-      map.set(bg, (map.get(bg) || 0) + 1);
-    }
-    return map;
-  };
-  const bgA = bigrams(a);
-  const bgB = bigrams(b);
-  let intersection = 0;
-  let union = 0;
-  const keys = new Set([...bgA.keys(), ...bgB.keys()]);
-  for (const k of keys) {
-    const ca = bgA.get(k) || 0;
-    const cb = bgB.get(k) || 0;
-    intersection += Math.min(ca, cb);
-    union += Math.max(ca, cb);
-  }
-  return union === 0 ? 0 : intersection / union;
 }
 
 /** Detect language of text: if >30% characters are CJK, call it Chinese. */

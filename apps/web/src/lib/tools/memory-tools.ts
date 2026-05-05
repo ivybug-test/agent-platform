@@ -3,6 +3,7 @@ import { and, eq, isNull, isNotNull, desc, asc, ilike, or, lt, gte, lte, inArray
 import type { ToolHandler } from "./index";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { resolveRoomMemberByName } from "./resolvers";
+import { textSimilarity } from "@/lib/text-similarity";
 
 const VALID_CATEGORIES = [
   "identity",
@@ -20,34 +21,6 @@ type Importance = (typeof VALID_IMPORTANCES)[number];
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-
-/**
- * Character-bigram Jaccard similarity. Works for CJK and English alike.
- * Returns 0..1 — identical bigram multisets = 1.
- */
-function textSimilarity(a: string, b: string): number {
-  const bigrams = (s: string): Map<string, number> => {
-    const chars = [...s.toLowerCase().replace(/\s+/g, "")];
-    const map = new Map<string, number>();
-    for (let i = 0; i < chars.length - 1; i++) {
-      const bg = chars[i] + chars[i + 1];
-      map.set(bg, (map.get(bg) || 0) + 1);
-    }
-    return map;
-  };
-  const bgA = bigrams(a);
-  const bgB = bigrams(b);
-  let intersection = 0;
-  let union = 0;
-  const allKeys = new Set([...bgA.keys(), ...bgB.keys()]);
-  for (const k of allKeys) {
-    const ca = bgA.get(k) || 0;
-    const cb = bgB.get(k) || 0;
-    intersection += Math.min(ca, cb);
-    union += Math.max(ca, cb);
-  }
-  return union === 0 ? 0 : intersection / union;
-}
 
 function clampLimit(n: unknown, dflt: number, max: number): number {
   const v = typeof n === "number" ? Math.floor(n) : dflt;

@@ -2,6 +2,7 @@ import { db, messages, roomMembers, users, roomSummaries, userMemories, roomMemo
 import { eq, and, inArray, desc, ne, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { createLogger } from "@agent-platform/logger";
+import { textSimilarity } from "@/lib/text-similarity";
 
 // Dynamic memory score (Phase A). Mirrors the Generative-Agents formula:
 // effective = strength × importance_weight × exp(-age_days / HALF_LIFE).
@@ -524,35 +525,6 @@ GROUND TRUTH FOR YOUR OWN TOOL CALLS — every tool call you actually make produ
     .join("\n\n");
 }
 
-/**
- * Compute similarity between two strings using character-level bigrams.
- * Works for CJK text (no word boundaries) and English alike.
- * Returns 0-1, where 1 means identical bigram sets.
- */
-function textSimilarity(a: string, b: string): number {
-  const bigrams = (s: string): Map<string, number> => {
-    const chars = [...s.replace(/\s+/g, "")]; // spread handles CJK correctly
-    const map = new Map<string, number>();
-    for (let i = 0; i < chars.length - 1; i++) {
-      const bg = chars[i] + chars[i + 1];
-      map.set(bg, (map.get(bg) || 0) + 1);
-    }
-    return map;
-  };
-  const bgA = bigrams(a);
-  const bgB = bigrams(b);
-  let intersection = 0;
-  let union = 0;
-  const allKeys = new Set([...bgA.keys(), ...bgB.keys()]);
-  for (const k of allKeys) {
-    const ca = bgA.get(k) || 0;
-    const cb = bgB.get(k) || 0;
-    intersection += Math.min(ca, cb);
-    union += Math.max(ca, cb);
-  }
-  return union === 0 ? 0 : intersection / union;
-}
-
 interface ContextMessage {
   id?: string;
   senderType: string;
@@ -589,7 +561,13 @@ function deduplicateContext(msgs: ContextMessage[]): ContextMessage[] {
   const skipIndices = new Set<number>();
   for (let i = 0; i < agentEntries.length; i++) {
     for (let j = i + 1; j < agentEntries.length; j++) {
-      if (textSimilarity(agentEntries[i].content, agentEntries[j].content) > 0.4) {
+      // Skip lowercasing — context dedup is CJK-dominant; preserves
+      // pre-consolidation behavior bit-for-bit.
+      if (
+        textSimilarity(agentEntries[i].content, agentEntries[j].content, {
+          lowercase: false,
+        }) > 0.4
+      ) {
         // Keep the later one (j), mark the earlier one (i) for removal
         skipIndices.add(agentEntries[i].index);
         break;
