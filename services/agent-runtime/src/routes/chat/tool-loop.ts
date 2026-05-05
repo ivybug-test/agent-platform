@@ -1,0 +1,327 @@
+import { chatConfig, type Provider, type DeepSeekMode } from "../../llm.js";
+import { mockToolStream } from "../../mock.js";
+import {
+  CHAT_MAX_TOKENS,
+  TOOL_CALL_TIMEOUT_MS,
+} from "../../constants.js";
+import { detectHallucinatedTool } from "../../hallucination-detector.js";
+import type {
+  ToolDef,
+  ToolChoice,
+  AccumulatedToolCall,
+} from "../../types.js";
+import { createLogger } from "@agent-platform/logger";
+
+const log = createLogger("agent-runtime");
+
+interface ToolLoopArgs {
+  initialMessages: any[];
+  tools: ToolDef[];
+  toolCallbackUrl: string;
+  toolAuth: string;
+  maxRounds: number;
+  provider: Provider;
+  mode: DeepSeekMode;
+  requestedToolChoice: ToolChoice | undefined;
+  isMock: boolean;
+  startTime: number;
+  sendEvent: (obj: unknown) => void;
+}
+
+/** Multi-round tool-calling loop. Streams content + tool_call /
+ *  tool_result events. Detects content/tool_calls inconsistencies
+ *  ("I wrote '听语音版' but didn't emit speak") and retries once with
+ *  forced tool_choice on the missing tool. */
+export async function runToolLoop({
+  initialMessages,
+  tools,
+  toolCallbackUrl,
+  toolAuth,
+  maxRounds,
+  provider,
+  mode,
+  requestedToolChoice,
+  isMock,
+  startTime,
+  sendEvent,
+}: ToolLoopArgs) {
+  const messages: any[] = [...initialMessages];
+  let totalChars = 0;
+  let round = 0;
+  let done = false;
+
+  // Track tools the agent ACTUALLY emitted across all rounds this
+  // turn — the validator uses this to spot "I claimed a tool ran
+  // but no tool_call exists" hallucinations. Retries are capped so
+  // a stubborn model can't spin the loop forever.
+  const toolsCalledThisTurn = new Set<string>();
+  let retriesLeft = 1;
+  // Set when the validator wants the next round to FORCE a specific
+  // tool_choice. Cleared after one use so it doesn't leak past retry.
+  let forceToolChoice: ToolChoice | null = null;
+
+  try {
+    while (!done && round < maxRounds) {
+      const accumulated: Record<number, AccumulatedToolCall> = {};
+      let finishReason: string | null = null;
+      let assistantText = "";
+
+      // Pick this round's tool_choice. Order of preference:
+      //   1. Validator-forced override (after a hallucination retry)
+      //   2. Per-request override (招1 — web layer's regex routing)
+      //   3. "auto" default
+      const roundToolChoice: ToolChoice =
+        forceToolChoice ?? requestedToolChoice ?? "auto";
+      forceToolChoice = null;
+
+      const iter: AsyncIterable<any> = await (async () => {
+        if (isMock) {
+          return mockToolStream(
+            round,
+            tools.map((t) => t.function.name)
+          );
+        }
+        const cfg = chatConfig(provider, mode);
+        return (await cfg.client.chat.completions.create({
+          model: cfg.model,
+          messages,
+          tools: tools as any,
+          tool_choice: roundToolChoice,
+          stream: true,
+          max_tokens: CHAT_MAX_TOKENS,
+          ...cfg.sampling,
+        })) as any;
+      })();
+
+      let roundHadReasoning = false;
+      // Accumulated reasoning_content for the round. DeepSeek now requires
+      // the assistant turn pushed back into the next round to echo its own
+      // reasoning_content verbatim, otherwise the next call 400s with
+      // "The `reasoning_content` in the thinking mode must be passed back
+      // to the API.". Stored per-round and reset on the next iteration.
+      let roundReasoning = "";
+      for await (const chunk of iter) {
+        const choice = chunk.choices?.[0];
+        if (!choice) continue;
+        const delta = choice.delta || {};
+        if (delta.reasoning_content) {
+          roundHadReasoning = true;
+          roundReasoning += delta.reasoning_content;
+          // Flash-mode users opted out of the thinking UI; do not forward.
+          if (mode === "pro") {
+            sendEvent({ reasoning: delta.reasoning_content });
+          }
+        }
+        if (delta.content) {
+          assistantText += delta.content;
+          totalChars += delta.content.length;
+          sendEvent({ content: delta.content });
+        }
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!accumulated[idx]) {
+              accumulated[idx] = { id: "", name: "", args: "" };
+            }
+            if (tc.id) accumulated[idx].id = tc.id;
+            if (tc.function?.name) {
+              accumulated[idx].name += tc.function.name;
+            }
+            if (tc.function?.arguments) {
+              accumulated[idx].args += tc.function.arguments;
+            }
+          }
+        }
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+      }
+
+      if (finishReason !== "tool_calls") {
+        // Fallback: pro reasoned but produced no answer. Re-run the same
+        // turn in flash so the user always gets a reply.
+        if (
+          !isMock &&
+          !assistantText &&
+          roundHadReasoning &&
+          Object.keys(accumulated).length === 0
+        ) {
+          log.warn(
+            { round, finishReason, mode },
+            "llm.empty-content-after-reasoning, falling back to flash"
+          );
+          const fb = chatConfig(provider, "flash");
+          const fbStream = (await fb.client.chat.completions.create({
+            model: fb.model,
+            messages,
+            stream: true,
+            max_tokens: CHAT_MAX_TOKENS,
+            ...fb.sampling,
+          })) as any;
+          for await (const chunk of fbStream) {
+            const c = chunk.choices?.[0]?.delta?.content;
+            if (c) {
+              assistantText += c;
+              totalChars += c.length;
+              sendEvent({ content: c });
+            }
+          }
+        }
+
+        // Content/tool_calls consistency check (post-validation, 招1
+        // reactive form). Detects "I wrote 听语音版/画着呢 but didn't
+        // emit the matching tool_call" — the model's most common
+        // hallucination pattern. On hit:
+        //   1. tell client to retract the bad text it just streamed
+        //   2. push the bad assistant turn + a corrective system msg
+        //      back into the LLM context
+        //   3. re-run THIS round with tool_choice forced to the
+        //      missing tool — the model can't refuse to call it
+        // Capped at retriesLeft (default 1) so a misaligned model
+        // can't spin forever.
+        const halluTool = detectHallucinatedTool(
+          assistantText,
+          toolsCalledThisTurn
+        );
+        const haveToolDef = !!tools.some(
+          (t) => t.function.name === halluTool
+        );
+        if (halluTool && haveToolDef && retriesLeft > 0) {
+          log.info(
+            {
+              round,
+              halluTool,
+              retriesLeft,
+              textPreview: assistantText.slice(0, 60).replace(/\n/g, " "),
+            },
+            "validation.hallucination-retry"
+          );
+          sendEvent({ content_retracted: true });
+          messages.push({
+            role: "assistant",
+            content: assistantText || null,
+          });
+          messages.push({
+            role: "system",
+            content: `[CORRECTION] Your previous reply contained text that presupposes you called the ${halluTool} tool ("${assistantText
+              .slice(0, 60)
+              .replace(/\n/g, " ")}..."), but you did NOT actually emit ${halluTool} as a tool_call. The platform has tracked all your tool calls this turn — the user already noticed. Now ACTUALLY call ${halluTool} with proper arguments. Don't apologize in text, just emit the tool_call.`,
+          });
+          forceToolChoice = {
+            type: "function",
+            function: { name: halluTool },
+          };
+          retriesLeft--;
+          round++;
+          continue;
+        }
+
+        done = true;
+        break;
+      }
+
+      const toolCallList = Object.keys(accumulated)
+        .map((k) => Number(k))
+        .sort((a, b) => a - b)
+        .map((k) => accumulated[k]);
+
+      if (toolCallList.length === 0) {
+        // Model said tool_calls but emitted none — defensive bail-out
+        done = true;
+        break;
+      }
+
+      // Record the assistant turn with its tool_calls so the next round has
+      // context. reasoning_content must be echoed back verbatim — DeepSeek's
+      // tool-calling thinking-mode contract requires it; omitting it 400s
+      // round 2 with "must be passed back to the API".
+      const assistantTurn: any = {
+        role: "assistant",
+        content: assistantText || null,
+        tool_calls: toolCallList.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: { name: tc.name, arguments: tc.args },
+        })),
+      };
+      if (roundReasoning) assistantTurn.reasoning_content = roundReasoning;
+      messages.push(assistantTurn);
+
+      // Execute each tool call via the Next.js callback, in series
+      for (const tc of toolCallList) {
+        // Track for the post-validation hallucination check on later
+        // rounds — once a tool is actually called this turn, claims
+        // about it in any subsequent text are no longer hallucinations.
+        toolsCalledThisTurn.add(tc.name);
+        sendEvent({
+          tool_call: { id: tc.id, name: tc.name, args: tc.args },
+        });
+        let toolResultContent = "";
+        let ok = false;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), TOOL_CALL_TIMEOUT_MS);
+        let parsedResult: unknown = null;
+        try {
+          const res = await fetch(toolCallbackUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${toolAuth}`,
+            },
+            body: JSON.stringify({
+              tool: tc.name,
+              arguments: tc.args,
+            }),
+            signal: ac.signal,
+          });
+          const text = await res.text();
+          ok = res.ok;
+          toolResultContent = text || JSON.stringify({ ok });
+          try {
+            parsedResult = text ? JSON.parse(text) : null;
+          } catch {
+            parsedResult = null;
+          }
+          log.info(
+            { round, tool: tc.name, status: res.status, bytes: text.length },
+            "tool.result"
+          );
+        } catch (err: any) {
+          toolResultContent = JSON.stringify({
+            error: err?.message || "tool call failed",
+          });
+          parsedResult = { error: err?.message || "tool call failed" };
+          log.error({ round, tool: tc.name, err }, "tool.error");
+        } finally {
+          clearTimeout(timer);
+        }
+        // Forward the parsed JSON so the web layer can render search hits in
+        // the chat UI. `name` is included so the client doesn't have to track
+        // call ids back to the earlier `tool_call` event.
+        sendEvent({
+          tool_result: { id: tc.id, name: tc.name, ok, data: parsedResult },
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: toolResultContent,
+        });
+      }
+
+      round++;
+    }
+
+    if (!done) {
+      log.warn({ rounds: round }, "tool.max-rounds-hit");
+      sendEvent({ error: "max tool rounds reached" });
+    }
+
+    log.info(
+      { duration: Date.now() - startTime, totalChars, rounds: round },
+      "llm.complete"
+    );
+  } catch (err) {
+    log.error({ err, round, duration: Date.now() - startTime }, "llm.error");
+    sendEvent({ error: "llm error" });
+  }
+}
