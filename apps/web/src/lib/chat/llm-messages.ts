@@ -113,19 +113,18 @@ export function buildLLMMessages(
     }
   }
 
-  // Number images by their order of appearance in the window so the agent
-  // can disambiguate references like "图2 是什么" / "上面那张图" — without
-  // numbering it has to guess which image when several share the window.
-  let imageSeq = 0;
-
   // Map id → ContextMessage for resolving in-window quote targets. If a
   // user replies to a message that's still in the window we render a
   // structured "> [quote]" prefix so the agent can pinpoint it.
   const byId = new Map<string, ContextMessage>();
   for (const m of filtered) if (m.id) byId.set(m.id, m);
 
-  // Sequence number assigned to images by appearance order; reused when a
-  // reply targets one of those images so the quote prefix says "图片#N".
+  // Number images by their order of appearance in the window so the agent
+  // can disambiguate references like "图2 是什么" / "上面那张图". This
+  // numbering covers BOTH user-uploaded and agent-generated images — the
+  // agent must be able to refer back to its own past output (e.g. user
+  // says "把刚才那张猫改成蓝色" → agent needs the agent-image's msgId
+  // for referenceMessageIds in generate_image).
   const imageSeqByMessageId = new Map<string, number>();
   let probe = 0;
   for (const m of filtered) {
@@ -182,8 +181,8 @@ export function buildLLMMessages(
           // Image bytes never reach the chat LLM. Inline a bare marker
           // with the message id; the agent calls `read_image(messageId)`
           // when it actually wants to know what's in the image.
-          imageSeq += 1;
-          const visionText = `[图片#${imageSeq} (msgId=${m.id})]`;
+          const seq = m.id ? imageSeqByMessageId.get(m.id) : undefined;
+          const visionText = `[图片#${seq ?? "?"} (msgId=${m.id})]`;
           return {
             role: "user" as const,
             content:
@@ -196,6 +195,29 @@ export function buildLLMMessages(
             `${qPrefix}${tsPrefix}${idPrefix}${name}: ${m.content}` as LLMMessageContent,
         };
       }
+      // Agent-generated images (generate_image output): replace the bare
+      // COS URL — which is useless to the LLM and burns tokens — with the
+      // same [图片#N (msgId=xxx) 你画的] marker form that user images use.
+      // This is what unblocks "把刚才你画的那张猫改成蓝色" — without the
+      // marker, the agent can't find the msgId of its own past output to
+      // pass into generate_image's referenceMessageIds.
+      if (m.contentType === "image" && m.id) {
+        const seq = imageSeqByMessageId.get(m.id);
+        return {
+          role: "assistant" as const,
+          content:
+            `[图片#${seq ?? "?"} (msgId=${m.id}) 你画的]` as LLMMessageContent,
+        };
+      }
+      // image-failed: don't leak the failure-reason text either; just
+      // hint that this turn's draw didn't land.
+      if (m.contentType === "image-failed") {
+        return {
+          role: "assistant" as const,
+          content: "[上次的画图调用失败了]" as LLMMessageContent,
+        };
+      }
+
       // Agent's own past replies stay clean — leading metadata on an
       // assistant turn is the kind of thing the LLM mimics in its next
       // reply ("(msgId=...) ..." would leak into output).

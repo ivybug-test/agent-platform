@@ -141,5 +141,33 @@ export async function uploadBufferToCos(
     throw new Error(`COS PUT ${res.status}: ${detail.slice(0, 300)}`);
   }
 
-  return { url: `https://${host}${pathname}`, key };
+  // Read-back verification. PUT 200 is supposed to mean the object is
+  // immediately available (Tencent COS read-after-write strong-
+  // consistency), but we've seen image bubbles point at COS URLs that
+  // return NoSuchKey when the user later opens them. Doing one HEAD
+  // here either confirms the object is live OR throws so the caller's
+  // image-failed branch fires on the spot — much better than letting
+  // a dead URL ride into messages.content. One retry covers transient
+  // edge-node consistency hiccups.
+  const url = `https://${host}${pathname}`;
+  let headOk = false;
+  let lastHeadStatus = 0;
+  for (let attempt = 0; attempt < 2 && !headOk; attempt++) {
+    const head = await fetch(url, { method: "HEAD" });
+    lastHeadStatus = head.status;
+    if (head.ok) {
+      headOk = true;
+      break;
+    }
+    // Small backoff before retry — some COS edges briefly serve a 404
+    // for objects that are still being acknowledged across replicas.
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!headOk) {
+    throw new Error(
+      `COS HEAD verification failed after PUT 200: ${lastHeadStatus} (${key})`
+    );
+  }
+
+  return { url, key };
 }

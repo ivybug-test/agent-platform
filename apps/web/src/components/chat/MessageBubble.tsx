@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import LinkPreviewCard from "../LinkPreviewCard";
 import MarkdownContent from "../MarkdownContent";
 import ThinkingPanel from "./ThinkingPanel";
@@ -49,6 +49,12 @@ function MessageBubbleInner({
   // Cancel only once the touch has moved >10px from where it landed,
   // matching iMessage / WeChat behavior.
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Image-load failure flag. Flipped by the <img onError> below; once
+  // true we render a friendly "图片已失效" pill instead of the broken
+  // image icon. Also fires a telemetry event so we can quantify how
+  // often agent-images URLs go dead (NoSuchKey / lifecycle / etc).
+  const [imgBroken, setImgBroken] = useState(false);
 
   return (
     <div
@@ -133,15 +139,34 @@ function MessageBubbleInner({
               {msg.content || "(生成失败)"}
             </div>
           ) : isImageMessage(msg) ? (
-            <a href={msg.content} target="_blank" rel="noopener noreferrer">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={msg.content}
-                alt="sent image"
-                className="max-w-[240px] max-h-[320px] rounded object-contain"
-                loading="lazy"
-              />
-            </a>
+            imgBroken ? (
+              <div className="px-3 py-2 rounded bg-error/10 border border-error/30 text-xs text-error max-w-[240px]">
+                图片已失效
+              </div>
+            ) : (
+              <a href={msg.content} target="_blank" rel="noopener noreferrer">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={msg.content}
+                  alt="sent image"
+                  className="max-w-[240px] max-h-[320px] rounded object-contain"
+                  loading="lazy"
+                  onError={() => {
+                    setImgBroken(true);
+                    fetch("/api/telemetry", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        event: "image-broken",
+                        messageId: msg.id ?? null,
+                        url: msg.content,
+                        senderType: msg.senderType,
+                      }),
+                    }).catch(() => {});
+                  }}
+                />
+              </a>
+            )
           ) : (
             <>
               {isAgent && msg.toolInvocations && msg.toolInvocations.length > 0 && (

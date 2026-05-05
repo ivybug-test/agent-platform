@@ -117,6 +117,29 @@ export default function Home() {
     setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, ...room } : r)));
   };
 
+  /** Flip autoReply on the active room. The toggle now lives in the
+   *  top bar (was buried in the sidebar's room menu next to delete,
+   *  which was both inconvenient for a high-frequency action and
+   *  dangerous to mis-tap). Optimistic-update locally, then call PATCH;
+   *  if the server returns a different value we re-sync from its body. */
+  const handleToggleAutoReply = async () => {
+    if (!activeRoom) return;
+    const optimistic = activeRoom.autoReply === false ? true : false;
+    handleRoomUpdated({ ...activeRoom, autoReply: optimistic });
+    const res = await fetch(`/api/rooms/${activeRoom.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "toggleAutoReply" }),
+    });
+    if (res.ok) {
+      const { autoReply } = (await res.json()) as { autoReply: boolean };
+      handleRoomUpdated({ ...activeRoom, autoReply });
+    } else {
+      // Roll back on failure
+      handleRoomUpdated({ ...activeRoom, autoReply: activeRoom.autoReply });
+    }
+  };
+
   const handleChatComplete = useCallback(() => {
     setTimeout(refreshRooms, 2000);
   }, [refreshRooms]);
@@ -195,6 +218,24 @@ export default function Home() {
           <span className="text-sm font-semibold truncate">
             {activeRoom ? activeRoom.name : "选择房间"}
           </span>
+          {activeRoom && (
+            <button
+              type="button"
+              onClick={handleToggleAutoReply}
+              className={`ml-auto text-xs px-2.5 h-7 rounded-full border transition-colors ${
+                activeRoom.autoReply === false
+                  ? "bg-base-200 border-base-300 text-base-content/60"
+                  : "bg-primary/10 border-primary/30 text-primary"
+              }`}
+              title={
+                activeRoom.autoReply === false
+                  ? "自动回复已关闭 — agent 只在被 @ 时响应"
+                  : "自动回复开启中 — agent 自动响应每条消息"
+              }
+            >
+              自动回复 {activeRoom.autoReply === false ? "关" : "开"}
+            </button>
+          )}
         </div>
 
         {/* Chat area */}

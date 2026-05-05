@@ -2,7 +2,7 @@ import { db, messages, rooms } from "@agent-platform/db";
 import type { ToolInvocation, ToolInvocationHit } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
 import { pushMemoryJobs } from "@/lib/queue";
-import { publishRoomEvent } from "@/lib/redis";
+import { publishRoomEvent, getRedisClient } from "@/lib/redis";
 import { publishRoomActivity } from "@/lib/chat/room-activity";
 import { createLogger } from "@agent-platform/logger";
 import { signToolToken } from "@/lib/tool-token";
@@ -109,48 +109,194 @@ type ToolChoice =
  *  "唱一段") we force tool_choice to that function, denying the model
  *  the option of writing "(点 🔊 听语音版)" without actually calling
  *  it. Anything that doesn't match falls back to "auto" so the model
- *  still has full freedom for ambiguous cases. Conservative regex —
- *  bias toward NOT forcing on edge cases (Layer 1's post-validation
- *  cleans those up). */
+ *  still has full freedom for ambiguous cases.
+ *
+ *  Design: high precision over recall. Two layers:
+ *    1. Trigger regex — short phrase patterns, must include quantifier
+ *       or article so plain nouns ("画家", "唱片") don't false-match.
+ *    2. Negation lookahead — if any of NEGATION_PREFIXES appears in
+ *       the 8 chars BEFORE the trigger, skip ("别画了" / "刚才画的"
+ *       are NOT new-image requests). */
+const NEGATION_PREFIXES = [
+  "不",
+  "别",
+  "不要",
+  "不用",
+  "不想",
+  "拒绝",
+  "刚才",
+  "刚刚",
+  "上次",
+  "之前",
+  "刚画",
+  "那张",
+];
+function hasNegationBefore(text: string, matchIndex: number): boolean {
+  const window = text.slice(Math.max(0, matchIndex - 8), matchIndex);
+  return NEGATION_PREFIXES.some((p) => window.includes(p));
+}
+
 const IMAGE_GEN_TRIGGERS: RegExp[] = [
+  // === New-image creation (画/帮我画/来一张/...) ===
+  // "画一张" / "画个" / "画头" — quantifier-anchored so "画家" can't match
   /画[一]?[张个幅条只头份片群]/,
+  // "画...张" with up to 4 chars between
   /画.{0,4}[张个幅条只片]/,
-  /给我?看看?[一下]?\s*[一-龥]/,
-  /让我?看看?[一下]?\s*[一-龥]/,
+  // "帮我画一张" / "帮你画个"
+  /帮.{0,4}画[一]?[张个幅条只]/,
+  // "我想看 X 的样子" / "X 长什么样" — visual-implying paraphrases
   /我?想?看看?\s*[一-龥]+(的样子|长什么样)/,
+  // "搞一张图" / "来一张图"
   /搞[一]?张图/,
-  /来[一]?张图/,
-  /\bdraw\b/i,
-  /\bpaint\b/i,
+  /来[一]?张(图|画)/,
+  // "给我来一张/个" — implicitly visual
+  /给我?来[一]?[张个幅]/,
+  // English: must have article or "me" to avoid bare verbs in unrelated contexts
+  /\bdraw\s+(me|a|an|some|the)\b/i,
+  /\bpaint\s+(me|a|an|the)\b/i,
   /\bgenerate\b.*\bimage\b/i,
-  /\bshow me a\b/i,
+  /\bshow me (a|an|the|some|what)\b/i,
+
+  // === Image edit (改/换/调/重画/再画) — without these the route falls
+  // through to DeepSeek auto, which is exactly the unreliable path the
+  // router is meant to bypass. Patterns deliberately require an
+  // image-relevant noun OR an unambiguous color/style modifier so
+  // "改图书馆" / "改我的代码" / "调音量" don't false-fire. ===
+  // "改成绿色调" / "改成原来的样子" — explicit transform target
+  /改.{0,3}成.{0,5}(色|风格|样式|样子|滤镜|背景|主题)/,
+  // "改这张图" / "改一下那幅画"
+  /改.{0,5}[这那][张幅个]?(图|画)/,
+  // "换个颜色" / "换种风格" / "换张图"
+  /换[个种]?.{0,3}(颜色|色调|风格|样式|背景|滤镜|主题)/,
+  /换[一]?[张幅](图|画)/,
+  // "调成暗色" / "调一下色调"
+  /调.{0,5}(色|色调|风格|滤镜)/,
+  // "重新画" / "重画一张"
+  /重新.{0,2}画/,
+  /重画[一]?[张只个幅]?/,
+  // "再画一只" / "再画一张"
+  /再画[一]?[张只个幅]/,
+  // "再来一张" — already covered by /来[一]?张(图|画)/ but make explicit
+  /再来[一]?张/,
 ];
 const SPEAK_TRIGGERS: RegExp[] = [
+  // "学猫叫" / "学X叫"
   /学.{0,3}叫/,
+  // "模仿X声" / "模仿X的声音"
   /模仿.{0,3}声/,
+  // "用语音(说/回复/聊/讲)"
   /用语音(说|回复|聊|讲)?/,
-  /念一下/,
+  // "念一下/遍/段"
+  /念一[下遍段]/,
+  // "读一下/遍/段"
+  /读一[下遍段]/,
+  // "朗读"
   /朗读/,
-  /唱[一]?(段|首|个)?/,
-  /哼[一]?(段|首|个)?/,
-  /(用|换)[一]?(种|个)?[男女](声音|的声音)?/,
-  /\b(sing|hum)\b/i,
+  // "唱一段/首/个/曲" — REQUIRE quantifier so "唱片" can't match
+  /唱[一]?(段|首|个|曲|歌)/,
+  // "哼一段/首/个/曲" — same
+  /哼[一]?(段|首|个|曲|歌)/,
+  // "(用|换)男声/女声"
+  /(用|换)[一]?(种|个)?[男女](声|的声音)/,
+  // English: must have object so "I sing every Sunday" can't match
+  /\b(sing|hum)\s+(me|a|to me|something|the)\b/i,
   /\bread.*aloud\b/i,
   /\bsay.{0,5}out loud\b/i,
 ];
 function pickToolChoice(userContent: string): ToolChoice {
   if (!userContent) return "auto";
-  const c = userContent;
-  if (IMAGE_GEN_TRIGGERS.some((r) => r.test(c))) {
-    return { type: "function", function: { name: "generate_image" } };
+  for (const re of IMAGE_GEN_TRIGGERS) {
+    const m = re.exec(userContent);
+    if (m && !hasNegationBefore(userContent, m.index)) {
+      return { type: "function", function: { name: "generate_image" } };
+    }
   }
-  if (SPEAK_TRIGGERS.some((r) => r.test(c))) {
-    return { type: "function", function: { name: "speak" } };
+  for (const re of SPEAK_TRIGGERS) {
+    const m = re.exec(userContent);
+    if (m && !hasNegationBefore(userContent, m.index)) {
+      return { type: "function", function: { name: "speak" } };
+    }
   }
   return "auto";
 }
+
+/** Cheap user-feedback correction loop. After router forces a tool, we
+ *  remember the fire in Redis (TTL 5 min). On the user's NEXT turn, if
+ *  their message looks like a "wait, I didn't mean that" correction,
+ *  fall through to plain "auto" so the model isn't railroaded into
+ *  re-firing the same tool. The 5-min TTL is conservative — slow
+ *  conversations can still recover from a misroute, fast back-and-forth
+ *  doesn't accumulate stale state.
+ *
+ *  Note: NEGATIVE_FEEDBACK is a tight regex. "别画了" / "我没让你说话"
+ *  / "stop" / "cancel" should hit; "好的" / "继续" must not. */
+const ROUTER_FIRED_TTL_S = 300;
+const NEGATIVE_FEEDBACK_RE =
+  /(我没让|没让你|不是让你|没说要|没要你|别再|不要再|停止|cancel|^停$|^停\s|^别$|^别\s)/i;
+async function pickToolChoiceWithCorrection(
+  userId: string,
+  roomId: string,
+  userContent: string
+): Promise<{ toolChoice: ToolChoice; correctedFrom: string | null }> {
+  const redis = getRedisClient();
+  const key = `router-fired:${roomId}:${userId}`;
+  let lastFired: string | null = null;
+  try {
+    lastFired = await redis.get(key);
+  } catch {
+    // Redis hiccup — skip the correction layer; pure regex still works.
+  }
+  if (lastFired && NEGATIVE_FEEDBACK_RE.test(userContent)) {
+    redis.del(key).catch(() => {});
+    return { toolChoice: "auto", correctedFrom: lastFired };
+  }
+  const choice = pickToolChoice(userContent);
+  if (choice !== "auto" && typeof choice === "object") {
+    redis
+      .set(key, choice.function.name, "EX", ROUTER_FIRED_TTL_S)
+      .catch(() => {});
+  }
+  return { toolChoice: choice, correctedFrom: null };
+}
 const WEB_BASE_URL =
   process.env.WEB_BASE_URL || "http://localhost:3000";
+
+/** Detects messages whose content carries `[图片#N (msgId=...)]` markers
+ *  (both user-uploaded and agent-generated images get this format from
+ *  llm-messages.ts). Used by trimToImageGenContext below. */
+const IMAGE_MARKER_RE = /\[图片#\d+\s*\(msgId=/;
+
+/** Strip past textual chat from the messages we send to Kimi when the
+ *  router routed this turn for `generate_image`. Without trimming, the
+ *  model blends prior conversation into the image prompt — user says
+ *  "画狗" then "画助手" and the model produces "狗助手". We keep:
+ *    1. The system prompt (always first)
+ *    2. Every prior message that contains an image marker — these
+ *       give the model the msgIds it needs for `referenceMessageIds`
+ *       on edit-style requests ("把刚才那张图改成蓝色")
+ *    3. The current user message (always last user role) — including
+ *       any `> [回复 ...]` formal-quote prefix already inlined
+ *
+ *  Tradeoff: implicit "再画一只" (continuing the same subject) loses
+ *  what "一只" referred to. User can rephrase explicitly if needed. */
+function trimToImageGenContext<
+  T extends { role: string; content: LLMMessageContent },
+>(llmMessages: T[]): T[] {
+  if (llmMessages.length === 0) return llmMessages;
+  let lastUserIdx = -1;
+  for (let i = llmMessages.length - 1; i >= 0; i--) {
+    if (llmMessages[i].role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  return llmMessages.filter((m, i) => {
+    if (i === 0 && m.role === "system") return true;
+    if (i === lastUserIdx) return true;
+    const content = typeof m.content === "string" ? m.content : "";
+    return IMAGE_MARKER_RE.test(content);
+  });
+}
 
 export type Provider = "deepseek" | "kimi";
 export type DeepSeekMode = "flash" | "pro";
@@ -167,11 +313,92 @@ export async function streamAgentResponse(
   agentName: string = "agent"
 ): Promise<Response> {
   const toolAuth = await signToolToken({ userId, roomId });
-  const toolChoice = pickToolChoice(userContent);
+  const { toolChoice: rawToolChoice, correctedFrom } =
+    await pickToolChoiceWithCorrection(userId, roomId, userContent);
+  if (correctedFrom) {
+    log.info(
+      {
+        roomId,
+        userId,
+        correctedFrom,
+        contentPreview: userContent.slice(0, 60),
+      },
+      "chat.router-corrected"
+    );
+  }
+  // DeepSeek's API rejects forced tool_choice (`required` and `{function:
+  // {name}}`) with 400 (verified 2026-05-05). Kimi accepts both. So when
+  // the router fires AND the requested provider is deepseek, route THIS
+  // SINGLE TURN to Kimi — Kimi can honor the forced tool_choice, and
+  // subsequent turns return to deepseek automatically because
+  // streamAgentResponse is called fresh for each user message.
+  //
+  // What the model produces (tool_call ids, tool_results in the
+  // `messages` history) is provider-agnostic OpenAI shape — DeepSeek
+  // accepts those just fine on the next round, so context carries over
+  // cleanly.
+  const toolChoice: ToolChoice = rawToolChoice;
+  let effectiveProvider: Provider = provider;
+  const isForcedRoute = typeof rawToolChoice === "object";
+  if (isForcedRoute && provider === "deepseek") {
+    effectiveProvider = "kimi";
+    log.info(
+      {
+        roomId,
+        userId,
+        forcedTool: rawToolChoice.function.name,
+        originalProvider: provider,
+      },
+      "chat.routing-to-kimi-for-forced-tool"
+    );
+  }
+  // DeepSeek-pro thinking-mode + forced tool_choice has occasional bad
+  // interactions; the deep-thinking budget is also wasted when we already
+  // know the tool to call. Drop to flash whenever the router fires
+  // (only matters when we stayed on deepseek, since kimi ignores mode).
+  const effectiveMode: DeepSeekMode =
+    isForcedRoute && mode === "pro" && effectiveProvider === "deepseek"
+      ? "flash"
+      : mode;
   if (toolChoice !== "auto") {
     log.info(
-      { roomId, userId, forcedTool: typeof toolChoice === "object" ? toolChoice.function.name : toolChoice },
+      {
+        roomId,
+        userId,
+        forcedTool:
+          typeof toolChoice === "object" ? toolChoice.function.name : toolChoice,
+        modeRequested: mode,
+        modeEffective: effectiveMode,
+        providerRequested: provider,
+        providerEffective: effectiveProvider,
+      },
       "chat.tool-choice-forced"
+    );
+  }
+
+  // Context trimming for the image-gen route. Only when we're about to
+  // send to Kimi for a forced generate_image call do we strip prior
+  // textual chat — that path needs to avoid bleeding "画狗" context
+  // into a later "画助手" prompt. The speak path keeps full context
+  // because speak's prompt depends on conversation flow ("再说一遍"
+  // requires prior turns).
+  const isGenerateImageRoute =
+    isForcedRoute &&
+    typeof rawToolChoice === "object" &&
+    rawToolChoice.function.name === "generate_image" &&
+    effectiveProvider === "kimi";
+  const messagesToSend = isGenerateImageRoute
+    ? trimToImageGenContext(llmMessages)
+    : llmMessages;
+  if (isGenerateImageRoute) {
+    log.info(
+      {
+        roomId,
+        userId,
+        fromCount: llmMessages.length,
+        toCount: messagesToSend.length,
+      },
+      "chat.trimmed-context-for-image-gen"
     );
   }
 
@@ -179,12 +406,12 @@ export async function streamAgentResponse(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      messages: llmMessages,
+      messages: messagesToSend,
       tools: agentToolDefs,
       toolCallbackUrl: `${WEB_BASE_URL}/api/agent/tool`,
       toolAuth,
-      provider,
-      model: mode,
+      provider: effectiveProvider,
+      model: effectiveMode,
       toolChoice,
     }),
   });
@@ -219,14 +446,27 @@ export async function streamAgentResponse(
     async start(controller) {
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
+      // Buffer for partial-line carry-over across reads. SSE events end
+      // in `\n\n`, but a single fetch chunk can split a line in the
+      // middle (TCP/reverse-proxy buffering). Without carry-over, the
+      // partial JSON in the tail of one chunk + the head of the next
+      // both fail to parse silently, the inner try/catch swallows
+      // them, and the corresponding event is lost. Manifests as
+      // "stream completes with empty content" when round 2 of an
+      // hallucination retry happens to land on a chunk boundary.
+      let pending = "";
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           controller.enqueue(value);
-          const text = decoder.decode(value, { stream: true });
-          for (const line of text.split("\n")) {
+          pending += decoder.decode(value, { stream: true });
+          // Hold back the last (potentially incomplete) segment until
+          // the next chunk arrives.
+          const lines = pending.split("\n");
+          pending = lines.pop() ?? "";
+          for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
             const data = line.slice(6);
             if (data === "[DONE]") continue;

@@ -190,6 +190,19 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     setReplyTarget(null);
     setIsStreaming(true);
 
+    // All streaming-bubble mutations go through this helper instead of
+    // poking `prev[prev.length-1]`. Position-based access broke when
+    // another room member's message arrived via socket mid-stream: the
+    // new message landed at the end, the next SSE chunk targeted it
+    // instead of the agent bubble, and the agent's text got glued to
+    // the user's bubble (issue #10). Targeting by id makes the
+    // streaming bubble immune to concurrent inserts.
+    const updateAgentBubble = (updater: (m: Message) => Message): void => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === agentMessageId ? updater(m) : m))
+      );
+    };
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -235,31 +248,20 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           // tool_choice. Wipe the partial reply we'd streamed so the
           // corrected version replaces it cleanly (server side already
           // throws away its accumulated fullContent on the same event).
-          setMessages((prev) => {
-            const updated = [...prev];
-            const lastIdx = updated.length - 1;
-            const last = updated[lastIdx];
-            if (last && last.senderType === "agent") {
-              updated[lastIdx] = { ...last, content: "" };
-            }
-            return updated;
-          });
+          updateAgentBubble((m) => ({ ...m, content: "" }));
         } else if (evt.type === "reasoning") {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            const wasEmpty = !last.reasoning;
-            updated[updated.length - 1] = {
-              ...last,
-              reasoning: (last.reasoning || "") + evt.text,
+          updateAgentBubble((m) => {
+            const wasEmpty = !m.reasoning;
+            return {
+              ...m,
+              reasoning: (m.reasoning || "") + evt.text,
               // First reasoning chunk → start the timer. Subsequent
               // chunks while content hasn't started yet bump
               // reasoningMs forward; the moment content begins we
               // stop updating it.
               reasoningMs:
-                wasEmpty || !last.reasoningMs ? 0 : last.reasoningMs,
+                wasEmpty || !m.reasoningMs ? 0 : m.reasoningMs,
             };
-            return updated;
           });
           // Track when reasoning began so we can close out reasoningMs
           // when content starts arriving.
@@ -267,19 +269,16 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
             reasoningStartRef.current = Date.now();
           }
         } else if (evt.type === "content") {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
+          updateAgentBubble((m) => {
             const reasoningMs =
-              last.reasoning && reasoningStartRef.current && !last.reasoningMs
+              m.reasoning && reasoningStartRef.current && !m.reasoningMs
                 ? Date.now() - reasoningStartRef.current
-                : last.reasoningMs;
-            updated[updated.length - 1] = {
-              ...last,
-              content: last.content + evt.text,
+                : m.reasoningMs;
+            return {
+              ...m,
+              content: m.content + evt.text,
               reasoningMs,
             };
-            return updated;
           });
         } else if (evt.type === "tool_call") {
           // Track name + args for ALL tool_calls — `speak` needs them at
@@ -288,21 +287,17 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           pendingToolCallIds.current.set(evt.id, evt.name);
           pendingToolArgs.current.set(evt.id, evt.args);
           if (VISIBLE_TOOLS.has(evt.name)) {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              const next = [...(last.toolInvocations || [])];
-              next.push({
-                name: evt.name,
-                query: queryFromArgs(evt.name, evt.args),
-                pending: true,
-              });
-              updated[updated.length - 1] = {
-                ...last,
-                toolInvocations: next,
-              };
-              return updated;
-            });
+            updateAgentBubble((m) => ({
+              ...m,
+              toolInvocations: [
+                ...(m.toolInvocations || []),
+                {
+                  name: evt.name,
+                  query: queryFromArgs(evt.name, evt.args),
+                  pending: true,
+                },
+              ],
+            }));
           }
         } else if (evt.type === "tool_result") {
           const knownName =
@@ -312,17 +307,11 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
           pendingToolArgs.current.delete(evt.id);
           // generate_image: tool returns immediately with a placeholder
           // messageId (queued: true) — the actual gen runs server-side
-          // in the background. Insert a pending bubble right here so
-          // the user sees a "生成中..." spinner without waiting for
-          // Redis.
-          //
-          // INSERT-POSITION CRITICAL: the image bubble must NOT be the
-          // last message. The `content` event handler above mutates
-          // `prev[prev.length-1]` with `content + chunk` (that's how
-          // the agent's text reply accumulates). If the image bubble
-          // is at the end, all of the agent's "画着呢~" / "画好了"
-          // text gets appended to its content field — corrupting the
-          // URL. Splice in BEFORE the streaming agent text bubble.
+          // in the background. Insert a pending bubble here so the user
+          // sees a "生成中..." spinner without waiting for Redis. Find
+          // the streaming agent bubble's index by id and splice the
+          // image bubble immediately before it; this stays robust to
+          // concurrent socket inserts.
           if (knownName === "generate_image" && evt.ok && evt.data) {
             // evt.data is the full handler return value. image-tools.ts
             // returns `{ data: { messageId, queued, provider } }` — the
@@ -349,7 +338,8 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               } catch {}
               const startedAt = new Date().toISOString();
               setMessages((prev) => {
-                const insertAt = Math.max(0, prev.length - 1);
+                const idx = prev.findIndex((m) => m.id === agentMessageId);
+                const insertAt = idx >= 0 ? idx : prev.length;
                 const next = [...prev];
                 next.splice(insertAt, 0, {
                   id: newId,
@@ -377,28 +367,21 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
             try {
               const args = JSON.parse(knownArgs);
               if (typeof args?.text === "string" && args.text.trim()) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  updated[updated.length - 1] = {
-                    ...last,
-                    audio: {
-                      text: args.text.trim(),
-                      ...(typeof args?.voiceId === "string"
-                        ? { voiceId: args.voiceId }
-                        : {}),
-                    },
-                  };
-                  return updated;
-                });
+                updateAgentBubble((m) => ({
+                  ...m,
+                  audio: {
+                    text: args.text.trim(),
+                    ...(typeof args?.voiceId === "string"
+                      ? { voiceId: args.voiceId }
+                      : {}),
+                  },
+                }));
               }
             } catch {}
           }
           if (knownName && VISIBLE_TOOLS.has(knownName)) {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              const list = [...(last.toolInvocations || [])];
+            updateAgentBubble((m) => {
+              const list = [...(m.toolInvocations || [])];
               // Find the matching pending row (latest for this tool
               // name) and replace it with the resolved data.
               let idx = -1;
@@ -419,28 +402,35 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
               } else {
                 list.push(resolved);
               }
-              updated[updated.length - 1] = {
-                ...last,
-                toolInvocations: list,
-              };
-              return updated;
+              return { ...m, toolInvocations: list };
             });
           }
         }
       }
     } catch {
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          senderType: "agent",
-          senderId: null,
-          senderName: agentName,
-          content: "错误:未能获取回复。",
-        };
-        return updated;
-      });
+      updateAgentBubble((m) => ({
+        ...m,
+        content: "错误:未能获取回复。",
+      }));
     } finally {
       setIsStreaming(false);
+      // B1 (副作用工具不留空文字气泡): if the streaming bubble has
+      // nothing to render — no text, no audio button, no thinking
+      // panel, no visible tool card — then either an image bubble
+      // (spliced separately above) or audio metadata IS the reply,
+      // and showing an empty agent bubble next to it looks broken.
+      // Keep the bubble whenever there's *anything* to display.
+      setMessages((prev) =>
+        prev.filter((m) => {
+          if (m.id !== agentMessageId) return true;
+          const empty =
+            !m.content &&
+            !m.audio &&
+            !m.reasoning &&
+            (!m.toolInvocations || m.toolInvocations.length === 0);
+          return !empty;
+        })
+      );
       onChatComplete?.();
     }
   };

@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { useSession, signOut } from "next-auth/react";
-import RoomSettings from "./RoomSettings";
 
 interface Room {
   id: string;
@@ -35,7 +34,6 @@ export default function Sidebar({
   const [creating, setCreating] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [menuRoomId, setMenuRoomId] = useState<string | null>(null);
-  const [settingsRoom, setSettingsRoom] = useState<Room | null>(null);
 
   // FLIP animation on reorder. We snapshot each row's top offset before the
   // rooms prop triggers a re-render; after layout, we measure the new offsets
@@ -87,20 +85,7 @@ export default function Sidebar({
     onRoomRemoved(id);
   };
 
-  const toggleAutoReply = async (room: Room) => {
-    const res = await fetch(`/api/rooms/${room.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "toggleAutoReply" }),
-    });
-    if (res.ok) {
-      const { autoReply } = await res.json();
-      onRoomUpdated({ ...room, autoReply });
-    }
-    setMenuRoomId(null);
-  };
-
-  // Pending-friend badge dot on the "我的" gear icon. Polled on mount;
+// Pending-friend badge dot on the "我的" gear icon. Polled on mount;
   // detailed friend management lives on /me now.
   useEffect(() => {
     (async () => {
@@ -171,22 +156,6 @@ export default function Sidebar({
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setMenuRoomId(null)} />
                   <ul className="absolute right-0 top-full mt-1 z-50 menu bg-base-300 rounded-lg shadow-xl w-40 p-1">
-                    <li>
-                      <button onClick={() => toggleAutoReply(room)} className="text-xs rounded-md">
-                        自动回复: {room.autoReply !== false ? "开" : "关"}
-                      </button>
-                    </li>
-                    <li>
-                      <button
-                        onClick={() => {
-                          setSettingsRoom(room);
-                          setMenuRoomId(null);
-                        }}
-                        className="text-xs rounded-md"
-                      >
-                        房间共享事实
-                      </button>
-                    </li>
                     <li>
                       <button onClick={() => archiveRoom(room.id)} className="text-xs rounded-md">
                         归档
@@ -263,13 +232,6 @@ export default function Sidebar({
             </button>
           </div>
         </div>
-      )}
-      {settingsRoom && (
-        <RoomSettings
-          roomId={settingsRoom.id}
-          roomName={settingsRoom.name}
-          onClose={() => setSettingsRoom(null)}
-        />
       )}
     </div>
   );
