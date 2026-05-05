@@ -60,13 +60,20 @@ function MessageBubbleInner({
     <div
       id={msg.id ? `msg-${msg.id}` : undefined}
       // content-visibility: auto lets the browser skip layout / paint
-      // for off-screen bubbles. Drop the directive while the action
-      // menu is open — paint containment clips the floating menu
-      // (positioned at -top-9, outside the wrapper's box).
+      // for off-screen bubbles — useful on desktop with hundreds of
+      // messages. On touch devices it CAUSES jank instead: each
+      // bubble enters viewport sized at the 120px placeholder, then
+      // layout-shifts to its real height (60-600px), and the iOS /
+      // mobile-Chrome scroll predictor stalls during the reflow.
+      // `pointer-fine:` Tailwind v4 variant restricts to desktop-style
+      // input devices (mouse). Mobile (pointer: coarse) gets
+      // traditional rendering.
+      // Also drop while the action menu is open — paint containment
+      // clips the floating menu (positioned at -top-9, outside box).
       className={
         isMenuOpen
           ? "rounded transition-shadow"
-          : "rounded transition-shadow [content-visibility:auto] [contain-intrinsic-size:auto_120px]"
+          : "rounded transition-shadow pointer-fine:[content-visibility:auto] pointer-fine:[contain-intrinsic-size:auto_120px]"
       }
     >
       {showDayDivider && (
