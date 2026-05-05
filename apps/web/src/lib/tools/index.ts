@@ -2,7 +2,7 @@ import type { ToolContext } from "@/lib/tool-token";
 
 export type ToolHandler = (args: any, ctx: ToolContext) => Promise<unknown>;
 
-import { memoryToolHandlers, memoryToolDefs } from "./memory-tools";
+import { memoryToolHandlers, memoryToolDefs } from "./memory";
 import { webSearchToolHandlers, webSearchToolDefs } from "./web-search-tools";
 import { voiceToolHandlers, voiceToolDefs } from "./voice-tools";
 import { imageReadToolHandlers, imageReadToolDefs } from "./image-read-tools";

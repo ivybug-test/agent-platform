@@ -1,50 +1,33 @@
-import { db, userMemories, messages, users, roomMemories, userRelationships } from "@agent-platform/db";
-import { and, eq, isNull, isNotNull, desc, asc, ilike, or, lt, gte, lte, inArray, ne, sql } from "drizzle-orm";
-import type { ToolHandler } from "./index";
+import { db, userMemories, messages, users } from "@agent-platform/db";
+import {
+  and,
+  eq,
+  isNull,
+  isNotNull,
+  desc,
+  asc,
+  ilike,
+  lt,
+  gte,
+  lte,
+  inArray,
+  ne,
+  sql,
+} from "drizzle-orm";
+import type { ToolHandler } from "../index";
 import { visibleToSubject } from "@/lib/memory-filters";
-import { resolveRoomMemberByName } from "./resolvers";
+import { resolveRoomMemberByName } from "../resolvers";
 import { textSimilarity } from "@/lib/text-similarity";
-
-const VALID_CATEGORIES = [
-  "identity",
-  "preference",
-  "relationship",
-  "event",
-  "opinion",
-  "context",
-] as const;
-const VALID_IMPORTANCES = ["high", "medium", "low"] as const;
-
-type Category = (typeof VALID_CATEGORIES)[number];
-type Importance = (typeof VALID_IMPORTANCES)[number];
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-function clampLimit(n: unknown, dflt: number, max: number): number {
-  const v = typeof n === "number" ? Math.floor(n) : dflt;
-  if (!Number.isFinite(v) || v <= 0) return dflt;
-  return Math.min(v, max);
-}
-
-function esc(s: string): string {
-  return s.replace(/[\\%_]/g, (c) => "\\" + c);
-}
-
-/** Accepts "YYYY-MM-DD", "YYYY-MM-DDTHH:mm", or a full ISO string. Bare dates
- *  anchor to Asia/Shanghai noon so timezone drift doesn't push them off-day. */
-function parseEventAt(raw: unknown): Date | null {
-  if (typeof raw !== "string") return null;
-  const s = raw.trim();
-  if (!s) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d = new Date(`${s}T04:00:00Z`);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
-}
+import {
+  VALID_CATEGORIES,
+  VALID_IMPORTANCES,
+  SIMILARITY_SKIP_THRESHOLD,
+  clampLimit,
+  esc,
+  parseEventAt,
+  type Category,
+  type Importance,
+} from "./shared";
 
 // -----------------------------------------------------------------------------
 // search_memories
@@ -188,11 +171,6 @@ const searchMessages: ToolHandler = async (args, ctx) => {
 // remember (with built-in near-dup guard — simplified D2)
 // -----------------------------------------------------------------------------
 
-// Phase A: on a near-duplicate, REINFORCE the existing memory (bump strength +
-// last_reinforced_at) instead of skipping silently. The threshold name stays
-// the same to avoid churn; the action is different.
-const SIMILARITY_SKIP_THRESHOLD = 0.55;
-
 const remember: ToolHandler = async (args, ctx) => {
   const content = typeof args?.content === "string" ? args.content.trim() : "";
   const category = args?.category as Category;
@@ -324,9 +302,6 @@ const remember: ToolHandler = async (args, ctx) => {
       source: "extracted",
       sourceRoomId: ctx.roomId,
       authoredByUserId: isThirdParty ? ctx.userId : null,
-      // pending state for third-party writes; self-writes auto-visible
-      // because authoredByUserId is null (visibleToSubject ignores the
-      // confirmedAt column when the row is self-authored).
       confirmedAt: null,
       eventAt: eventAt ?? undefined,
       lastReinforcedAt: new Date(),
@@ -474,322 +449,16 @@ const confirmMemory: ToolHandler = async (args, ctx) => {
   return { ok: true, memory: row };
 };
 
-// -----------------------------------------------------------------------------
-// Room memories (Phase 3 of multi-user memory)
-// -----------------------------------------------------------------------------
-
-const searchRoomMemory: ToolHandler = async (args, ctx) => {
-  const query = typeof args?.query === "string" ? args.query.trim() : "";
-  const limit = clampLimit(args?.limit, 10, 30);
-
-  const conditions = [
-    eq(roomMemories.roomId, ctx.roomId),
-    isNull(roomMemories.deletedAt),
-  ];
-  if (query)
-    conditions.push(ilike(roomMemories.content, `%${esc(query)}%`));
-
-  const rows = await db
-    .select({
-      id: roomMemories.id,
-      content: roomMemories.content,
-      importance: roomMemories.importance,
-      source: roomMemories.source,
-      updatedAt: roomMemories.updatedAt,
-    })
-    .from(roomMemories)
-    .where(and(...conditions))
-    .orderBy(desc(roomMemories.importance), desc(roomMemories.updatedAt))
-    .limit(limit);
-
-  return { results: rows };
-};
-
-const saveRoomFact: ToolHandler = async (args, ctx) => {
-  const content = typeof args?.content === "string" ? args.content.trim() : "";
-  const importance = (args?.importance as Importance) || "medium";
-  if (!content) return { error: "content required" };
-  if (!VALID_IMPORTANCES.includes(importance)) {
-    return { error: "invalid importance" };
-  }
-
-  // Near-dup guard scoped to the room
-  const existing = await db
-    .select({ id: roomMemories.id, content: roomMemories.content })
-    .from(roomMemories)
-    .where(
-      and(eq(roomMemories.roomId, ctx.roomId), isNull(roomMemories.deletedAt))
-    );
-  let best: { id: string; content: string; sim: number } | null = null;
-  for (const m of existing) {
-    const sim = textSimilarity(content, m.content);
-    if (!best || sim > best.sim) {
-      best = { id: m.id, content: m.content, sim };
-    }
-  }
-  if (best && best.sim >= SIMILARITY_SKIP_THRESHOLD) {
-    return {
-      skipped: true,
-      reason: "near-duplicate of an existing room fact",
-      similar: { id: best.id, content: best.content, similarity: best.sim },
-    };
-  }
-
-  const [row] = await db
-    .insert(roomMemories)
-    .values({
-      roomId: ctx.roomId,
-      content,
-      importance,
-      createdByUserId: ctx.userId,
-      source: "extracted",
-    })
-    .returning({
-      id: roomMemories.id,
-      content: roomMemories.content,
-      importance: roomMemories.importance,
-    });
-  return { ok: true, memory: row };
-};
-
-const forgetRoomFact: ToolHandler = async (args, ctx) => {
-  const memoryId =
-    typeof args?.memoryId === "string" ? args.memoryId.trim() : "";
-  if (!memoryId) return { error: "memoryId required" };
-
-  // Room fact: any room member can soft-delete. Lock extracted-only edits
-  // so user_explicit rows (added via UI) stay put unless the UI deletes them.
-  const [row] = await db
-    .update(roomMemories)
-    .set({ deletedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(roomMemories.id, memoryId),
-        eq(roomMemories.roomId, ctx.roomId),
-        eq(roomMemories.source, "extracted"),
-        isNull(roomMemories.deletedAt)
-      )
-    )
-    .returning({ id: roomMemories.id });
-
-  if (!row) return { error: "room fact not found" };
-  return { ok: true };
-};
-
-// -----------------------------------------------------------------------------
-// User relationships (Phase 4 of multi-user memory)
-// -----------------------------------------------------------------------------
-
-const VALID_RELATIONSHIP_KINDS = [
-  "spouse",
-  "family",
-  "colleague",
-  "friend",
-  "custom",
-] as const;
-type RelationshipKind = (typeof VALID_RELATIONSHIP_KINDS)[number];
-
-const relate: ToolHandler = async (args, ctx) => {
-  const otherUserName =
-    typeof args?.otherUserName === "string" ? args.otherUserName.trim() : "";
-  const kind = args?.kind as RelationshipKind;
-  const content =
-    typeof args?.content === "string" ? args.content.trim() : null;
-
-  if (!otherUserName) return { error: "otherUserName required" };
-  if (!VALID_RELATIONSHIP_KINDS.includes(kind)) {
-    return { error: "invalid kind" };
-  }
-
-  const otherUserId = await resolveRoomMemberByName(ctx.roomId, otherUserName);
-  if (!otherUserId) {
-    return { error: `no unique room member matches "${otherUserName}"` };
-  }
-  if (otherUserId === ctx.userId) {
-    return { error: "cannot relate to yourself" };
-  }
-
-  // Canonical ordering: a_user_id < b_user_id.
-  const [aId, bId] =
-    ctx.userId < otherUserId
-      ? [ctx.userId, otherUserId]
-      : [otherUserId, ctx.userId];
-  const speakerIsA = ctx.userId === aId;
-  const now = new Date();
-
-  // Upsert: find existing row first.
-  const [existing] = await db
-    .select()
-    .from(userRelationships)
-    .where(
-      and(
-        eq(userRelationships.aUserId, aId),
-        eq(userRelationships.bUserId, bId),
-        eq(userRelationships.kind, kind),
-        isNull(userRelationships.deletedAt)
-      )
-    );
-
-  if (existing) {
-    // Update the speaker's confirmation side only.
-    const patch = speakerIsA
-      ? { confirmedByA: now, updatedAt: now }
-      : { confirmedByB: now, updatedAt: now };
-    // If content provided, update too
-    if (content) (patch as any).content = content;
-    const [updated] = await db
-      .update(userRelationships)
-      .set(patch)
-      .where(eq(userRelationships.id, existing.id))
-      .returning();
-    return {
-      ok: true,
-      relationship: updated,
-      fullyConfirmed:
-        updated.confirmedByA !== null && updated.confirmedByB !== null,
-    };
-  }
-
-  const [row] = await db
-    .insert(userRelationships)
-    .values({
-      aUserId: aId,
-      bUserId: bId,
-      kind,
-      content,
-      confirmedByA: speakerIsA ? now : null,
-      confirmedByB: speakerIsA ? null : now,
-    })
-    .returning();
-  return {
-    ok: true,
-    relationship: row,
-    fullyConfirmed: false,
-    note: `Proposed ${kind} edge with ${otherUserName}. They'll see it in their /memories 关系 tab and can accept or reject.`,
-  };
-};
-
-const searchRelationships: ToolHandler = async (args, ctx) => {
-  const withUserName =
-    typeof args?.withUserName === "string" ? args.withUserName.trim() : "";
-
-  let otherId: string | null = null;
-  if (withUserName) {
-    otherId = await resolveRoomMemberByName(ctx.roomId, withUserName);
-    if (!otherId) {
-      return { error: `no unique room member matches "${withUserName}"` };
-    }
-  }
-
-  const speakerInvolved = or(
-    eq(userRelationships.aUserId, ctx.userId),
-    eq(userRelationships.bUserId, ctx.userId)
-  )!;
-  const conditions = [
-    speakerInvolved,
-    isNull(userRelationships.deletedAt),
-    isNotNull(userRelationships.confirmedByA),
-    isNotNull(userRelationships.confirmedByB),
-  ];
-  if (otherId) {
-    conditions.push(
-      or(
-        and(
-          eq(userRelationships.aUserId, ctx.userId),
-          eq(userRelationships.bUserId, otherId)
-        ),
-        and(
-          eq(userRelationships.aUserId, otherId),
-          eq(userRelationships.bUserId, ctx.userId)
-        )
-      )!
-    );
-  }
-
-  const rows = await db
-    .select({
-      id: userRelationships.id,
-      aUserId: userRelationships.aUserId,
-      bUserId: userRelationships.bUserId,
-      kind: userRelationships.kind,
-      content: userRelationships.content,
-    })
-    .from(userRelationships)
-    .where(and(...conditions));
-
-  // Resolve the other side's name for each row.
-  const otherIds = [
-    ...new Set(
-      rows.map((r) => (r.aUserId === ctx.userId ? r.bUserId : r.aUserId))
-    ),
-  ];
-  const nameRows =
-    otherIds.length > 0
-      ? await db
-          .select({ id: users.id, name: users.name })
-          .from(users)
-          .where(inArray(users.id, otherIds))
-      : [];
-  const nameMap = new Map(nameRows.map((u) => [u.id, u.name]));
-
-  return {
-    results: rows.map((r) => ({
-      id: r.id,
-      otherUserName:
-        nameMap.get(r.aUserId === ctx.userId ? r.bUserId : r.aUserId) || "?",
-      kind: r.kind,
-      content: r.content,
-    })),
-  };
-};
-
-const unrelate: ToolHandler = async (args, ctx) => {
-  const relationshipId =
-    typeof args?.relationshipId === "string"
-      ? args.relationshipId.trim()
-      : "";
-  if (!relationshipId) return { error: "relationshipId required" };
-
-  const [row] = await db
-    .update(userRelationships)
-    .set({ deletedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(userRelationships.id, relationshipId),
-        or(
-          eq(userRelationships.aUserId, ctx.userId),
-          eq(userRelationships.bUserId, ctx.userId)
-        )!,
-        isNull(userRelationships.deletedAt)
-      )
-    )
-    .returning({ id: userRelationships.id });
-
-  if (!row) return { error: "relationship not found" };
-  return { ok: true };
-};
-
-// -----------------------------------------------------------------------------
-// Exports
-// -----------------------------------------------------------------------------
-
-export const memoryToolHandlers: Record<string, ToolHandler> = {
+export const userMemoryToolHandlers: Record<string, ToolHandler> = {
   search_memories: searchMemories,
   search_messages: searchMessages,
   remember,
   update_memory: updateMemory,
   forget_memory: forgetMemory,
   confirm_memory: confirmMemory,
-  search_room_memory: searchRoomMemory,
-  save_room_fact: saveRoomFact,
-  forget_room_fact: forgetRoomFact,
-  relate,
-  search_relationships: searchRelationships,
-  unrelate,
 };
 
-// OpenAI-shaped tool definitions — passed to agent-runtime in the /chat body.
-export const memoryToolDefs = [
+export const userMemoryToolDefs = [
   {
     type: "function" as const,
     function: {
@@ -944,123 +613,6 @@ export const memoryToolDefs = [
         required: ["memoryId"],
         properties: {
           memoryId: { type: "string" },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "search_room_memory",
-      description:
-        "Search facts that belong to the current ROOM (shared across all members — project codenames, group focus, etc), not tied to any single user.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description:
-              "Substring to match against room fact content (case-insensitive).",
-          },
-          limit: {
-            type: "integer",
-            description: "Max results (1–30). Default 10.",
-          },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "save_room_fact",
-      description:
-        "Store a fact about the current room itself — something every member should know (project name, ongoing initiative, shared agreement). Write in the user's language. Near-duplicates are auto-skipped.",
-      parameters: {
-        type: "object",
-        required: ["content", "importance"],
-        properties: {
-          content: { type: "string" },
-          importance: {
-            type: "string",
-            enum: [...VALID_IMPORTANCES],
-          },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "forget_room_fact",
-      description:
-        "Soft-delete a room fact. Any room member's agent can call this. Works on rows the agent itself added (source=extracted); user-added rows (source=user_explicit) must be deleted from the room settings UI.",
-      parameters: {
-        type: "object",
-        required: ["memoryId"],
-        properties: {
-          memoryId: { type: "string" },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "relate",
-      description:
-        "Propose or confirm a typed relationship edge between the current speaker and another room member. Both sides must eventually confirm for the edge to be active and shown to the agent in future chats.",
-      parameters: {
-        type: "object",
-        required: ["otherUserName", "kind"],
-        properties: {
-          otherUserName: {
-            type: "string",
-            description:
-              "The display name of the other room member. Must match exactly (case-insensitive).",
-          },
-          kind: {
-            type: "string",
-            enum: [...VALID_RELATIONSHIP_KINDS],
-          },
-          content: {
-            type: "string",
-            description:
-              "Optional extra detail, e.g. '认识 10 年' / 'met in college'.",
-          },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "search_relationships",
-      description:
-        "List the current speaker's active (both-sides-confirmed) relationships. Optionally narrow to a specific other member.",
-      parameters: {
-        type: "object",
-        properties: {
-          withUserName: {
-            type: "string",
-            description:
-              "If set, only return the relationship with this specific room member.",
-          },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "unrelate",
-      description:
-        "Soft-delete a relationship edge. Either side of the edge can remove it.",
-      parameters: {
-        type: "object",
-        required: ["relationshipId"],
-        properties: {
-          relationshipId: { type: "string" },
         },
       },
     },
