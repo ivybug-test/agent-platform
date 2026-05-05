@@ -3,6 +3,16 @@ import { eq, desc, and, isNull, isNotNull, sql } from "drizzle-orm";
 import { llmCompleteJSON } from "../llm.js";
 import { createLogger } from "@agent-platform/logger";
 import { textSimilarity } from "../text-similarity.js";
+import { buildExtractionPrompt } from "../prompts/extraction.js";
+import {
+  VALID_CATEGORIES,
+  VALID_IMPORTANCES,
+  messageBody,
+  detectLanguage,
+  formatWallClock,
+  parseEventAt,
+  formatMemoriesByCategory,
+} from "../lib/format.js";
 
 const log = createLogger("memory-worker");
 
@@ -16,135 +26,6 @@ interface UserMemoryData {
 // strength + last_reinforced_at on the existing row) rather than silent skip,
 // so repeat mentions actually strengthen memory over time.
 const DUP_REINFORCE_THRESHOLD = 0.55;
-
-const VALID_CATEGORIES = ["identity", "preference", "relationship", "event", "opinion", "context"];
-const VALID_IMPORTANCES = ["high", "medium", "low"];
-
-function buildExtractionPrompt(language: string, nowIso: string): string {
-  return `You analyze user messages to extract memorable facts about the user.
-
-LANGUAGE (HIGHEST PRIORITY — follow before any other rule):
-The user's recent messages are predominantly in ${language}. EVERY fact you
-output MUST be written in ${language}. Do NOT translate. Do NOT use English
-unless the user is writing in English.
-Examples (match the user's language):
-  - Chinese user: "喜欢吃辣", "住在深圳", "弟弟叫志龙"
-  - English user: "Likes spicy food", "Lives in Shenzhen", "Has a brother named Zhilong"
-
-TIME (SECOND HIGHEST PRIORITY):
-Current time is ${nowIso}. Each recent message below has a [YYYY-MM-DD HH:mm]
-prefix showing when it was sent.
-- NEVER store relative phrases like "今天" / "昨天" / "刚才" / "中午" / "上周" /
-  "yesterday" / "just now" inside the fact content. Resolve them into an
-  absolute date based on the message's own timestamp and the current time.
-- For facts that describe a specific event in time (e.g. "今天没吃午饭" → "2026-04-19 没吃午饭"),
-  ALSO emit an \`eventAt\` field on the CREATE action as an ISO8601 timestamp
-  (date is fine, e.g. "2026-04-19"; add time if the user was specific about
-  "中午" etc.). For timeless facts (identity, preferences, relationships)
-  leave eventAt omitted.
-- Short-term statements that are ONLY meaningful for a few hours (e.g.
-  "我饿了", "现在有点累") must be SKIPPED — they are not worth cross-session
-  memory. If the same behaviour recurs across many days, a higher-level fact
-  ("经常不吃午饭") will emerge from reinforcement; you don't need to seed it.
-
-RULES:
-- Only extract facts that would be useful to remember across conversations
-- DO NOT extract: greetings, test messages, emotional expressions, single-word responses, questions the user asked the AI, commands to the AI, transient states
-- DO extract: personal info (name, age, location, language), preferences (food, music, hobbies), relationships (family, friends mentioned by name), significant events, opinions, ongoing situations
-- Each fact must be a single clear statement in third person (e.g. "喜欢吃辣" / "Likes spicy food", NOT first person)
-- If a new fact contradicts an existing memory, output an UPDATE action with the existing memory's id
-- If a new fact is already captured by an existing memory, SKIP it. Be strict — if in doubt, SKIP rather than duplicate. The backend will still reinforce the existing memory on near-duplicate CREATEs, so skipping is safe.
-- If a fact is genuinely new, output a CREATE action
-- If an existing memory is clearly wrong based on new info, output a DELETE action
-
-HARD CONSTRAINTS (violating these will be rejected):
-- FORGOTTEN FACTS: The user has explicitly asked to forget some facts. They are listed under "Forgotten facts". NEVER re-create any fact that is semantically similar to a forgotten one, even if the conversation mentions it again. If unsure, skip.
-- LOCKED MEMORIES: Memories marked [LOCKED] were set or confirmed by the user directly. You MUST NOT output UPDATE or DELETE actions for locked memory ids. You may output CREATE for genuinely new facts that do not conflict.
-- PENDING MEMORIES: Memories marked [PENDING] were written by someone else about this user and are waiting for the user's confirmation. Treat them exactly like active memories for dedup purposes: if a new message would just restate a pending fact, SKIP (do not emit a duplicate CREATE). You MUST NOT output UPDATE or DELETE actions for pending memory ids either — the subject has to confirm or reject them through the UI.
-
-OUTPUT FORMAT (strict JSON):
-{
-  "actions": [
-    {"action": "create", "content": "...", "category": "identity|preference|relationship|event|opinion|context", "importance": "high|medium|low", "eventAt": "2026-04-19" },
-    {"action": "update", "memoryId": "<uuid>", "content": "updated content", "category": "...", "importance": "..."},
-    {"action": "delete", "memoryId": "<uuid>", "reason": "..."}
-  ]
-}
-(eventAt is OPTIONAL and only appears on CREATE; omit it for timeless facts.)
-
-If nothing worth remembering, return: {"actions": []}
-
-CATEGORY GUIDE:
-- identity: name, age, location, nationality, language, occupation, education
-- preference: food, hobbies, interests, communication style preferences
-- relationship: family members, friends, colleagues mentioned by name or role
-- event: significant things that happened, decisions made, milestones — these almost always want eventAt
-- opinion: views on topics, beliefs, values
-- context: current projects, goals, ongoing situations
-
-IMPORTANCE GUIDE:
-- high: core identity (name, language), strong/repeated preferences, important relationships
-- medium: mentioned preferences, events, moderate context
-- low: one-time mentions, minor details, casual opinions. Time-stamped single-event facts default to low/medium — they'll gain strength naturally if they recur.`;
-}
-
-/** Render a message's body for the extraction prompt. Image messages use
- *  the captured caption when present so user_memories can be extracted from
- *  what the user actually showed (e.g. "this is my dog Max" + photo →
- *  "user has a dog named Max"). */
-function messageBody(m: {
-  content: string;
-  contentType: string;
-  metadata: unknown;
-}): string {
-  if (m.contentType !== "image") return m.content;
-  const cap =
-    (m.metadata as { vision?: { caption?: string } } | null)?.vision?.caption;
-  return cap ? `[image: ${cap}]` : "[image: (caption pending)]";
-}
-
-/** Detect language of text: if >30% characters are CJK, call it Chinese. */
-function detectLanguage(text: string): string {
-  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
-  const total = text.replace(/\s/g, "").length;
-  return total > 0 && cjk / total > 0.3 ? "Chinese" : "English";
-}
-
-/** Format a Date as "YYYY-MM-DD HH:mm" in Asia/Shanghai — matches the extraction
- *  prompt rule that relative time phrases resolve against the user's wall clock. */
-function formatWallClock(d: Date): string {
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
-  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get(
-    "minute"
-  )}`;
-}
-
-/** Parse an LLM-supplied eventAt string (date or datetime) into a Date, or
- *  return null if it's missing/invalid. Accepts "2026-04-19", "2026-04-19T12:30",
- *  or full ISO. Bare date strings anchor to Asia/Shanghai noon so timezone drift
- *  doesn't push them onto the prior day in UTC storage. */
-function parseEventAt(raw: unknown): Date | null {
-  if (typeof raw !== "string") return null;
-  const s = raw.trim();
-  if (!s) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    // Date-only: anchor to Asia/Shanghai 12:00 → 04:00 UTC
-    const d = new Date(`${s}T04:00:00Z`);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
-}
 
 export async function processUserMemory(data: UserMemoryData) {
   const { roomId, userId } = data;
@@ -432,46 +313,3 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
   );
 }
 
-function formatMemoriesByCategory(
-  memories: { id: string; content: string; category: string }[],
-  lockedIds: Set<string>,
-  pendingIds: Set<string>
-): string {
-  const groups = new Map<
-    string,
-    { id: string; content: string; locked: boolean; pending: boolean }[]
-  >();
-  for (const m of memories) {
-    const list = groups.get(m.category) || [];
-    list.push({
-      id: m.id,
-      content: m.content,
-      locked: lockedIds.has(m.id),
-      pending: pendingIds.has(m.id),
-    });
-    groups.set(m.category, list);
-  }
-
-  if (groups.size === 0) return "(no existing memories)";
-
-  const sections: string[] = [];
-  for (const cat of VALID_CATEGORIES) {
-    const items = groups.get(cat);
-    if (items && items.length > 0) {
-      sections.push(
-        `[${cat}]\n${items
-          .map((m) => {
-            const tags = [
-              m.locked ? "[LOCKED]" : "",
-              m.pending ? "[PENDING]" : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
-            return `- ${tags ? tags + " " : ""}(id: ${m.id}) ${m.content}`;
-          })
-          .join("\n")}`
-      );
-    }
-  }
-  return sections.join("\n\n");
-}
