@@ -17,6 +17,7 @@ import {
 } from "@/lib/chat/tool-invocations";
 import { quotePreview } from "@/lib/chat/quote";
 import { makeMessageId } from "@/lib/chat/message-helpers";
+import { parseSSE } from "@/lib/chat/sse-stream";
 import { useChatModel } from "@/hooks/useChatModel";
 import { useTTSPlayer } from "@/hooks/useTTSPlayer";
 import { useRoomChannel } from "@/hooks/useRoomChannel";
@@ -222,251 +223,209 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
         },
       ]);
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(data);
-            // Server sends {done: true, messageId} at end of stream for dedup
-            if (parsed.done && parsed.messageId) {
-              seenIds.current.add(parsed.messageId);
-              continue;
+      for await (const evt of parseSSE(res)) {
+        if (evt.type === "done") {
+          // Server sends {done, messageId} at end of stream for dedup —
+          // the matching agent-message Redis echo arrives later and the
+          // socket handler skips by id.
+          if (evt.messageId) seenIds.current.add(evt.messageId);
+        } else if (evt.type === "content_retracted") {
+          // Validator caught a content/tool_call mismatch on the agent-
+          // runtime side and is replaying the round with a forced
+          // tool_choice. Wipe the partial reply we'd streamed so the
+          // corrected version replaces it cleanly (server side already
+          // throws away its accumulated fullContent on the same event).
+          setMessages((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            const last = updated[lastIdx];
+            if (last && last.senderType === "agent") {
+              updated[lastIdx] = { ...last, content: "" };
             }
-            // Validator caught a content/tool_call mismatch on the
-            // agent-runtime side and is replaying the round with a
-            // forced tool_choice. Wipe whatever partial reply we'd
-            // streamed so the corrected version replaces it cleanly
-            // (server side already throws away its accumulated
-            // fullContent on the same event).
-            if (parsed.content_retracted) {
-              setMessages((prev) => {
-                const updated = [...prev];
-                const lastIdx = updated.length - 1;
-                const last = updated[lastIdx];
-                if (last && last.senderType === "agent") {
-                  updated[lastIdx] = { ...last, content: "" };
-                }
-                return updated;
+            return updated;
+          });
+        } else if (evt.type === "reasoning") {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            const wasEmpty = !last.reasoning;
+            updated[updated.length - 1] = {
+              ...last,
+              reasoning: (last.reasoning || "") + evt.text,
+              // First reasoning chunk → start the timer. Subsequent
+              // chunks while content hasn't started yet bump
+              // reasoningMs forward; the moment content begins we
+              // stop updating it.
+              reasoningMs:
+                wasEmpty || !last.reasoningMs ? 0 : last.reasoningMs,
+            };
+            return updated;
+          });
+          // Track when reasoning began so we can close out reasoningMs
+          // when content starts arriving.
+          if (!reasoningStartRef.current) {
+            reasoningStartRef.current = Date.now();
+          }
+        } else if (evt.type === "content") {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            const reasoningMs =
+              last.reasoning && reasoningStartRef.current && !last.reasoningMs
+                ? Date.now() - reasoningStartRef.current
+                : last.reasoningMs;
+            updated[updated.length - 1] = {
+              ...last,
+              content: last.content + evt.text,
+              reasoningMs,
+            };
+            return updated;
+          });
+        } else if (evt.type === "tool_call") {
+          // Track name + args for ALL tool_calls — `speak` needs them at
+          // tool_result time even though it doesn't show up in the
+          // visible-tools card.
+          pendingToolCallIds.current.set(evt.id, evt.name);
+          pendingToolArgs.current.set(evt.id, evt.args);
+          if (VISIBLE_TOOLS.has(evt.name)) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              const next = [...(last.toolInvocations || [])];
+              next.push({
+                name: evt.name,
+                query: queryFromArgs(evt.name, evt.args),
+                pending: true,
               });
-              continue;
-            }
-            if (parsed.reasoning) {
-              setMessages((prev) => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                const wasEmpty = !last.reasoning;
-                updated[updated.length - 1] = {
-                  ...last,
-                  reasoning: (last.reasoning || "") + parsed.reasoning,
-                  // First reasoning chunk → start the timer. Each
-                  // subsequent chunk while content hasn't started yet
-                  // bumps reasoningMs forward; the moment content begins
-                  // we stop updating it.
-                  reasoningMs:
-                    wasEmpty || !last.reasoningMs
-                      ? 0
-                      : last.reasoningMs,
-                };
-                return updated;
-              });
-              // Track when reasoning began on this message so we can
-              // close out reasoningMs when content starts arriving.
-              if (!reasoningStartRef.current) {
-                reasoningStartRef.current = Date.now();
-              }
-            }
-            if (parsed.content) {
-              setMessages((prev) => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                const reasoningMs =
-                  last.reasoning && reasoningStartRef.current && !last.reasoningMs
-                    ? Date.now() - reasoningStartRef.current
-                    : last.reasoningMs;
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: last.content + parsed.content,
-                  reasoningMs,
-                };
-                return updated;
-              });
-            }
-            // Tool calls — push an optimistic pending row when the call
-            // starts; resolve it in place when the matching tool_result
-            // event arrives. We only render search/fetch tools (memory
-            // tools stay invisible — same allowlist as stream.ts).
-            if (parsed.tool_call) {
-              const tc = parsed.tool_call as {
-                id: string;
-                name: string;
-                args: string;
+              updated[updated.length - 1] = {
+                ...last,
+                toolInvocations: next,
               };
-              // Track name + args for ALL tool_calls — `speak` needs
-              // them at tool_result time even though it doesn't show
-              // up in the visible-tools card.
-              pendingToolCallIds.current.set(tc.id, tc.name);
-              pendingToolArgs.current.set(tc.id, tc.args);
-              if (VISIBLE_TOOLS.has(tc.name)) {
+              return updated;
+            });
+          }
+        } else if (evt.type === "tool_result") {
+          const knownName =
+            pendingToolCallIds.current.get(evt.id) || evt.name || "";
+          const knownArgs = pendingToolArgs.current.get(evt.id) || "";
+          pendingToolCallIds.current.delete(evt.id);
+          pendingToolArgs.current.delete(evt.id);
+          // generate_image: tool returns immediately with a placeholder
+          // messageId (queued: true) — the actual gen runs server-side
+          // in the background. Insert a pending bubble right here so
+          // the user sees a "生成中..." spinner without waiting for
+          // Redis.
+          //
+          // INSERT-POSITION CRITICAL: the image bubble must NOT be the
+          // last message. The `content` event handler above mutates
+          // `prev[prev.length-1]` with `content + chunk` (that's how
+          // the agent's text reply accumulates). If the image bubble
+          // is at the end, all of the agent's "画着呢~" / "画好了"
+          // text gets appended to its content field — corrupting the
+          // URL. Splice in BEFORE the streaming agent text bubble.
+          if (knownName === "generate_image" && evt.ok && evt.data) {
+            // evt.data is the full handler return value. image-tools.ts
+            // returns `{ data: { messageId, queued, provider } }` — the
+            // same `{ data: ... }` wrapping pattern web_search etc use,
+            // so the actual payload lives at evt.data.data.
+            const payload = (evt.data as any)?.data ?? evt.data;
+            const newId =
+              typeof payload?.messageId === "string"
+                ? payload.messageId
+                : "";
+            if (newId && !seenIds.current.has(newId)) {
+              seenIds.current.add(newId);
+              // Pull the prompt out of the agent's tool_call args so
+              // the placeholder bubble can show it under the spinner.
+              let promptShown: string | undefined;
+              try {
+                const a = JSON.parse(knownArgs || "{}");
+                if (typeof a?.prompt === "string") {
+                  promptShown =
+                    a.prompt.length > 80
+                      ? a.prompt.slice(0, 80) + "…"
+                      : a.prompt;
+                }
+              } catch {}
+              const startedAt = new Date().toISOString();
+              setMessages((prev) => {
+                const insertAt = Math.max(0, prev.length - 1);
+                const next = [...prev];
+                next.splice(insertAt, 0, {
+                  id: newId,
+                  senderType: "agent",
+                  senderId: agentIdRef.current,
+                  senderName: agentName,
+                  content: "",
+                  contentType: "image-pending",
+                  createdAt: startedAt,
+                  imageGen: {
+                    prompt: promptShown,
+                    phase: "排队中",
+                    startedAt,
+                  },
+                });
+                return next;
+              });
+            }
+          }
+          // `speak` resolution: live-attach the audio metadata to the
+          // in-flight agent message so the 🔊 button shows up right
+          // when the tool fires, not only after reload. stream.ts
+          // persists the same blob server-side.
+          if (knownName === "speak" && evt.ok && knownArgs) {
+            try {
+              const args = JSON.parse(knownArgs);
+              if (typeof args?.text === "string" && args.text.trim()) {
                 setMessages((prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
-                  const next = [...(last.toolInvocations || [])];
-                  next.push({
-                    name: tc.name,
-                    query: queryFromArgs(tc.name, tc.args),
-                    pending: true,
-                  });
                   updated[updated.length - 1] = {
                     ...last,
-                    toolInvocations: next,
+                    audio: {
+                      text: args.text.trim(),
+                      ...(typeof args?.voiceId === "string"
+                        ? { voiceId: args.voiceId }
+                        : {}),
+                    },
                   };
                   return updated;
                 });
               }
-            }
-            if (parsed.tool_result) {
-              const tr = parsed.tool_result as {
-                id: string;
-                name?: string;
-                ok: boolean;
-                data?: any;
-              };
-              const knownName =
-                pendingToolCallIds.current.get(tr.id) || tr.name || "";
-              const knownArgs = pendingToolArgs.current.get(tr.id) || "";
-              pendingToolCallIds.current.delete(tr.id);
-              pendingToolArgs.current.delete(tr.id);
-              // `speak` resolution: live-attach the audio metadata to
-              // the in-flight agent message so the 🔊 button shows up
-              // right when the tool fires, not only after reload.
-              // stream.ts persists the same blob server-side.
-              // generate_image: tool returns immediately with a
-              // placeholder messageId (queued: true) — the actual
-              // gen runs server-side in the background. Insert a
-              // pending bubble right here so the user sees a
-              // "生成中..." spinner without waiting for Redis.
-              //
-              // INSERT-POSITION CRITICAL: the image bubble must NOT
-              // be the last message. The SSE `parsed.content` handler
-              // above mutates `prev[prev.length-1]` with `content:
-              // last.content + chunk` (that's how the agent's text
-              // reply accumulates). If the image bubble is at the
-              // end, all of the agent's "画着呢~" / "画好了" text
-              // gets appended to its content field — corrupting the
-              // URL. Splice the image in BEFORE the streaming agent
-              // text bubble, which is always at len-1, so the SSE
-              // append keeps targeting the text bubble.
-              if (knownName === "generate_image" && tr.ok && tr.data) {
-                // tr.data is the FULL handler return value (agent-runtime
-                // wraps it as-is). image-tools.ts returns `{ data: {
-                // messageId, queued, provider } }` — same `{ data: ... }`
-                // wrapping pattern web_search etc use — so the actual
-                // payload lives at tr.data.data, not tr.data.
-                const payload = (tr.data as any)?.data ?? tr.data;
-                const newId =
-                  typeof payload?.messageId === "string"
-                    ? payload.messageId
-                    : "";
-                if (newId && !seenIds.current.has(newId)) {
-                  seenIds.current.add(newId);
-                  // Pull the prompt out of the agent's tool_call args so
-                  // the placeholder bubble can show it under the spinner.
-                  let promptShown: string | undefined;
-                  try {
-                    const a = JSON.parse(knownArgs || "{}");
-                    if (typeof a?.prompt === "string") {
-                      promptShown =
-                        a.prompt.length > 80 ? a.prompt.slice(0, 80) + "…" : a.prompt;
-                    }
-                  } catch {}
-                  const startedAt = new Date().toISOString();
-                  setMessages((prev) => {
-                    const insertAt = Math.max(0, prev.length - 1);
-                    const next = [...prev];
-                    next.splice(insertAt, 0, {
-                      id: newId,
-                      senderType: "agent",
-                      senderId: agentIdRef.current,
-                      senderName: agentName,
-                      content: "",
-                      contentType: "image-pending",
-                      createdAt: startedAt,
-                      imageGen: {
-                        prompt: promptShown,
-                        phase: "排队中",
-                        startedAt,
-                      },
-                    });
-                    return next;
-                  });
+            } catch {}
+          }
+          if (knownName && VISIBLE_TOOLS.has(knownName)) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              const list = [...(last.toolInvocations || [])];
+              // Find the matching pending row (latest for this tool
+              // name) and replace it with the resolved data.
+              let idx = -1;
+              for (let i = list.length - 1; i >= 0; i--) {
+                if (list[i].name === knownName && list[i].pending) {
+                  idx = i;
+                  break;
                 }
               }
-              if (knownName === "speak" && tr.ok && knownArgs) {
-                try {
-                  const args = JSON.parse(knownArgs);
-                  if (typeof args?.text === "string" && args.text.trim()) {
-                    setMessages((prev) => {
-                      const updated = [...prev];
-                      const last = updated[updated.length - 1];
-                      updated[updated.length - 1] = {
-                        ...last,
-                        audio: {
-                          text: args.text.trim(),
-                          ...(typeof args?.voiceId === "string"
-                            ? { voiceId: args.voiceId }
-                            : {}),
-                        },
-                      };
-                      return updated;
-                    });
-                  }
-                } catch {}
+              const resolved = resolveToolInvocation(
+                knownName,
+                list[idx]?.query,
+                evt.data,
+                evt.ok
+              );
+              if (idx >= 0) {
+                list[idx] = resolved;
+              } else {
+                list.push(resolved);
               }
-              if (knownName && VISIBLE_TOOLS.has(knownName)) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  const list = [...(last.toolInvocations || [])];
-                  // Find the matching pending row (latest one for this
-                  // tool name) and replace it with the resolved data.
-                  let idx = -1;
-                  for (let i = list.length - 1; i >= 0; i--) {
-                    if (list[i].name === knownName && list[i].pending) {
-                      idx = i;
-                      break;
-                    }
-                  }
-                  const resolved = resolveToolInvocation(
-                    knownName,
-                    list[idx]?.query,
-                    tr.data,
-                    tr.ok
-                  );
-                  if (idx >= 0) {
-                    list[idx] = resolved;
-                  } else {
-                    list.push(resolved);
-                  }
-                  updated[updated.length - 1] = {
-                    ...last,
-                    toolInvocations: list,
-                  };
-                  return updated;
-                });
-              }
-            }
-          } catch {}
+              updated[updated.length - 1] = {
+                ...last,
+                toolInvocations: list,
+              };
+              return updated;
+            });
+          }
         }
       }
     } catch {
