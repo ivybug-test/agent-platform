@@ -4,120 +4,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import Link from "next/link";
-
-type Category =
-  | "identity"
-  | "preference"
-  | "relationship"
-  | "event"
-  | "opinion"
-  | "context";
-type Importance = "high" | "medium" | "low";
-type Source = "extracted" | "user_explicit";
-
-interface Memory {
-  id: string;
-  content: string;
-  category: Category;
-  importance: Importance;
-  source: Source;
-  createdAt: string;
-  updatedAt: string;
-  lastReinforcedAt: string | null;
-  authoredByUserId: string | null;
-  confirmedAt: string | null;
-  authoredByName?: string | null;
-}
-
-type Tab = "mine" | "pending" | "relationships";
-
-type RelationshipKind = "spouse" | "family" | "colleague" | "friend" | "custom";
-
-interface RelationshipRow {
-  id: string;
-  kind: RelationshipKind;
-  content: string | null;
-  createdAt: string;
-  other: { id: string; name: string; email: string };
-}
-
-interface FriendRow {
-  id: string;
-  status: string;
-  direction: "mutual" | "incoming" | "outgoing";
-  friend: { id: string; name: string; email: string };
-}
-
-interface FriendOption {
-  id: string;
-  name: string;
-}
-
-const RECENT_LIMIT = 8;
-
-const KIND_LABELS: Record<RelationshipKind, string> = {
-  spouse: "伴侣",
-  family: "家人",
-  colleague: "同事",
-  friend: "朋友",
-  custom: "其他",
-};
-
-const CATEGORY_ORDER: Category[] = [
-  "identity",
-  "preference",
-  "relationship",
-  "event",
-  "opinion",
-  "context",
-];
-
-const CATEGORY_LABELS: Record<Category, string> = {
-  identity: "身份",
-  preference: "偏好",
-  relationship: "人际",
-  event: "事件",
-  opinion: "观点",
-  context: "近况",
-};
-
-const IMPORTANCE_LABELS: Record<Importance, string> = {
-  high: "高",
-  medium: "中",
-  low: "低",
-};
-
-const IMPORTANCE_COLORS: Record<Importance, string> = {
-  high: "badge-error",
-  medium: "badge-warning",
-  low: "badge-ghost",
-};
-
-/** Compact relative timestamp for memory list rows. Within a day shows
- *  HH:mm, within a week shows weekday + HH:mm, else MM-DD. */
-function fmtMemoryTime(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  const now = Date.now();
-  const ms = d.getTime();
-  const diffH = (now - ms) / 3600000;
-  const sh = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    weekday: "short",
-    hour12: false,
-  });
-  const parts = sh.formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value || "";
-  if (diffH < 24) return `${get("hour")}:${get("minute")}`;
-  if (diffH < 24 * 7) return `${get("weekday")} ${get("hour")}:${get("minute")}`;
-  return `${get("month")}-${get("day")}`;
-}
+import type {
+  Category,
+  FriendOption,
+  FriendRow,
+  Importance,
+  Memory,
+  RelationshipKind,
+  RelationshipRow,
+  Tab,
+} from "./types";
+import MineTab from "./components/MineTab";
+import PendingTab from "./components/PendingTab";
+import RelationshipsTab from "./components/RelationshipsTab";
 
 export default function MemoriesPage() {
   const { status } = useSession();
@@ -145,7 +44,6 @@ export default function MemoriesPage() {
   const [newSubject, setNewSubject] = useState<"self" | string>("self");
   const [saving, setSaving] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  // _ retained for legacy edit handlers — no longer used in the new UI.
   // Search box on the "mine" tab. Empty → recent + collapsed all sections.
   // Non-empty → flat filtered results (case-insensitive substring on
   // content, server-side via ?q=).
@@ -162,7 +60,9 @@ export default function MemoriesPage() {
   const load = async (opts: { q?: string } = {}) => {
     setLoading(true);
     try {
-      const memUrl = opts.q ? `/api/memories?q=${encodeURIComponent(opts.q)}` : "/api/memories";
+      const memUrl = opts.q
+        ? `/api/memories?q=${encodeURIComponent(opts.q)}`
+        : "/api/memories";
       const [memRes, relRes, friRes] = await Promise.all([
         fetch(memUrl),
         fetch("/api/relationships"),
@@ -238,8 +138,7 @@ export default function MemoriesPage() {
   };
 
   const remove = async (id: string) => {
-    if (!confirm("遗忘这条记忆?后台抽取器将被告知不要重新创建。"))
-      return;
+    if (!confirm("遗忘这条记忆?后台抽取器将被告知不要重新创建。")) return;
     const res = await fetch(`/api/memories/${id}`, { method: "DELETE" });
     if (res.ok) setMine((prev) => prev.filter((m) => m.id !== id));
   };
@@ -342,15 +241,6 @@ export default function MemoriesPage() {
     }
   };
 
-  // mine is already updatedAt-DESC sorted by the API. recent = top N.
-  // byCategory groups for the expandable "全部" section.
-  const recent = mine.slice(0, RECENT_LIMIT);
-  const byCategory = CATEGORY_ORDER.map((cat) => ({
-    category: cat,
-    items: mine.filter((m) => m.category === cat),
-  })).filter((g) => g.items.length > 0);
-  const isSearching = query.trim().length > 0;
-
   if (status === "loading" || loading) {
     return (
       <main
@@ -421,9 +311,7 @@ export default function MemoriesPage() {
         >
           待确认
           {pending.length > 0 && (
-            <span className="badge badge-primary badge-xs">
-              {pending.length}
-            </span>
+            <span className="badge badge-primary badge-xs">{pending.length}</span>
           )}
         </button>
         <button
@@ -445,559 +333,60 @@ export default function MemoriesPage() {
 
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-3 py-3 md:px-4">
-        {/* Pending tab: simple list of third-party-authored rows awaiting confirmation */}
         {tab === "pending" && (
-          pending.length === 0 ? (
-            <div className="text-center text-sm text-base-content/40 py-16">
-              没有待确认的记忆。其他成员对你写入的事实会出现在这里。
-            </div>
-          ) : (
-            <ul className="space-y-2">
-              {pending.map((m) => (
-                <li key={m.id} className="card bg-base-200 px-3 py-2.5">
-                  <div className="text-sm break-words leading-relaxed">
-                    {m.content}
-                  </div>
-                  <div className="flex items-center flex-wrap gap-1 mt-1.5">
-                    <span className="badge badge-xs badge-ghost">
-                      {CATEGORY_LABELS[m.category]}
-                    </span>
-                    <span
-                      className={`badge badge-xs ${IMPORTANCE_COLORS[m.importance]}`}
-                    >
-                      {IMPORTANCE_LABELS[m.importance]}
-                    </span>
-                    <span className="text-[11px] text-base-content/50 ml-1">
-                      来自 {m.authoredByName || "其他用户"}
-                    </span>
-                    <div className="ml-auto flex gap-0.5">
-                      <button
-                        className="btn btn-primary btn-xs h-6 min-h-0 px-2"
-                        onClick={() => accept(m.id)}
-                      >
-                        接受
-                      </button>
-                      <button
-                        className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
-                        onClick={() => reject(m.id)}
-                      >
-                        拒绝
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )
+          <PendingTab pending={pending} accept={accept} reject={reject} />
         )}
 
-        {/* Relationships tab */}
         {tab === "relationships" && (
-          <div className="space-y-5">
-            {/* Add relationship */}
-            <div className="card bg-base-200 p-3 space-y-2">
-              <button
-                className="btn btn-primary btn-sm w-full"
-                onClick={() => setRelAddOpen((v) => !v)}
-              >
-                {relAddOpen ? "取消" : "+ 新增关系"}
-              </button>
-              {relAddOpen && (
-                friendList.length === 0 ? (
-                  <div className="text-xs text-base-content/50">
-                    先在"好友"里添加对方为好友,然后才能建立关系。
-                  </div>
-                ) : (
-                  <div className="space-y-2 pt-1">
-                    <select
-                      className="select select-bordered select-sm w-full"
-                      value={relFriendId}
-                      onChange={(e) => setRelFriendId(e.target.value)}
-                    >
-                      <option value="">选择好友...</option>
-                      {friendList.map((f) => (
-                        <option key={f.friend.id} value={f.friend.id}>
-                          {f.friend.name}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      className="select select-bordered select-sm w-full"
-                      value={relKind}
-                      onChange={(e) =>
-                        setRelKind(e.target.value as RelationshipKind)
-                      }
-                    >
-                      {(Object.keys(KIND_LABELS) as RelationshipKind[]).map((k) => (
-                        <option key={k} value={k}>
-                          {KIND_LABELS[k]}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      className="input input-bordered input-sm w-full"
-                      placeholder="附加说明(可选)例如:认识 10 年"
-                      value={relContent}
-                      onChange={(e) => setRelContent(e.target.value)}
-                    />
-                    <button
-                      className="btn btn-primary btn-sm w-full"
-                      disabled={saving || !relFriendId}
-                      onClick={proposeRelationship}
-                    >
-                      提议建立
-                    </button>
-                  </div>
-                )
-              )}
-            </div>
-
-            {/* Pending (incoming) */}
-            {pendingRels.length > 0 && (
-              <section>
-                <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
-                  待确认({pendingRels.length})
-                </h2>
-                <ul className="space-y-2">
-                  {pendingRels.map((r) => (
-                    <li
-                      key={r.id}
-                      className="card bg-base-200 px-3 py-2.5"
-                    >
-                      <div className="text-sm">
-                        <span className="font-medium">{r.other.name}</span>
-                        <span className="text-base-content/60"> 提议是你的 </span>
-                        <span className="badge badge-xs badge-ghost">
-                          {KIND_LABELS[r.kind]}
-                        </span>
-                      </div>
-                      {r.content && (
-                        <div className="text-xs text-base-content/60 mt-0.5">
-                          {r.content}
-                        </div>
-                      )}
-                      <div className="flex gap-1 justify-end mt-1.5">
-                        <button
-                          className="btn btn-primary btn-xs h-6 min-h-0 px-2"
-                          onClick={() => acceptRel(r.id)}
-                        >
-                          接受
-                        </button>
-                        <button
-                          className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
-                          onClick={() => removeRel(r.id)}
-                        >
-                          拒绝
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            {/* Confirmed */}
-            <section>
-              <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
-                已确认({confirmedRels.length})
-              </h2>
-              {confirmedRels.length === 0 ? (
-                <div className="text-center text-sm text-base-content/40 py-6">
-                  还没有已确认的关系。
-                </div>
-              ) : (
-                <ul className="space-y-2">
-                  {confirmedRels.map((r) => (
-                    <li
-                      key={r.id}
-                      className="card bg-base-200 px-3 py-2.5"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm">{r.other.name}</span>
-                        <span className="badge badge-xs badge-info">
-                          {KIND_LABELS[r.kind]}
-                        </span>
-                        <button
-                          className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error ml-auto"
-                          onClick={() => removeRel(r.id)}
-                        >
-                          解除
-                        </button>
-                      </div>
-                      {r.content && (
-                        <div className="text-xs text-base-content/60 mt-0.5">
-                          {r.content}
-                        </div>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            {/* Outgoing (waiting for other) */}
-            {outgoingRels.length > 0 && (
-              <section>
-                <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
-                  已发出,等待对方确认({outgoingRels.length})
-                </h2>
-                <ul className="space-y-2">
-                  {outgoingRels.map((r) => (
-                    <li
-                      key={r.id}
-                      className="card bg-base-200 px-3 py-2.5 opacity-70"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm">{r.other.name}</span>
-                        <span className="badge badge-xs badge-ghost">
-                          {KIND_LABELS[r.kind]}
-                        </span>
-                        <button
-                          className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error ml-auto"
-                          onClick={() => removeRel(r.id)}
-                        >
-                          撤回
-                        </button>
-                      </div>
-                      {r.content && (
-                        <div className="text-xs text-base-content/60 mt-0.5">
-                          {r.content}
-                        </div>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-          </div>
-        )}
-
-        {/* Mine tab */}
-        {tab === "mine" && (<>
-        {/* New-memory form */}
-        {addOpen && (
-          <div className="card bg-base-200 p-3 mb-4 space-y-2">
-            <textarea
-              className="textarea textarea-bordered w-full text-sm"
-              placeholder="例如:住在深圳,是后端工程师。"
-              rows={2}
-              value={newContent}
-              onChange={(e) => setNewContent(e.target.value)}
-              autoFocus
-            />
-            <div className="flex flex-wrap gap-2 items-center">
-              {/* Subject selector — defaults to self; pick a friend to
-                  send a pending memory to them. */}
-              <select
-                className="select select-bordered select-sm"
-                value={newSubject}
-                onChange={(e) => setNewSubject(e.target.value)}
-                title="记给谁"
-              >
-                <option value="self">关于我</option>
-                {friendOpts.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    关于 {f.name}（待对方确认）
-                  </option>
-                ))}
-              </select>
-              <select
-                className="select select-bordered select-sm"
-                value={newCategory}
-                onChange={(e) => setNewCategory(e.target.value as Category)}
-              >
-                {CATEGORY_ORDER.map((c) => (
-                  <option key={c} value={c}>
-                    {CATEGORY_LABELS[c]}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="select select-bordered select-sm"
-                value={newImportance}
-                onChange={(e) => setNewImportance(e.target.value as Importance)}
-              >
-                <option value="high">高</option>
-                <option value="medium">中</option>
-                <option value="low">低</option>
-              </select>
-              <button
-                className="btn btn-primary btn-sm ml-auto"
-                onClick={create}
-                disabled={saving || !newContent.trim()}
-              >
-                {newSubject === "self" ? "保存" : "发送"}
-              </button>
-            </div>
-            {newSubject !== "self" && (
-              <div className="text-[11px] text-base-content/50">
-                这条会进入对方的"待确认"列表，需要他们接受后才生效。
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Search box */}
-        <div className="relative mb-3">
-          <input
-            className="input input-bordered input-sm w-full pr-8 text-sm"
-            placeholder="搜索记忆..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
+          <RelationshipsTab
+            confirmedRels={confirmedRels}
+            pendingRels={pendingRels}
+            outgoingRels={outgoingRels}
+            friendList={friendList}
+            relAddOpen={relAddOpen}
+            setRelAddOpen={setRelAddOpen}
+            relFriendId={relFriendId}
+            setRelFriendId={setRelFriendId}
+            relKind={relKind}
+            setRelKind={setRelKind}
+            relContent={relContent}
+            setRelContent={setRelContent}
+            saving={saving}
+            proposeRelationship={proposeRelationship}
+            acceptRel={acceptRel}
+            removeRel={removeRel}
           />
-          {query && (
-            <button
-              type="button"
-              onClick={() => setQuery("")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-base-content/40 hover:text-base-content text-sm"
-              aria-label="清空"
-            >
-              ×
-            </button>
-          )}
-        </div>
-
-        {mine.length === 0 && !isSearching && (
-          <div className="text-center text-sm text-base-content/40 py-16">
-            还没有记忆。点击右上角"+ 新增"手动添加，或在聊天中让 agent 记录。
-          </div>
         )}
 
-        {mine.length === 0 && isSearching && (
-          <div className="text-center text-sm text-base-content/40 py-16">
-            没有匹配"{query}"的记忆。
-          </div>
+        {tab === "mine" && (
+          <MineTab
+            mine={mine}
+            query={query}
+            setQuery={setQuery}
+            addOpen={addOpen}
+            newContent={newContent}
+            setNewContent={setNewContent}
+            newCategory={newCategory}
+            setNewCategory={setNewCategory}
+            newImportance={newImportance}
+            setNewImportance={setNewImportance}
+            newSubject={newSubject}
+            setNewSubject={setNewSubject}
+            friendOpts={friendOpts}
+            saving={saving}
+            create={create}
+            editingId={editingId}
+            draft={draft}
+            setDraft={setDraft}
+            startEdit={startEdit}
+            cancelEdit={cancelEdit}
+            saveEdit={saveEdit}
+            remove={remove}
+            allOpen={allOpen}
+            setAllOpen={setAllOpen}
+          />
         )}
-
-        {/* Search results — flat list */}
-        {isSearching && mine.length > 0 && (
-          <div>
-            <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
-              搜索结果（{mine.length}）
-            </h2>
-            <ul className="space-y-1.5">
-              {mine.map((m) => (
-                <MineRow
-                  key={m.id}
-                  m={m}
-                  isEditing={editingId === m.id}
-                  draft={draft}
-                  setDraft={setDraft}
-                  saving={saving}
-                  startEdit={startEdit}
-                  cancelEdit={cancelEdit}
-                  saveEdit={saveEdit}
-                  remove={remove}
-                />
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Default view: recent + collapsed all-by-category */}
-        {!isSearching && mine.length > 0 && (
-          <>
-            <section className="mb-4">
-              <h2 className="text-xs font-bold text-base-content/60 mb-2 px-1">
-                最近（{recent.length}）
-              </h2>
-              <ul className="space-y-1.5">
-                {recent.map((m) => (
-                  <MineRow
-                    key={m.id}
-                    m={m}
-                    isEditing={editingId === m.id}
-                    draft={draft}
-                    setDraft={setDraft}
-                    saving={saving}
-                    startEdit={startEdit}
-                    cancelEdit={cancelEdit}
-                    saveEdit={saveEdit}
-                    remove={remove}
-                  />
-                ))}
-              </ul>
-            </section>
-
-            {mine.length > RECENT_LIMIT && (
-              <section>
-                <button
-                  type="button"
-                  onClick={() => setAllOpen((v) => !v)}
-                  className="w-full flex items-center gap-2 px-2 py-2 text-xs font-bold text-base-content/60 hover:text-base-content transition-colors border-t border-base-300"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    strokeWidth={2.2}
-                    stroke="currentColor"
-                    className={`w-3 h-3 transition-transform ${allOpen ? "rotate-90" : ""}`}
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
-                  </svg>
-                  <span>全部 {mine.length} 条（按分类）</span>
-                </button>
-                {allOpen && (
-                  <div className="mt-2 space-y-3">
-                    {byCategory.map(({ category, items }) => (
-                      <section key={category}>
-                        <h3 className="text-[11px] uppercase tracking-wider text-base-content/40 mb-1 px-1">
-                          {CATEGORY_LABELS[category]}（{items.length}）
-                        </h3>
-                        <ul className="space-y-1.5">
-                          {items.map((m) => (
-                            <MineRow
-                              key={m.id}
-                              m={m}
-                              isEditing={editingId === m.id}
-                              draft={draft}
-                              setDraft={setDraft}
-                              saving={saving}
-                              startEdit={startEdit}
-                              cancelEdit={cancelEdit}
-                              saveEdit={saveEdit}
-                              remove={remove}
-                            />
-                          ))}
-                        </ul>
-                      </section>
-                    ))}
-                  </div>
-                )}
-              </section>
-            )}
-          </>
-        )}
-        </>)}
       </div>
     </main>
-  );
-}
-
-/** Single row in the mine list. Inline-edit toggle, inline metadata
- *  (importance + locked badge + relative time), and edit/forget actions
- *  on the right. Extracted so the recent / search / by-category sections
- *  can share the same renderer without duplicating ~80 lines of JSX. */
-function MineRow({
-  m,
-  isEditing,
-  draft,
-  setDraft,
-  saving,
-  startEdit,
-  cancelEdit,
-  saveEdit,
-  remove,
-}: {
-  m: Memory;
-  isEditing: boolean;
-  draft: Partial<Memory>;
-  setDraft: (fn: (d: Partial<Memory>) => Partial<Memory>) => void;
-  saving: boolean;
-  startEdit: (m: Memory) => void;
-  cancelEdit: () => void;
-  saveEdit: (id: string) => void;
-  remove: (id: string) => void;
-}) {
-  if (isEditing) {
-    return (
-      <li className="card bg-base-200 px-3 py-2.5">
-        <div className="space-y-2">
-          <textarea
-            className="textarea textarea-bordered w-full text-sm"
-            rows={2}
-            value={draft.content ?? ""}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, content: e.target.value }))
-            }
-            autoFocus
-          />
-          <div className="flex flex-wrap gap-1.5 items-center">
-            <select
-              className="select select-bordered select-xs"
-              value={draft.category}
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, category: e.target.value as Category }))
-              }
-            >
-              {CATEGORY_ORDER.map((c) => (
-                <option key={c} value={c}>
-                  {CATEGORY_LABELS[c]}
-                </option>
-              ))}
-            </select>
-            <select
-              className="select select-bordered select-xs"
-              value={draft.importance}
-              onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  importance: e.target.value as Importance,
-                }))
-              }
-            >
-              <option value="high">高</option>
-              <option value="medium">中</option>
-              <option value="low">低</option>
-            </select>
-            <div className="ml-auto flex gap-1">
-              <button
-                className="btn btn-ghost btn-xs"
-                onClick={cancelEdit}
-                disabled={saving}
-              >
-                取消
-              </button>
-              <button
-                className="btn btn-primary btn-xs"
-                onClick={() => saveEdit(m.id)}
-                disabled={saving || !draft.content?.trim()}
-              >
-                保存
-              </button>
-            </div>
-          </div>
-        </div>
-      </li>
-    );
-  }
-  return (
-    <li className="card bg-base-200 px-3 py-2.5">
-      <div className="text-sm break-words leading-relaxed">{m.content}</div>
-      <div className="flex items-center flex-wrap gap-1 mt-1.5">
-        <span className="badge badge-xs badge-ghost">
-          {CATEGORY_LABELS[m.category]}
-        </span>
-        <span
-          className={`badge badge-xs ${IMPORTANCE_COLORS[m.importance]}`}
-        >
-          {IMPORTANCE_LABELS[m.importance]}
-        </span>
-        {m.source === "user_explicit" && (
-          <span className="badge badge-xs badge-info">已锁定</span>
-        )}
-        <span
-          className="text-[11px] text-base-content/40 ml-1"
-          title={m.updatedAt}
-        >
-          {fmtMemoryTime(m.updatedAt)}
-        </span>
-        <div className="ml-auto flex gap-0.5">
-          <button
-            className="btn btn-ghost btn-xs h-6 min-h-0 px-2"
-            onClick={() => startEdit(m)}
-          >
-            编辑
-          </button>
-          <button
-            className="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-error"
-            onClick={() => remove(m.id)}
-          >
-            遗忘
-          </button>
-        </div>
-      </div>
-    </li>
   );
 }
