@@ -136,8 +136,10 @@ function hasNegationBefore(text: string, matchIndex: number): boolean {
   return NEGATION_PREFIXES.some((p) => window.includes(p));
 }
 
-const IMAGE_GEN_TRIGGERS: RegExp[] = [
-  // === New-image creation (画/帮我画/来一张/...) ===
+// "New image" triggers: user wants a fresh image with no reference to
+// prior ones. Trim aggressively (NO image markers in context) so the
+// model doesn't blend prior images as `referenceMessageIds`.
+const IMAGE_NEW_TRIGGERS: RegExp[] = [
   // "画一张" / "画个" / "画头" — quantifier-anchored so "画家" can't match
   /画[一]?[张个幅条只头份片群]/,
   // "画...张" with up to 4 chars between
@@ -156,12 +158,13 @@ const IMAGE_GEN_TRIGGERS: RegExp[] = [
   /\bpaint\s+(me|a|an|the)\b/i,
   /\bgenerate\b.*\bimage\b/i,
   /\bshow me (a|an|the|some|what)\b/i,
+];
 
-  // === Image edit (改/换/调/重画/再画) — without these the route falls
-  // through to DeepSeek auto, which is exactly the unreliable path the
-  // router is meant to bypass. Patterns deliberately require an
-  // image-relevant noun OR an unambiguous color/style modifier so
-  // "改图书馆" / "改我的代码" / "调音量" don't false-fire. ===
+// "Edit image" triggers: user wants to modify a prior image. Keep
+// image markers in context so the model can pick the right reference.
+// Patterns require an image-relevant noun OR an unambiguous color/
+// style modifier — "改图书馆" / "改我的代码" / "调音量" must not fire.
+const IMAGE_EDIT_TRIGGERS: RegExp[] = [
   // "改成绿色调" / "改成原来的样子" — explicit transform target
   /改.{0,3}成.{0,5}(色|风格|样式|样子|滤镜|背景|主题)/,
   // "改这张图" / "改一下那幅画"
@@ -174,11 +177,35 @@ const IMAGE_GEN_TRIGGERS: RegExp[] = [
   // "重新画" / "重画一张"
   /重新.{0,2}画/,
   /重画[一]?[张只个幅]?/,
-  // "再画一只" / "再画一张"
+  // "再画一只" / "再画一张" — usually a continuation of the same subject
   /再画[一]?[张只个幅]/,
-  // "再来一张" — already covered by /来[一]?张(图|画)/ but make explicit
+  // "再来一张" — same idea
   /再来[一]?张/,
 ];
+
+// EDIT first so "重新画一张" / "再画一只" classify as edit (continuing
+// a subject) before the broader "画一[张只]" NEW pattern grabs them.
+// pickToolChoice still routes both to generate_image — the order only
+// affects the new-vs-edit classification used by trim.
+const IMAGE_GEN_TRIGGERS: RegExp[] = [
+  ...IMAGE_EDIT_TRIGGERS,
+  ...IMAGE_NEW_TRIGGERS,
+];
+
+/** True iff the user message looks like an EDIT request (vs new image).
+ *  Used to decide whether to keep image markers in the trimmed context.
+ *  Edit patterns are checked BEFORE classifying as new — "重新画一张"
+ *  contains "画一张" (NEW pattern) but is semantically an edit ("redo
+ *  the previous one"), so we must match EDIT first.
+ *  Negation lookahead is applied so "别再画了" / "刚才画的" don't fire. */
+function isImageEditIntent(userContent: string): boolean {
+  if (!userContent) return false;
+  for (const re of IMAGE_EDIT_TRIGGERS) {
+    const m = re.exec(userContent);
+    if (m && !hasNegationBefore(userContent, m.index)) return true;
+  }
+  return false;
+}
 const SPEAK_TRIGGERS: RegExp[] = [
   // "学猫叫" / "学X叫"
   /学.{0,3}叫/,
@@ -267,21 +294,29 @@ const WEB_BASE_URL =
 const IMAGE_MARKER_RE = /\[图片#\d+\s*\(msgId=/;
 
 /** Strip past textual chat from the messages we send to Kimi when the
- *  router routed this turn for `generate_image`. Without trimming, the
- *  model blends prior conversation into the image prompt — user says
- *  "画狗" then "画助手" and the model produces "狗助手". We keep:
+ *  router routed this turn for `generate_image`. Two trim levels:
+ *
+ *  - **New-image intent** (`keepImageMarkers=false`, e.g. "画一只狗"):
+ *    keep ONLY system + current user message. No prior images at all,
+ *    so the model can't pull them as `referenceMessageIds`. Otherwise
+ *    "画狗" → "画助手" produces a 助手-with-dog-background as the model
+ *    treats the dog as a visual reference.
+ *  - **Edit-image intent** (`keepImageMarkers=true`, e.g. "改这张图"):
+ *    additionally keep messages whose content has `[图片#N (msgId=...)]`
+ *    markers, so the model can pick the right reference.
+ *
+ *  Always keep:
  *    1. The system prompt (always first)
- *    2. Every prior message that contains an image marker — these
- *       give the model the msgIds it needs for `referenceMessageIds`
- *       on edit-style requests ("把刚才那张图改成蓝色")
- *    3. The current user message (always last user role) — including
+ *    2. The current user message (always last user role) — including
  *       any `> [回复 ...]` formal-quote prefix already inlined
  *
- *  Tradeoff: implicit "再画一只" (continuing the same subject) loses
- *  what "一只" referred to. User can rephrase explicitly if needed. */
+ *  formal-quote prefix scenario: even with `keepImageMarkers=false`,
+ *  the quote prefix in the current message text still carries the
+ *  msgId, so the model can reference it explicitly. The marker on
+ *  prior messages just isn't needed in that case. */
 function trimToImageGenContext<
   T extends { role: string; content: LLMMessageContent },
->(llmMessages: T[]): T[] {
+>(llmMessages: T[], keepImageMarkers: boolean): T[] {
   if (llmMessages.length === 0) return llmMessages;
   let lastUserIdx = -1;
   for (let i = llmMessages.length - 1; i >= 0; i--) {
@@ -293,6 +328,7 @@ function trimToImageGenContext<
   return llmMessages.filter((m, i) => {
     if (i === 0 && m.role === "system") return true;
     if (i === lastUserIdx) return true;
+    if (!keepImageMarkers) return false;
     const content = typeof m.content === "string" ? m.content : "";
     return IMAGE_MARKER_RE.test(content);
   });
@@ -379,22 +415,27 @@ export async function streamAgentResponse(
   // Context trimming for the image-gen route. Only when we're about to
   // send to Kimi for a forced generate_image call do we strip prior
   // textual chat — that path needs to avoid bleeding "画狗" context
-  // into a later "画助手" prompt. The speak path keeps full context
-  // because speak's prompt depends on conversation flow ("再说一遍"
-  // requires prior turns).
+  // into a later "画助手" prompt. New-image vs edit-image trims
+  // differently (see trimToImageGenContext doc). The speak path keeps
+  // full context because speak's prompt depends on conversation flow
+  // ("再说一遍" requires prior turns).
   const isGenerateImageRoute =
     isForcedRoute &&
     typeof rawToolChoice === "object" &&
     rawToolChoice.function.name === "generate_image" &&
     effectiveProvider === "kimi";
+  const isEditIntent =
+    isGenerateImageRoute && isImageEditIntent(userContent);
   const messagesToSend = isGenerateImageRoute
-    ? trimToImageGenContext(llmMessages)
+    ? trimToImageGenContext(llmMessages, isEditIntent)
     : llmMessages;
   if (isGenerateImageRoute) {
     log.info(
       {
         roomId,
         userId,
+        intent: isEditIntent ? "edit" : "new",
+        keepImageMarkers: isEditIntent,
         fromCount: llmMessages.length,
         toCount: messagesToSend.length,
       },
