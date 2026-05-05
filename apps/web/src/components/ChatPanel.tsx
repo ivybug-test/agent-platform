@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
-import { io, Socket } from "socket.io-client";
 import { sendImageMessage } from "@/lib/upload-image";
 import MessageBubble from "./chat/MessageBubble";
 import type {
@@ -20,6 +19,7 @@ import { quotePreview } from "@/lib/chat/quote";
 import { makeMessageId } from "@/lib/chat/message-helpers";
 import { useChatModel } from "@/hooks/useChatModel";
 import { useTTSPlayer } from "@/hooks/useTTSPlayer";
+import { useRoomChannel } from "@/hooks/useRoomChannel";
 
 
 interface ChatPanelProps {
@@ -32,14 +32,10 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const { data: session } = useSession();
   const currentUserId = session?.user?.id;
 
-  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
-  const [hasMore, setHasMore] = useState(false);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   // Reply / quote state — set by long-press / right-click on a message,
   // shown as a chip above the input, sent with the next message and then
   // cleared. `null` means no quote is staged.
@@ -49,10 +45,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   const [menuForId, setMenuForId] = useState<string | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Real agent name from the room (e.g. "agent", "Maya"). Loaded with
-  // the message history so optimistic placeholders match what the rest of
-  // the chat shows after the SSE stream resolves.
-  const [agentName, setAgentName] = useState("agent");
 
   const { model, toggleModel } = useChatModel(roomId);
   const {
@@ -64,11 +56,30 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
     toggleAudioPlayback,
   } = useTTSPlayer(roomId);
 
-  const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const isInitialLoad = useRef(true);
+
+  const {
+    messages,
+    setMessages,
+    typingUsers,
+    hasMore,
+    isLoadingMore,
+    agentName,
+    seenIds,
+    refetchMessages,
+    loadOlderMessages,
+    emitTyping,
+  } = useRoomChannel({
+    roomId,
+    currentUserId,
+    userName: session?.user?.name || "User",
+    agentIdRef,
+    scrollContainerRef,
+    isInitialLoadRef: isInitialLoad,
+  });
   // Per-stream timer for the reasoning panel. Reset to 0 each time a new
   // agent message starts; first {reasoning} event stamps it, first
   // {content} event closes it out into reasoningMs on the message.
@@ -83,298 +94,6 @@ export default function ChatPanel({ roomId, onChatComplete }: ChatPanelProps) {
   // don't have to special-case visibility filters here.
   const pendingToolArgs = useRef<Map<string, string>>(new Map());
 
-  useEffect(() => {
-    setMessages([]);
-    setHasMore(false);
-    seenIds.current.clear();
-    isInitialLoad.current = true;
-    (async () => {
-      const res = await fetch(`/api/messages?roomId=${roomId}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const loaded = data.messages
-        .filter((r: any) => r.senderType !== "system")
-        .map((r: any) => ({
-          id: r.id,
-          senderType: r.senderType,
-          senderId: r.senderId,
-          senderName: r.senderName,
-          content: r.content,
-          contentType: r.contentType,
-          createdAt: r.createdAt,
-          reasoning: r.metadata?.reasoning,
-          reasoningMs: r.metadata?.reasoningMs,
-          toolInvocations: r.metadata?.toolInvocations,
-          audio: r.metadata?.audio,
-          imageGen: r.metadata?.imageGen,
-          replyToMessageId: r.replyToMessageId ?? null,
-          replyTo: r.replyTo ?? null,
-        }));
-      for (const m of loaded) {
-        if (m.id) seenIds.current.add(m.id);
-        if (m.senderType === "agent" && m.senderId && !agentIdRef.current) {
-          agentIdRef.current = m.senderId;
-        }
-      }
-      if (data.roomAgent?.name) {
-        setAgentName(data.roomAgent.name);
-        if (data.roomAgent.id) agentIdRef.current = data.roomAgent.id;
-      }
-      setMessages(loaded);
-      setHasMore(data.hasMore ?? false);
-    })();
-  }, [roomId]);
-
-  // WebSocket: listen for real-time messages from other users
-  const socketRef = useRef<Socket | null>(null);
-  const seenIds = useRef(new Set<string>());
-
-  // Refetch messages from API and merge (used on reconnect to fill gaps)
-  const refetchMessages = useCallback(async () => {
-    const res = await fetch(`/api/messages?roomId=${roomId}`);
-    if (!res.ok) return;
-    const data = await res.json();
-    const fetched: Message[] = data.messages
-      .filter((r: any) => r.senderType !== "system")
-      .map((r: any) => ({
-        id: r.id,
-        senderType: r.senderType,
-        senderId: r.senderId,
-        senderName: r.senderName,
-        content: r.content,
-        contentType: r.contentType,
-        createdAt: r.createdAt,
-        reasoning: r.metadata?.reasoning,
-        reasoningMs: r.metadata?.reasoningMs,
-        toolInvocations: r.metadata?.toolInvocations,
-        audio: r.metadata?.audio,
-        imageGen: r.metadata?.imageGen,
-      }));
-    for (const m of fetched) {
-      if (m.id) seenIds.current.add(m.id);
-    }
-    setMessages(fetched);
-    setHasMore(data.hasMore ?? false);
-  }, [roomId]);
-
-  // Load older messages when scrolling to top
-  const loadOlderMessages = useCallback(async () => {
-    if (isLoadingMore || !hasMore) return;
-    const oldest = messages.find((m) => m.createdAt);
-    if (!oldest?.createdAt) return;
-
-    setIsLoadingMore(true);
-    const container = scrollContainerRef.current;
-    const prevScrollHeight = container?.scrollHeight ?? 0;
-
-    try {
-      const res = await fetch(
-        `/api/messages?roomId=${roomId}&before=${encodeURIComponent(oldest.createdAt)}`
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      const older: Message[] = data.messages
-        .filter((r: any) => r.senderType !== "system")
-        .map((r: any) => ({
-          id: r.id,
-          senderType: r.senderType,
-          senderId: r.senderId,
-          senderName: r.senderName,
-          content: r.content,
-          contentType: r.contentType,
-          createdAt: r.createdAt,
-          reasoning: r.metadata?.reasoning,
-          reasoningMs: r.metadata?.reasoningMs,
-          toolInvocations: r.metadata?.toolInvocations,
-          audio: r.metadata?.audio,
-          imageGen: r.metadata?.imageGen,
-          replyToMessageId: r.replyToMessageId ?? null,
-          replyTo: r.replyTo ?? null,
-        }));
-      for (const m of older) {
-        if (m.id) seenIds.current.add(m.id);
-      }
-      if (older.length > 0) {
-        setMessages((prev) => [...older, ...prev]);
-        // Restore scroll position after prepending
-        requestAnimationFrame(() => {
-          if (container) {
-            container.scrollTop = container.scrollHeight - prevScrollHeight;
-          }
-        });
-      }
-      setHasMore(data.hasMore ?? false);
-    } finally {
-      setIsLoadingMore(false);
-    }
-  }, [roomId, hasMore, isLoadingMore, messages]);
-
-  useEffect(() => {
-    const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
-    if (!gatewayUrl || !currentUserId) return;
-
-    const socket = io(gatewayUrl, {
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-    });
-    socketRef.current = socket;
-
-    let isFirstConnect = true;
-
-    socket.on("connect", () => {
-      socket.emit("join-room", roomId);
-      // On reconnect (not first connect), refetch messages to fill the gap
-      if (!isFirstConnect) {
-        refetchMessages();
-      }
-      isFirstConnect = false;
-    });
-
-    socket.on("typing", (data: { userName: string }) => {
-      if (!data?.userName) return;
-      const name = data.userName;
-      setTypingUsers((prev) => new Set(prev).add(name));
-      // Clear previous timer for this user
-      const existing = typingTimers.current.get(name);
-      if (existing) clearTimeout(existing);
-      // Auto-remove after 3s
-      typingTimers.current.set(name, setTimeout(() => {
-        setTypingUsers((prev) => {
-          const next = new Set(prev);
-          next.delete(name);
-          return next;
-        });
-        typingTimers.current.delete(name);
-      }, 3000));
-    });
-
-    socket.on("room-message", (event: any) => {
-      const msg = event.message;
-      if (!msg) return;
-      // 'message-updated' is the event the BG image-gen task fires
-      // when it finishes (or fails / is cancelled). It refers to a
-      // messageId we ALREADY have in state (we inserted a placeholder
-      // pending bubble from the tool_result on the originator, or
-      // received the placeholder from the earlier 'agent-message'
-      // event for other room members). Update by id, don't insert.
-      if (event.type === "message-updated") {
-        if (!msg.id) return;
-        // Phase updates for image-pending bubbles arrive as
-        // message-updated events but the broadcast itself doesn't
-        // carry imageGen metadata — to avoid bloating every event
-        // payload, we re-fetch /api/messages/<id> and merge in.
-        // (Cheap: only fires when there's actually an in-flight
-        // image we already know about.)
-        if (msg.contentType === "image-pending") {
-          fetch(`/api/messages/${msg.id}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((data) => {
-              if (!data?.message) return;
-              const ig = data.message.metadata?.imageGen;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === msg.id ? { ...m, imageGen: ig ?? m.imageGen } : m
-                )
-              );
-            })
-            .catch(() => {});
-          return;
-        }
-        // Final swap (image / image-failed) — content has the real
-        // URL or the failure / cancel reason. Replace in place,
-        // imageGen no longer relevant once the bubble settles.
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === msg.id
-              ? {
-                  ...m,
-                  content: msg.content ?? m.content,
-                  contentType: msg.contentType ?? m.contentType,
-                  imageGen: undefined,
-                }
-              : m
-          )
-        );
-        return;
-      }
-      // Skip empty messages (image-pending placeholders are an
-      // exception — they have content="" but a real contentType, and
-      // we DO want to render the spinner bubble).
-      if (!msg.content && msg.contentType !== "image-pending") return;
-      // Skip our own user messages (already shown locally)
-      if (msg.senderType === "user" && msg.senderId === currentUserId) return;
-      // Skip agent text messages triggered by us — those streamed in via
-      // SSE already, the Redis echo would just duplicate. EXCEPT image
-      // messages (real or pending) from generate_image: SSE doesn't
-      // carry image bubbles. The tool_result handler already inserted
-      // the placeholder; seenIds.has(msg.id) below catches that.
-      if (
-        msg.senderType === "agent" &&
-        event.triggeredBy === currentUserId &&
-        msg.contentType !== "image" &&
-        msg.contentType !== "image-pending" &&
-        msg.contentType !== "image-failed"
-      ) return;
-      // Skip duplicates
-      if (msg.id && seenIds.current.has(msg.id)) return;
-      if (msg.id) seenIds.current.add(msg.id);
-
-      // Clear typing indicator for this sender
-      if (msg.senderName) {
-        setTypingUsers((prev) => {
-          if (!prev.has(msg.senderName)) return prev;
-          const next = new Set(prev);
-          next.delete(msg.senderName);
-          return next;
-        });
-      }
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: msg.id,
-          senderType: msg.senderType,
-          senderId: msg.senderId,
-          senderName: msg.senderName,
-          content: msg.content,
-          contentType: msg.contentType,
-          replyToMessageId: msg.replyToMessageId ?? null,
-          replyTo: msg.replyTo ?? null,
-        },
-      ]);
-    });
-
-    return () => {
-      socket.emit("leave-room", roomId);
-      socket.disconnect();
-      socketRef.current = null;
-    };
-  }, [roomId, currentUserId, refetchMessages]);
-
-  // Emit typing event (debounced: at most once per 2s)
-  const lastTypingEmit = useRef(0);
-  const emitTyping = useCallback(() => {
-    const now = Date.now();
-    if (now - lastTypingEmit.current < 2000) return;
-    lastTypingEmit.current = now;
-    const socket = socketRef.current;
-    if (socket) {
-      socket.emit("typing", { roomId, userName: session?.user?.name || "User" });
-    }
-  }, [roomId, session?.user?.name]);
-
-  // Detect scroll near top to load older messages
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const handleScroll = () => {
-      if (container.scrollTop < 80 && hasMore && !isLoadingMore) {
-        loadOlderMessages();
-      }
-    };
-    container.addEventListener("scroll", handleScroll, { passive: true });
-    return () => container.removeEventListener("scroll", handleScroll);
-  }, [hasMore, isLoadingMore, loadOlderMessages]);
 
   // Auto-scroll to bottom only when near bottom (not when loading older messages)
   const shouldAutoScroll = useRef(true);
