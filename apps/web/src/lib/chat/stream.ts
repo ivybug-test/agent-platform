@@ -6,7 +6,7 @@ import { publishRoomEvent, getRedisClient } from "@/lib/redis";
 import { publishRoomActivity } from "@/lib/chat/room-activity";
 import { createLogger } from "@agent-platform/logger";
 import { signToolToken } from "@/lib/tool-token";
-import { agentToolDefs } from "@/lib/tools";
+import { agentToolDefs, getTool } from "@/lib/tools";
 import type { LLMMessageContent } from "@/lib/chat/context";
 
 /** Tool names whose results we surface to the user as a "搜索网页" card.
@@ -362,38 +362,23 @@ export async function streamAgentResponse(
       "chat.router-corrected"
     );
   }
-  // DeepSeek's API rejects forced tool_choice (`required` and `{function:
-  // {name}}`) with 400 (verified 2026-05-05). Kimi accepts both. So when
-  // the router fires AND the requested provider is deepseek, route THIS
-  // SINGLE TURN to Kimi — Kimi can honor the forced tool_choice, and
-  // subsequent turns return to deepseek automatically because
-  // streamAgentResponse is called fresh for each user message.
-  //
-  // What the model produces (tool_call ids, tool_results in the
-  // `messages` history) is provider-agnostic OpenAI shape — DeepSeek
-  // accepts those just fine on the next round, so context carries over
-  // cleanly.
+  // The router's forced tool_choice gets sent through as-is. DeepSeek
+  // 400s on `{function:{name}}` and `required` (verified 2026-05-05);
+  // the agent-runtime side has a defense layer that downgrades it to
+  // "auto" before calling the API for DeepSeek requests. The downgrade
+  // softens the constraint but the retract+retry loop + the system-
+  // side forced-route fallback in this file's `finally` block handle
+  // the residual "model didn't call" cases without needing to bounce
+  // through Kimi (which adds its own 429s and latency, see logs
+  // 2026-05-10 — Kimi was overloaded and we still resolved the request
+  // fine via the fallback path).
   const toolChoice: ToolChoice = rawToolChoice;
-  let effectiveProvider: Provider = provider;
   const isForcedRoute = typeof rawToolChoice === "object";
-  if (isForcedRoute && provider === "deepseek") {
-    effectiveProvider = "kimi";
-    log.info(
-      {
-        roomId,
-        userId,
-        forcedTool: rawToolChoice.function.name,
-        originalProvider: provider,
-      },
-      "chat.routing-to-kimi-for-forced-tool"
-    );
-  }
-  // DeepSeek-pro thinking-mode + forced tool_choice has occasional bad
-  // interactions; the deep-thinking budget is also wasted when we already
-  // know the tool to call. Drop to flash whenever the router fires
-  // (only matters when we stayed on deepseek, since kimi ignores mode).
+  // DeepSeek-pro thinking-mode wastes the chain-of-thought budget when
+  // we already know the tool to call. Drop to flash whenever the
+  // router fires.
   const effectiveMode: DeepSeekMode =
-    isForcedRoute && mode === "pro" && effectiveProvider === "deepseek"
+    isForcedRoute && mode === "pro" && provider === "deepseek"
       ? "flash"
       : mode;
   if (toolChoice !== "auto") {
@@ -405,25 +390,22 @@ export async function streamAgentResponse(
           typeof toolChoice === "object" ? toolChoice.function.name : toolChoice,
         modeRequested: mode,
         modeEffective: effectiveMode,
-        providerRequested: provider,
-        providerEffective: effectiveProvider,
+        provider,
       },
       "chat.tool-choice-forced"
     );
   }
 
-  // Context trimming for the image-gen route. Only when we're about to
-  // send to Kimi for a forced generate_image call do we strip prior
-  // textual chat — that path needs to avoid bleeding "画狗" context
-  // into a later "画助手" prompt. New-image vs edit-image trims
-  // differently (see trimToImageGenContext doc). The speak path keeps
-  // full context because speak's prompt depends on conversation flow
-  // ("再说一遍" requires prior turns).
+  // Context trimming for the image-gen route. Strip prior textual chat
+  // when the router forced generate_image so we don't bleed "画狗"
+  // context into a later "画助手" prompt. New-image vs edit-image
+  // trims differently (see trimToImageGenContext doc). The speak path
+  // keeps full context because speak's prompt depends on conversation
+  // flow ("再说一遍" requires prior turns).
   const isGenerateImageRoute =
     isForcedRoute &&
     typeof rawToolChoice === "object" &&
-    rawToolChoice.function.name === "generate_image" &&
-    effectiveProvider === "kimi";
+    rawToolChoice.function.name === "generate_image";
   const isEditIntent =
     isGenerateImageRoute && isImageEditIntent(userContent);
   const messagesToSend = isGenerateImageRoute
@@ -451,7 +433,7 @@ export async function streamAgentResponse(
       tools: agentToolDefs,
       toolCallbackUrl: `${WEB_BASE_URL}/api/agent/tool`,
       toolAuth,
-      provider: effectiveProvider,
+      provider,
       model: effectiveMode,
       toolChoice,
     }),
@@ -477,6 +459,12 @@ export async function streamAgentResponse(
   // persist the user-visible search hits onto the message. Memory tools are
   // filtered out at persistence time.
   const pendingToolCalls = new Map<string, { name: string; args: string }>();
+  // Names of every tool the model actually emitted as a tool_call this
+  // turn. Distinct from `pendingToolCalls` (which gets drained on each
+  // tool_result) — `firedTools` survives the whole stream so the
+  // forced-route fallback below can decide whether to fire the tool
+  // server-side as a last resort.
+  const firedTools = new Set<string>();
   const toolInvocations: ToolInvocation[] = [];
   // `speak` tool result → metadata.audio. Captured here so the play
   // button survives reload (the live SSE branch in ChatPanel mirrors
@@ -546,6 +534,7 @@ export async function streamAgentResponse(
                   name: evt.tool_call.name,
                   args: evt.tool_call.args,
                 });
+                firedTools.add(evt.tool_call.name);
               }
               if (evt.tool_result) {
                 const pending = pendingToolCalls.get(evt.tool_result.id);
@@ -595,6 +584,88 @@ export async function streamAgentResponse(
           "stream.complete"
         );
         log.debug({ roomId, agentMsgId, content: fullContent }, "stream.content");
+
+        // Forced-route fallback. The router decided this turn MUST
+        // call a specific tool (e.g. generate_image because the user
+        // wrote "画一只猫"). agent-runtime does its best with forced
+        // tool_choice + retract+retry; if the stream still ends
+        // without the forced tool firing, fall back here.
+        //
+        // CRITICAL: only fire when the agent gave us NOTHING USABLE.
+        // The router-forced path doesn't override the model's
+        // judgment — sometimes the model legitimately decides it
+        // needs more info before drawing (e.g. user "画一张我" →
+        // agent searches memories, finds no description, asks "你长
+        // 什么样?"). That's the right behavior. Falling back to a
+        // server-side generate_image with prompt="画一张我" produces a
+        // random "我" image AND retracts the clarification question,
+        // making the agent look like it ate the reply.
+        //
+        // Two cases trigger fallback:
+        //   1. Empty response — LLM 429'd / errored, user got nothing
+        //   2. Hallucination phrase — model wrote "正在画" / "画着呢"
+        //      lying about a tool call (matches the same regex
+        //      agent-runtime's hallucination-detector uses)
+        // Everything else (clarifying question, refusal, off-topic
+        // chat) is trusted as a deliberate model choice.
+        //
+        // Mirror of services/agent-runtime/src/hallucination-detector.ts
+        // — keep in sync if that regex changes.
+        const IMAGE_HALLUCINATION_RE =
+          /画着呢|稍等十几秒|稍等几秒|正在画|开始画|画好了|帮你画了|画完了|图已生成|图发给你|附上.{0,3}图/;
+        const forcedToolName =
+          isForcedRoute && typeof rawToolChoice === "object"
+            ? rawToolChoice.function.name
+            : null;
+        const fallbackReason = !fullContent
+          ? "empty-response"
+          : IMAGE_HALLUCINATION_RE.test(fullContent)
+            ? "hallucination-phrase"
+            : null;
+        if (
+          forcedToolName === "generate_image" &&
+          !firedTools.has("generate_image") &&
+          fallbackReason
+        ) {
+          log.warn(
+            {
+              roomId,
+              userId,
+              agentMsgId,
+              fallbackReason,
+              hallucinatedText: fullContent.slice(0, 80),
+              firedToolList: [...firedTools],
+            },
+            "chat.forced-route-fallback-firing-generate_image"
+          );
+          // Tell the client to discard whatever hallucination text we
+          // streamed (e.g. "正在画") so the agent text bubble doesn't
+          // sit next to the image bubble lying about what just happened.
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({ content_retracted: true })}\n\n`
+            )
+          );
+          fullContent = "";
+          try {
+            const handler = getTool("generate_image");
+            if (handler) {
+              await handler(
+                { prompt: userContent },
+                { userId, roomId }
+              );
+            }
+          } catch (fbErr: unknown) {
+            log.error(
+              {
+                roomId,
+                agentMsgId,
+                err: fbErr instanceof Error ? fbErr.message : fbErr,
+              },
+              "chat.forced-route-fallback-failed"
+            );
+          }
+        }
 
         const reasoningMs =
           reasoningStartedAt && reasoningEndedAt

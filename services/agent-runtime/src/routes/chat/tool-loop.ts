@@ -68,9 +68,16 @@ export async function runToolLoop({
   // Track tools the agent ACTUALLY emitted across all rounds this
   // turn — the validator uses this to spot "I claimed a tool ran
   // but no tool_call exists" hallucinations. Retries are capped so
-  // a stubborn model can't spin the loop forever.
+  // a stubborn model can't spin the loop forever. DeepSeek can't
+  // accept forced tool_choice on retry (400s), so retries lean on the
+  // [CORRECTION] system message we push — needs more attempts than
+  // Kimi's forced path. 4 retries (5 total attempts) brings
+  // independent-fail rate to <1% even at 50% per-attempt compliance.
+  // Each retry only fires when the prior round wrote a hallucination
+  // phrase without emitting the tool, so cost stays near zero in the
+  // happy path.
   const toolsCalledThisTurn = new Set<string>();
-  let retriesLeft = 1;
+  let retriesLeft = 4;
   // Set when the validator wants the next round to FORCE a specific
   // tool_choice. Cleared after one use so it doesn't leak past retry.
   let forceToolChoice: ToolChoice | null = null;
@@ -291,23 +298,21 @@ export async function runToolLoop({
         //   1. tell client to retract the bad text it just streamed
         //   2. push the bad assistant turn + a corrective system msg
         //      back into the LLM context
-        //   3. re-run THIS round with tool_choice forced to the
-        //      missing tool — the model can't refuse to call it
-        // Capped at retriesLeft (default 1) so a misaligned model
-        // can't spin forever.
-        //
-        // CAVEAT (DeepSeek): the retry pushes tool_choice={function:
-        // {name}} which DeepSeek rejects with 400 — our defense layer
-        // above downgrades it back to "auto", neutering the retry. So
-        // the retract WIPES the user's already-streamed text but the
-        // retry can't reliably refill it, leaving an empty bubble.
-        // Skip the retract+retry entirely on DeepSeek: a slightly off
-        // text response is far better than an empty bubble. Keeps the
-        // mechanism live for Kimi (where forced tool_choice works).
-        const canForceTool = provider !== "deepseek";
-        const halluTool = canForceTool
-          ? detectHallucinatedTool(assistantText, toolsCalledThisTurn)
-          : null;
+        //   3. re-run THIS round, ideally with tool_choice forced to
+        //      the missing tool. On DeepSeek the forced tool_choice
+        //      gets downgraded back to "auto" by the defense layer
+        //      (DeepSeek 400s on `{function:{name}}` — verified
+        //      2026-05-05), so the retry on DeepSeek leans entirely on
+        //      the strong [CORRECTION] system message we push above.
+        //      That's still effective: we observed empirically the
+        //      model usually obeys after seeing its own bad text +
+        //      explicit instruction. retriesLeft covers up to 4
+        //      attempts; if all fail, the web layer's
+        //      forced-route-fallback fires the tool server-side.
+        const halluTool = detectHallucinatedTool(
+          assistantText,
+          toolsCalledThisTurn
+        );
         const haveToolDef = !!tools.some(
           (t) => t.function.name === halluTool
         );
