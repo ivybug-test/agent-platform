@@ -160,10 +160,10 @@ const IMAGE_NEW_TRIGGERS: RegExp[] = [
   /\bshow me (a|an|the|some|what)\b/i,
 ];
 
-// "Edit image" triggers: user wants to modify a prior image. Keep
-// image markers in context so the model can pick the right reference.
-// Patterns require an image-relevant noun OR an unambiguous color/
-// style modifier — "改图书馆" / "改我的代码" / "调音量" must not fire.
+// "Edit image" triggers: user wants to modify / continue a prior
+// image. Keep image markers in context so the model can pick the
+// right reference. Patterns must imply an image-relevant referent —
+// "改图书馆" / "改我的代码" / "调音量" / "正面回应" must not fire.
 const IMAGE_EDIT_TRIGGERS: RegExp[] = [
   // "改成绿色调" / "改成原来的样子" — explicit transform target
   /改.{0,3}成.{0,5}(色|风格|样式|样子|滤镜|背景|主题)/,
@@ -181,6 +181,32 @@ const IMAGE_EDIT_TRIGGERS: RegExp[] = [
   /再画[一]?[张只个幅]/,
   // "再来一张" — same idea
   /再来[一]?张/,
+  // "在这张/那张/第N张/前面那张 ... 基础上" — explicit base reference.
+  // Requires "基础" so plain "在这张图上" without a base claim doesn't
+  // fire from this rule alone (it'd hit other rules instead).
+  /在.{1,12}基础上/,
+  // "基于这张图 / 基于刚才的画 / 基于第一张" — explicit reference verb
+  /基于.{0,8}(这|那|刚才|刚刚|上面|上一|前一|前面|第)/,
+  // "用这张图 / 拿那张 / 看着上面那张" — same idea via different verbs
+  /(用|拿|看着).{0,3}(这|那|上面|上一|前一|前面|刚才|刚画的)[一]?(张|个|幅)?(图|画|的)/,
+  // "同一个人 / 同一张脸 / 同一只猫" — re-render same subject
+  /同一[一]?(个|张|位|只|样)/,
+  // "和这张一样 / 跟刚才那张类似 / 和上面那张相同 / 跟前面那个似的"
+  /(和|跟).{0,5}(这|那|上面|上一|前面|刚|前)[一]?[张个面次]?.{0,4}(一样|相同|类似|相似|似的)/,
+  // Pose / framing variants — same subject, new shot. Two flavors so
+  // "正面回应" / "全国" / "半小时" / "半边天" can't false-fire:
+  //   (a) prefixed by a draw verb ("画一张全身" / "来个侧面" / "画 Lee 全身")
+  //   (b) followed by a framing word ("全身的" / "正面照" / "半身像")
+  /(画|来|画一|来一)[一]?[张只个幅]?.{0,8}(全|半|近|远|侧|背|正|俯|仰)[一]?(身|景|面|视角|镜头|角度)/,
+  /(全|半|近|远|侧|背|正|俯|仰)[一]?(身|景|面|视角|镜头|角度).{0,3}(的|照|像|图|版|图片|画面)/,
+  // "第一张 / 第二幅 / 第3张" — explicit numbered reference to a
+  // prior image. Quantifier required so "第一次" / "第三方" can't match.
+  /第\s*[一二三四五六七八九十百\d]+\s*[张幅]/,
+  // Same-subject outfit / accessory / styling edits. Both explicit
+  // 穿/戴/带/拿/抱 verbs AND clothing/feature nouns count, so
+  // "再画一张穿西装的" / "来一张黑色衣服的" / "换个发型" all hit.
+  // Draw-verb prefix required so plain "戴帽子" / "穿衣服" don't fire.
+  /(再?画|再?来|换个)[一]?[张只个幅]?.{0,8}(穿|戴|带|拿|抱|衣服|帽子|裙子|裤子|鞋子|外套|毛衣|衬衫|发型|表情|姿势|场景|表情包)/,
 ];
 
 // EDIT first so "重新画一张" / "再画一只" classify as edit (continuing
