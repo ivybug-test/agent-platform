@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
-    "sha": "1f29d1b",
-    "subject": "Fix Postgres connection exhaustion + slow polling cadence",
-    "date": "2026-04-26T18:40:37+08:00"
+    "sha": "b704f2b",
+    "subject": "generate_image: catch follow-up edits + push referenceMessageIds use",
+    "date": "2026-05-10T19:51:30+08:00"
   },
   {
-    "sha": "a3adbec",
-    "subject": "speak: same CALL-TOOL-FIRST hardening as generate_image",
-    "date": "2026-04-26T18:36:34+08:00"
+    "sha": "e3b75a1",
+    "subject": "generate_image: kill auto over-firing + harden forced-route fallback",
+    "date": "2026-05-10T19:40:45+08:00"
   },
   {
-    "sha": "30aaa6d",
-    "subject": "generate_image: read tr.data.data + anti-fake-call prompt + retroactive note",
-    "date": "2026-04-26T18:31:41+08:00"
+    "sha": "4d6025c",
+    "subject": "Mobile scroll: gate content-visibility to pointer-fine devices only",
+    "date": "2026-05-06T00:34:00+08:00"
   }
 ];

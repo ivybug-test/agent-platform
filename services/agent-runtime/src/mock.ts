@@ -1,7 +1,16 @@
+// Empty <attitude> block keeps the apps/web stream extractor happy in
+// mock mode (it strips the prefix before showing the user). Without
+// this, mock-mode replies would either fail mood update or leak the
+// "model didn't emit attitude" fallback path. The block is emitted as a
+// single up-front chunk so the extractor sees the full close tag on
+// its first push.
+const ATTITUDE_PREFIX = '<attitude>{"items":[]}</attitude>';
+
 const mockText =
   "This is a mock response for UI development. The real LLM is not being called. You can disable mock mode by setting MOCK_LLM=false in your .env file.";
 
 export async function* mockStream(): AsyncGenerator<string> {
+  yield ATTITUDE_PREFIX;
   const words = mockText.split(" ");
   for (const word of words) {
     await new Promise((r) => setTimeout(r, 80));
@@ -13,6 +22,7 @@ const mockVisionText =
   "Mock vision response: I see an image. (Kimi mock mode — no real vision call.)";
 
 export async function* mockVisionStream(): AsyncGenerator<string> {
+  yield ATTITUDE_PREFIX;
   for (const word of mockVisionText.split(" ")) {
     await new Promise((r) => setTimeout(r, 80));
     yield word + " ";
@@ -71,7 +81,14 @@ export async function* mockToolStream(
     return;
   }
 
-  // Round >= 1: plain-text answer reflecting the tool ran
+  // Round >= 1: plain-text answer reflecting the tool ran.
+  // Prefix with the attitude block per the apps/web stream extractor
+  // contract (same reason as mockStream above).
+  yield {
+    choices: [
+      { delta: { content: ATTITUDE_PREFIX }, finish_reason: null },
+    ],
+  };
   const final = "Mock reply: the tool loop executed successfully.";
   for (const word of final.split(" ")) {
     await new Promise((r) => setTimeout(r, 40));

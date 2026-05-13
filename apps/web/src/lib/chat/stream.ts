@@ -8,6 +8,63 @@ import { createLogger } from "@agent-platform/logger";
 import { signToolToken } from "@/lib/tool-token";
 import { agentToolDefs, getTool } from "@/lib/tools";
 import type { LLMMessageContent } from "@/lib/chat/context";
+import { applyMoodDelta } from "@/lib/chat/mood/repo";
+
+/** State machine that intercepts the leading `<attitude>{...}</attitude>`
+ *  block emitted by the LLM (per the attitude protocol layer in the
+ *  system prompt). Tokens are buffered up front and NOT forwarded to the
+ *  client until either we see `</attitude>` (extract, then flush the
+ *  remainder) or the buffer grows past MAX_HEADER (fall back: assume the
+ *  model dropped the protocol, flush everything as-is so the user still
+ *  gets their reply).
+ *
+ *  The extractor only ever inspects CONTENT chunks. Reasoning, tool_call,
+ *  tool_result, retract events pass through verbatim. */
+const MAX_HEADER_CHARS = 2000;
+
+class AttitudeExtractor {
+  private state: "BUFFERING" | "STREAMING" = "BUFFERING";
+  private buffer = "";
+  attitudeRaw: string | null = null;
+
+  /** Feed a content token, get back the portion that should be sent to
+   *  the client (often empty while we're still buffering). */
+  push(token: string): string {
+    if (this.state === "STREAMING") return token;
+    this.buffer += token;
+    const closeIdx = this.buffer.indexOf("</attitude>");
+    if (closeIdx >= 0) {
+      const openIdx = this.buffer.indexOf("<attitude>");
+      if (openIdx >= 0 && openIdx < closeIdx) {
+        this.attitudeRaw = this.buffer
+          .slice(openIdx + "<attitude>".length, closeIdx)
+          .trim();
+      }
+      const remainder = this.buffer.slice(closeIdx + "</attitude>".length);
+      this.buffer = "";
+      this.state = "STREAMING";
+      return remainder;
+    }
+    if (this.buffer.length > MAX_HEADER_CHARS) {
+      // Model didn't follow the protocol within the budget. Flush.
+      const flushed = this.buffer;
+      this.buffer = "";
+      this.state = "STREAMING";
+      return flushed;
+    }
+    return "";
+  }
+
+  /** End-of-stream flush. If the LLM never closed the block, dump
+   *  whatever we held back so the user still sees something. */
+  finish(): string {
+    if (this.state === "STREAMING") return "";
+    const flushed = this.buffer;
+    this.buffer = "";
+    this.state = "STREAMING";
+    return flushed;
+  }
+}
 
 /** Tool names whose results we surface to the user as a "搜索网页" card.
  *  Memory tools (search_memories / remember / etc.) stay invisible because
@@ -372,7 +429,8 @@ export async function streamAgentResponse(
   userId: string,
   provider: Provider = "deepseek",
   mode: DeepSeekMode = "flash",
-  agentName: string = "agent"
+  agentName: string = "agent",
+  agentId: string | null = null
 ): Promise<Response> {
   const toolAuth = await signToolToken({ userId, roomId });
   const { toolChoice: rawToolChoice, correctedFrom } =
@@ -501,6 +559,19 @@ export async function streamAgentResponse(
     async start(controller) {
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+      // We no longer forward raw bytes from agent-runtime; instead we
+      // parse each SSE event and re-emit it ourselves. That's the only
+      // way to suppress the leading <attitude>...</attitude> block —
+      // its tokens arrive inline with normal content, so a pass-through
+      // proxy would leak them to the client. emitEvent is the single
+      // outbound write path.
+      const emitEvent = (obj: unknown) => {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)
+        );
+      };
+      const extractor = new AttitudeExtractor();
       // Buffer for partial-line carry-over across reads. SSE events end
       // in `\n\n`, but a single fetch chunk can split a line in the
       // middle (TCP/reverse-proxy buffering). Without carry-over, the
@@ -515,7 +586,6 @@ export async function streamAgentResponse(
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          controller.enqueue(value);
           pending += decoder.decode(value, { stream: true });
           // Hold back the last (potentially incomplete) segment until
           // the next chunk arrives.
@@ -524,12 +594,16 @@ export async function streamAgentResponse(
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
             const data = line.slice(6);
-            if (data === "[DONE]") continue;
+            if (data === "[DONE]") {
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              continue;
+            }
             try {
               const evt = JSON.parse(data) as {
                 content?: string;
                 reasoning?: string;
                 content_retracted?: boolean;
+                error?: string;
                 tool_call?: { id: string; name: string; args: string };
                 tool_result?: {
                   id: string;
@@ -541,19 +615,34 @@ export async function streamAgentResponse(
               if (evt.reasoning) {
                 if (!reasoningStartedAt) reasoningStartedAt = Date.now();
                 fullReasoning += evt.reasoning;
+                emitEvent({ reasoning: evt.reasoning });
+                continue;
               }
               if (evt.content_retracted) {
                 // Validator caught a content/tool_call mismatch and is
                 // re-running the round. Throw away the partial content
                 // we'd been accumulating so the eventual db.update at
-                // turn end persists only the corrected reply.
+                // turn end persists only the corrected reply. Note we
+                // do NOT reset the attitude extractor — the LLM only
+                // emits the attitude block at the very start of its
+                // first text round; a retract re-runs the same round
+                // and the model typically does NOT re-emit attitude
+                // (already given it once), so anything that arrives
+                // after retract should flow through as plain body.
                 fullContent = "";
+                emitEvent({ content_retracted: true });
+                continue;
               }
               if (evt.content) {
                 if (reasoningStartedAt && !reasoningEndedAt) {
                   reasoningEndedAt = Date.now();
                 }
-                fullContent += evt.content;
+                const out = extractor.push(evt.content);
+                if (out) {
+                  fullContent += out;
+                  emitEvent({ content: out });
+                }
+                continue;
               }
               if (evt.tool_call) {
                 pendingToolCalls.set(evt.tool_call.id, {
@@ -561,6 +650,8 @@ export async function streamAgentResponse(
                   args: evt.tool_call.args,
                 });
                 firedTools.add(evt.tool_call.name);
+                emitEvent({ tool_call: evt.tool_call });
+                continue;
               }
               if (evt.tool_result) {
                 const pending = pendingToolCalls.get(evt.tool_result.id);
@@ -593,11 +684,27 @@ export async function streamAgentResponse(
                   } catch {}
                 }
                 pendingToolCalls.delete(evt.tool_result.id);
+                emitEvent({ tool_result: evt.tool_result });
+                continue;
               }
+              if (evt.error) {
+                emitEvent({ error: evt.error });
+                continue;
+              }
+              // Unknown event — forward verbatim so a future agent-runtime
+              // event type doesn't get silently dropped.
+              emitEvent(evt);
             } catch {}
           }
         }
       } finally {
+        // If the stream ended while still in BUFFERING, flush whatever
+        // we held back so the user isn't left with an empty bubble.
+        const tail = extractor.finish();
+        if (tail) {
+          fullContent += tail;
+          emitEvent({ content: tail });
+        }
         const duration = Date.now() - streamStartTime;
         log.info(
           {
@@ -745,6 +852,38 @@ export async function streamAgentResponse(
 
         // Push memory extraction jobs (async, non-blocking)
         pushMemoryJobs(roomId, userId).catch(() => {});
+
+        // Apply mood delta from the <attitude> block the LLM emitted.
+        // Failure must never block close — we already streamed the
+        // user-visible reply; mood is best-effort enrichment.
+        if (extractor.attitudeRaw !== null && agentId) {
+          try {
+            const parsed = JSON.parse(extractor.attitudeRaw) as {
+              items?: unknown;
+            };
+            const newMood = await applyMoodDelta(
+              agentId,
+              userId,
+              parsed?.items
+            );
+            log.info(
+              { roomId, agentId, userId, mood: newMood },
+              "mood.updated"
+            );
+          } catch (moodErr) {
+            log.warn(
+              {
+                roomId,
+                agentId,
+                userId,
+                rawPreview: extractor.attitudeRaw.slice(0, 120),
+                err:
+                  moodErr instanceof Error ? moodErr.message : String(moodErr),
+              },
+              "mood.update-failed"
+            );
+          }
+        }
 
         controller.close();
       }

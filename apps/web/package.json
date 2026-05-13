@@ -12,6 +12,7 @@
   "dependencies": {
     "@agent-platform/db": "workspace:*",
     "@agent-platform/logger": "workspace:^",
+    "@agent-platform/types": "workspace:*",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.0.0",
     "cos-js-sdk-v5": "^1.10.1",

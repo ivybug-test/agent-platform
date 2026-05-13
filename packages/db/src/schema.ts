@@ -8,6 +8,8 @@ import {
   pgEnum,
   real,
   jsonb,
+  integer,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 
 /** A single search/fetch tool call surfaced in the chat UI. We persist the
@@ -291,6 +293,58 @@ export const userRelationships = pgTable("user_relationships", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+
+// Per-(agent, user) mood. Cross-room: the assistant's mood toward a user
+// follows the user across every room they share with that agent.
+//   self_state — overall well-being, 1=极度抑郁/自毁 → 100=非常幸福
+//   favor      — desire to engage with this user, 1=极度冷漠 → 100=非常热情
+// Row absence ⇒ treat as defaults (self_state=60, favor=50); we do NOT
+// pre-seed rows. Inserted lazily on the first attitude event.
+export const agentUserMoods = pgTable(
+  "agent_user_moods",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    selfState: integer("self_state").notNull().default(60),
+    favor: integer("favor").notNull().default(50),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.agentId, t.userId] }),
+  })
+);
+
+// Audit log for raw attitude detections from the LLM's <attitude> blocks.
+// One row per (agent, speaker user, attitude type, target). We accumulate
+// the strength sum here for traceability but DON'T re-derive mood from
+// it — Self / Favor are updated incrementally in agent_user_moods.
+//   attitude — one of 愤怒/满意/恶意/冷漠/热情/平和/喜欢/难过
+//   target   — assistant | third_party | self  ("self" only valid for 难过)
+export const agentUserAttitudeCounters = pgTable(
+  "agent_user_attitude_counters",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    attitude: varchar("attitude", { length: 16 }).notNull(),
+    target: varchar("target", { length: 16 }).notNull(),
+    strengthSum: integer("strength_sum").notNull().default(0),
+    eventCount: integer("event_count").notNull().default(0),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({
+      columns: [t.agentId, t.userId, t.attitude, t.target],
+    }),
+  })
+);
 
 // Room-shared memories (Phase 3 of multi-user memory)
 // Facts that belong to the ROOM, not any single user. Project codenames,

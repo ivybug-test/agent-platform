@@ -17,6 +17,7 @@ import {
   buildLLMMessages,
 } from "@/lib/chat/context";
 import { streamAgentResponse } from "@/lib/chat/stream";
+import { getMood } from "@/lib/chat/mood/repo";
 import { publishRoomEvent } from "@/lib/redis";
 import { publishRoomActivity } from "@/lib/chat/room-activity";
 import { createLogger } from "@agent-platform/logger";
@@ -129,7 +130,10 @@ export async function POST(req: NextRequest) {
 
   log.info({ roomId, userId: user.id, contentPreview: cleanContent.slice(0, 80) }, "chat.request");
 
-  // Load context + memory
+  // Load context + memory + mood. Mood is per-(agent, user) cross-room;
+  // when there's no agent in the room we skip it (no LLM call will
+  // happen anyway via getDefaultRoomAgent → null), but to keep the
+  // Promise.all uniform we still resolve to a default-ish null.
   const [
     { recentMessages, nameMap },
     memberNames,
@@ -137,6 +141,7 @@ export async function POST(req: NextRequest) {
     allUsersMemories,
     roomMems,
     roomMemberRows,
+    mood,
   ] = await Promise.all([
     loadChatContext(roomId),
     getRoomMemberNames(roomId),
@@ -152,15 +157,18 @@ export async function POST(req: NextRequest) {
           eq(roomMembers.memberType, "user")
         )
       ),
+    agent
+      ? getMood(agent.id, user.id)
+      : (Promise.resolve(null) as Promise<null>),
   ]);
   const currentUserName = nameMap.get(user.id) || "User";
-  const roomMemberIds = roomMemberRows.map((r) => r.memberId);
+  const roomMemberIds = roomMemberRows.map((r: { memberId: string }) => r.memberId);
   const relationships = await getConfirmedRelationshipsForUser(
     user.id,
     roomMemberIds
   );
 
-  // Build prompt (6 layers)
+  // Build prompt (6 layers + mood + attitude protocol)
   const systemContent = buildSystemPrompt({
     agentPrompt: agent?.systemPrompt || null,
     roomPrompt: room?.systemPrompt || null,
@@ -172,6 +180,7 @@ export async function POST(req: NextRequest) {
     roomMemories: roomMems,
     relationships,
     allUsersMemories,
+    mood,
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
 
@@ -221,6 +230,7 @@ export async function POST(req: NextRequest) {
     user.id,
     provider,
     mode,
-    agentName
+    agentName,
+    agent?.id ?? null
   );
 }
