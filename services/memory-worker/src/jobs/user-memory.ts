@@ -46,11 +46,34 @@ interface UserMemoryData {
   userId: string;
 }
 
-// Threshold at which an incoming CREATE is treated as a near-duplicate of an
-// existing active memory. Phase A change: the action is now REINFORCE (bump
-// strength + last_reinforced_at on the existing row) rather than silent skip,
-// so repeat mentions actually strengthen memory over time.
+// Bigram Jaccard threshold — kept for the literal near-duplicate case
+// (same fact, different phrasing word-order). Phase A semantics:
+// REINFORCE on hit instead of silent skip.
 const DUP_REINFORCE_THRESHOLD = 0.55;
+
+// M5c: cosine threshold — catches paraphrase that bigram misses
+// ("喜欢甜食" ↔ "爱吃蛋糕", "讨厌堵车" ↔ "上下班路上很烦"). Conservative
+// 0.82 chosen so genuinely distinct facts ("喜欢甜食" vs "喜欢咸食",
+// typically ~0.65-0.75) don't get falsely merged. Logged on hit so we can
+// observe and tune.
+const COSINE_REINFORCE_THRESHOLD = 0.82;
+
+/** Cosine similarity of two equal-length vectors. Assumes neither is the
+ *  zero vector — text-embedding-3-small never returns one for non-empty
+ *  text. Returns NaN-safe 0 if either input is malformed. */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / Math.sqrt(na * nb);
+}
 
 export async function processUserMemory(data: UserMemoryData) {
   const { roomId, userId } = data;
@@ -163,17 +186,28 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
     return;
   }
 
-  // Local snapshot of "existing rows" (id + content) for dup detection. Grows
-  // as we accept CREATEs in this batch so the LLM can't duplicate within a
-  // single response.
-  const existingForDupCheck: { id: string | null; content: string }[] =
-    activeMemories.map((m) => ({ id: m.id, content: m.content }));
+  // Local snapshot of "existing rows" for dup detection. Carries the
+  // embedding so M5c can run cosine dedup alongside bigram. Grows as we
+  // accept CREATEs in this batch so the LLM can't duplicate within a
+  // single response. For locally-just-created rows, id is null (can't
+  // reinforce a row that's still in the same transaction) but the
+  // embedding can still block local twins.
+  const existingForDupCheck: {
+    id: string | null;
+    content: string;
+    embedding: number[] | null;
+  }[] = activeMemories.map((m) => ({
+    id: m.id,
+    content: m.content,
+    embedding: m.embedding ?? null,
+  }));
 
   let created = 0,
     updated = 0,
     deleted = 0,
     rejected = 0,
     reinforced = 0,
+    cosineReinforced = 0,
     evidenceMismatch = 0;
 
   await db.transaction(async (tx) => {
@@ -236,27 +270,83 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
             continue;
           }
 
-          // Near-dup detection: on a hit, REINFORCE the existing row rather
-          // than skip. This is the core Phase A signal — if a user keeps
-          // mentioning the same fact across different sessions, its strength
-          // grows and the read-path decay holds it high.
-          let best: { id: string | null; content: string; sim: number } | null =
-            null;
+          // M5c: pre-compute embedding so it can feed both cosine dedup AND
+          // the eventual storage write. Single API call, dual purpose.
+          // Failure non-fatal — falls back to bigram-only dedup, and
+          // backfill catches the missing embedding later.
+          let embedding: number[] | null = null;
+          try {
+            embedding = await embedOne(content);
+          } catch (err) {
+            log.warn(
+              { userId, content, err: (err as Error).message },
+              "memory.embedding-failed"
+            );
+          }
+
+          // Near-dup detection: REINFORCE on hit (Phase A semantics).
+          // Two signals in parallel — bigram (literal near-duplicate) and
+          // cosine (semantic paraphrase, M5c). Pick whichever scores
+          // higher relative to its threshold. Locked/pending rows are
+          // never reinforced.
+          let bestBigram: { id: string | null; content: string; sim: number } | null = null;
+          let bestCosine: { id: string | null; content: string; sim: number } | null = null;
           for (const existing of existingForDupCheck) {
-            const sim = textSimilarity(content, existing.content);
-            if (!best || sim > best.sim) {
-              best = { id: existing.id, content: existing.content, sim };
+            const simB = textSimilarity(content, existing.content);
+            if (!bestBigram || simB > bestBigram.sim) {
+              bestBigram = { id: existing.id, content: existing.content, sim: simB };
+            }
+            if (embedding && existing.embedding) {
+              const simC = cosineSimilarity(embedding, existing.embedding);
+              if (!bestCosine || simC > bestCosine.sim) {
+                bestCosine = { id: existing.id, content: existing.content, sim: simC };
+              }
             }
           }
-          if (best && best.sim >= DUP_REINFORCE_THRESHOLD) {
-            // best.id is null only for CREATEs accepted earlier in this same
-            // batch (local twin); those can't be reinforced because the row
-            // was just inserted. Skip silently in that case.
-            if (best.id) {
-              // Safety: locked/pending rows must not be silently mutated.
-              if (lockedIds.has(best.id) || pendingIds.has(best.id)) {
+
+          const bigramHit =
+            bestBigram && bestBigram.sim >= DUP_REINFORCE_THRESHOLD;
+          const cosineHit =
+            bestCosine && bestCosine.sim >= COSINE_REINFORCE_THRESHOLD;
+
+          // Choose the trigger that scored highest above its threshold.
+          // Bigram and cosine thresholds aren't directly comparable, so we
+          // normalise by (sim - threshold) — whichever is more confident
+          // wins. Tie-breaker: bigram (literal match is more trustworthy).
+          let trigger: { id: string | null; content: string; sim: number } | null = null;
+          let triggerType: "bigram" | "cosine" = "bigram";
+          if (bigramHit && cosineHit) {
+            const bigramMargin = bestBigram!.sim - DUP_REINFORCE_THRESHOLD;
+            const cosineMargin = bestCosine!.sim - COSINE_REINFORCE_THRESHOLD;
+            if (cosineMargin > bigramMargin) {
+              trigger = bestCosine;
+              triggerType = "cosine";
+            } else {
+              trigger = bestBigram;
+              triggerType = "bigram";
+            }
+          } else if (bigramHit) {
+            trigger = bestBigram;
+            triggerType = "bigram";
+          } else if (cosineHit) {
+            trigger = bestCosine;
+            triggerType = "cosine";
+          }
+
+          if (trigger) {
+            // trigger.id null = local-batch twin (just CREATEd in this
+            // same response); can't reinforce a row that doesn't exist
+            // yet. Skip silently.
+            if (trigger.id) {
+              if (lockedIds.has(trigger.id) || pendingIds.has(trigger.id)) {
                 log.info(
-                  { userId, content, twin: best.content, similarity: best.sim },
+                  {
+                    userId,
+                    content,
+                    twin: trigger.content,
+                    similarity: trigger.sim,
+                    triggerType,
+                  },
                   "memory.skip-reinforce-protected"
                 );
               } else {
@@ -269,38 +359,26 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
                   })
                   .where(
                     and(
-                      eq(userMemories.id, best.id),
+                      eq(userMemories.id, trigger.id),
                       eq(userMemories.source, "extracted")
                     )
                   );
                 log.info(
                   {
                     userId,
-                    memoryId: best.id,
+                    memoryId: trigger.id,
                     content,
-                    twin: best.content,
-                    similarity: best.sim,
+                    twin: trigger.content,
+                    similarity: trigger.sim,
+                    triggerType,
                   },
                   "memory.reinforce"
                 );
                 reinforced++;
+                if (triggerType === "cosine") cosineReinforced++;
               }
             }
             continue;
-          }
-
-          // Compute embedding inline so the new row is searchable
-          // immediately. Failure is non-fatal — back-fill will catch it
-          // later — but we still log so a degraded embedding provider
-          // doesn't go unnoticed.
-          let embedding: number[] | null = null;
-          try {
-            embedding = await embedOne(content);
-          } catch (err) {
-            log.warn(
-              { userId, content, err: (err as Error).message },
-              "memory.embedding-failed"
-            );
           }
 
           const eventAt = parseEventAt(a.eventAt);
@@ -317,7 +395,7 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
             evidenceQuote,
             embedding: embedding ?? undefined,
           });
-          existingForDupCheck.push({ id: null, content });
+          existingForDupCheck.push({ id: null, content, embedding });
           created++;
         } else if (
           a.action === "update" &&
@@ -402,6 +480,7 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
       deleted,
       rejected,
       reinforced,
+      cosineReinforced,
       evidenceMismatch,
     },
     "memory.result"

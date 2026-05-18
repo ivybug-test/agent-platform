@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
+    "sha": "b0b059f",
+    "subject": "Memory Phase α M5b: agent_memories embedding — backfill + 在线写",
+    "date": "2026-05-18T20:00:45+08:00"
+  },
+  {
+    "sha": "1370cc4",
+    "subject": "Memory Phase α M5a: read_image 联想换 cosine",
+    "date": "2026-05-18T19:58:02+08:00"
+  },
+  {
     "sha": "ff3989e",
     "subject": "Memory Phase α (MVP): provenance + agent self + observation log + pgvector",
     "date": "2026-05-18T19:53:18+08:00"
-  },
-  {
-    "sha": "49f8a5b",
-    "subject": "Agent mood: dynamic Self/Favor driven by user attitude",
-    "date": "2026-05-13T23:52:20+08:00"
-  },
-  {
-    "sha": "b704f2b",
-    "subject": "generate_image: catch follow-up edits + push referenceMessageIds use",
-    "date": "2026-05-10T19:51:30+08:00"
   }
 ];

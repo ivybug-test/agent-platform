@@ -3,6 +3,29 @@
 ## 项目状态
 Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。**2026-05-17 启动记忆系统 Phase α (MVP) 升级**:对应计划文件 `subagent-agent-wild-beaver.md`,目标是 provenance(杀编造)+ agent 自我维度 + reflection v1(杀碎片化)+ pgvector 启用。剩余项:Phase C 嘴巴(TTS + 唱歌)、MCP 集成、Phase β/γ(结构化实体表 + 时序矛盾检测)。
 
+### 记忆 Phase α M5d — search_memories 加 cosine top-up 分支(2026-05-18)
+**依据**:M5 的"读侧 pgvector 启用"。原 search_memories 只走 substring `ilike`,典型失败:agent 想 search "甜食" 但用户记忆是"爱吃蛋糕";search "猫" 但记忆是"养了一只布偶 邦邦"。cosine over embedding 能补回来。
+- 新建 `apps/web/src/lib/embeddings.ts`:server-only,lazy import openai SDK(client bundle 不变 — 验证 web build 输出 size 不变);`embedQuery(text)` 返回 1536d 向量,失败返回 null 给上层走 fallback;`toVectorLiteral` 拼 pgvector 字面
+- `apps/web/package.json` 加 `openai` dep(只在 server-side 用)
+- `user-memory-tools.ts` `search_memories` 改 top-up 设计:
+  - 先跑现有 ilike 路径(literal match,排序按 importance/updatedAt 或 eventAt)
+  - 当 `query` 存在 + 非纯时间过滤 + literal 结果未占满 limit:embed query → cosine 拉相似但 id 不在已返回列表里的行,top up 到 limit。阈值 cosine 距离 < 0.75(相似度 ≥ 0.25,宽松,让 LLM 自己判)
+  - 拼接 [literal, cosine] 顺序返回(literal 在前 — 字面匹配比语义可信)
+  - 拿到所有 id 后 fire-and-forget 刷 last_reinforced_at(原行为不变)
+- 工具 description 重写:明示"literal AND semantic"——'甜食' → '爱吃蛋糕','猫' → '邦邦 (布偶猫)'
+- 三包构建通过(web client bundle 没增大 — openai 是 server-only)
+
+### 记忆 Phase α M5c — user-memory dedup 用 cosine 并联 bigram(2026-05-18)
+**依据**:动态记忆 TASKS D2 + 计划修订点 4。**原痛点**:bigram Jaccard 把"喜欢甜食"和"爱吃蛋糕"算成两条 fact(字符串没有重叠),用户反复提及不会 reinforce 反而堆出 dup。
+- `services/memory-worker/src/jobs/user-memory.ts`:
+  - 新加 `COSINE_REINFORCE_THRESHOLD = 0.82`(原 plan 0.85,稍降给中文一点余地;trigger 时记日志,后续按数据调)
+  - 新加 `cosineSimilarity(a, b)`:naïve 点积/模长,1536d 没必要 SIMD
+  - `existingForDupCheck` 数组项扩到 `{id, content, embedding}`(activeMemories 本来就 SELECT *,直接复用)
+  - 候选 embedding **提到 dedup 前**算 → 单次 API 调用既给 dedup 用又给 storage 用
+  - 双路 dedup:bigram(原 0.55)+ cosine(0.82),哪个 margin 更大用哪个,locked/pending 行仍跳过 reinforce
+  - log 里新增 `triggerType: "bigram"|"cosine"` + `memory.result` 里多 `cosineReinforced` 计数,方便后续观察"cosine 救回多少条"
+- memory-worker build 通过
+
 ### 记忆 Phase α M5b — agent_memories embedding backfill + 在线写(2026-05-18)
 **依据**:M3 落地时留的尾巴 — agent_memories 表的 embedding 列全 NULL,任何针对 agent 自我记忆的语义查询都失能(包括将来 M5d search_memories 升级)。
 - `services/memory-worker/src/cli/backfill-embeddings.ts`:新增 `backfillAgentMemories()` 走和其它三张表一致的批处理流(BATCH=64, sleep=250ms);新增 `--skip-agent-memories` flag;pre-count 输出 agent_memories 待 backfill 行数

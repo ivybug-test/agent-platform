@@ -18,6 +18,7 @@ import type { ToolHandler } from "../index";
 import { visibleToSubject } from "@/lib/memory-filters";
 import { resolveRoomMemberByName } from "../resolvers";
 import { textSimilarity } from "@/lib/text-similarity";
+import { embedQuery, toVectorLiteral } from "@/lib/embeddings";
 import {
   VALID_CATEGORIES,
   VALID_IMPORTANCES,
@@ -57,7 +58,7 @@ const searchMemories: ToolHandler = async (args, ctx) => {
     if (to) conditions.push(lte(userMemories.eventAt, to));
   }
 
-  const rows = await db
+  const literalRows = await db
     .select({
       id: userMemories.id,
       content: userMemories.content,
@@ -77,6 +78,53 @@ const searchMemories: ToolHandler = async (args, ctx) => {
         : [desc(userMemories.importance), desc(userMemories.updatedAt)])
     )
     .limit(limit);
+
+  // M5d — cosine pass: catches paraphrase the substring filter misses
+  // ("甜食" → "爱吃蛋糕"). Only fires when a free-text query is present
+  // (the time-window / category-only path has nothing to compare against).
+  // Acts as a top-up: we keep literal matches and append cosine hits that
+  // weren't already returned. Total result count stays ≤ `limit`.
+  let cosineRows: typeof literalRows = [];
+  if (query && !hasTimeFilter && literalRows.length < limit) {
+    const queryVec = await embedQuery(query);
+    if (queryVec) {
+      const COSINE_DISTANCE_MAX = 0.75; // similarity >= 0.25
+      const existingIds = literalRows.map((r) => r.id);
+      const cosineConditions = [
+        eq(userMemories.userId, ctx.userId),
+        visibleToSubject(),
+        sql`${userMemories.embedding} IS NOT NULL`,
+        sql`(${userMemories.embedding} <=> ${toVectorLiteral(queryVec)}::vector) < ${COSINE_DISTANCE_MAX}`,
+      ];
+      if (category) cosineConditions.push(eq(userMemories.category, category));
+      if (existingIds.length > 0) {
+        cosineConditions.push(
+          sql`${userMemories.id} NOT IN (${sql.join(
+            existingIds.map((id) => sql`${id}::uuid`),
+            sql`,`
+          )})`
+        );
+      }
+      cosineRows = await db
+        .select({
+          id: userMemories.id,
+          content: userMemories.content,
+          category: userMemories.category,
+          importance: userMemories.importance,
+          source: userMemories.source,
+          eventAt: userMemories.eventAt,
+          updatedAt: userMemories.updatedAt,
+        })
+        .from(userMemories)
+        .where(and(...cosineConditions))
+        .orderBy(
+          sql`${userMemories.embedding} <=> ${toVectorLiteral(queryVec)}::vector`
+        )
+        .limit(limit - literalRows.length);
+    }
+  }
+
+  const rows = [...literalRows, ...cosineRows];
 
   // Retrieval reinforcement (Park et al. 2023): accessing a memory resets its
   // recency, so heavily-USED facts don't decay out of the pinned window just
@@ -524,14 +572,14 @@ export const userMemoryToolDefs = [
     function: {
       name: "search_memories",
       description:
-        "Search the current user's stored long-term memories (facts, preferences, relationships, events, etc.). Use when you suspect there's a relevant fact not in the pinned list. Pass from/to to retrieve memories whose event_at falls in a specific window — great for 'what happened last week' style questions.",
+        "Search the current user's stored long-term memories (facts, preferences, relationships, events, etc.). Use when you suspect there's a relevant fact not in the pinned list. The query supports BOTH literal substring AND semantic similarity — '甜食' will surface memories that say '爱吃蛋糕', '猫' will surface memories about '邦邦 (布偶猫)'. Pass from/to to retrieve memories whose event_at falls in a specific window — great for 'what happened last week' style questions.",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
             description:
-              "Substring to match against memory content (case-insensitive). Leave empty to list by other filters alone.",
+              "Concept or substring to look up. Matched literally (case-insensitive substring) AND semantically (cosine over the memory embedding). Free-text concepts work — '兴趣', '工作', '家人' — not just exact words. Leave empty to list by category/time alone.",
           },
           category: {
             type: "string",
