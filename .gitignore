@@ -7,5 +7,14 @@ dist
 .env.*
 !.env.example
 .env.local
+infra/env.*
+!infra/env.example
 .DS_Store
 logs/
+
+# Local-only assets (screenshots, scratch images, third-party planning docs)
+*.png
+*.jpg
+*.jpeg
+/sts2_*.md
+

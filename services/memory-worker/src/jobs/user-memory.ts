@@ -4,6 +4,7 @@ import { llmCompleteJSON } from "../llm.js";
 import { createLogger } from "@agent-platform/logger";
 import { textSimilarity } from "../text-similarity.js";
 import { buildExtractionPrompt } from "../prompts/extraction.js";
+import { embedOne } from "../embeddings.js";
 import {
   VALID_CATEGORIES,
   VALID_IMPORTANCES,
@@ -13,6 +14,30 @@ import {
   parseEventAt,
   formatMemoriesByCategory,
 } from "../lib/format.js";
+
+// Max length of an evidence quote. Anything longer almost certainly is a
+// rewrite/paraphrase rather than a verbatim substring; we accept up to this
+// to leave headroom for honest long quotes but trim before storage.
+const MAX_EVIDENCE_QUOTE_LEN = 120;
+
+/** Normalise a string for substring matching: lowercase, collapse all
+ *  whitespace runs to a single space, trim ends. Tolerant of the small
+ *  formatting drift LLMs introduce (extra spaces, line-break swaps) but
+ *  still anchors to the actual message wording. */
+function normaliseForMatch(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** Validate that `quote` is a verbatim substring of `source` (after light
+ *  normalisation). Returns true if the quote can be considered genuine,
+ *  false if it looks fabricated. */
+function quoteMatchesMessage(quote: string, source: string): boolean {
+  if (!quote || !source) return false;
+  const q = normaliseForMatch(quote);
+  if (q.length < 2) return false; // single chars are meaningless
+  const s = normaliseForMatch(source);
+  return s.includes(q);
+}
 
 const log = createLogger("memory-worker");
 
@@ -86,12 +111,19 @@ export async function processUserMemory(data: UserMemoryData) {
       ? tombstones.map((t) => `- ${t.content}`).join("\n")
       : "(none)";
 
-  // Reverse in place → chronological order. Each line is prefixed with the
-  // message's wall-clock timestamp so the LLM can resolve relative phrases.
+  // Reverse in place → chronological order. Each line carries the message's
+  // wall-clock timestamp AND (msgId=...) so the extractor can cite the exact
+  // source message in its provenance fields.
   const ordered = [...recentUserMessages].reverse();
   const messagesText = ordered
-    .map((m) => `[${formatWallClock(m.createdAt)}] ${messageBody(m)}`)
+    .map(
+      (m) =>
+        `[${formatWallClock(m.createdAt)}] (msgId=${m.id}) ${messageBody(m)}`
+    )
     .join("\n");
+
+  // Map for fast provenance lookup after the LLM returns.
+  const msgById = new Map(ordered.map((m) => [m.id, m]));
 
   // Language detection works on content only — timestamps are ASCII and would
   // skew the CJK ratio.
@@ -141,7 +173,8 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
     updated = 0,
     deleted = 0,
     rejected = 0,
-    reinforced = 0;
+    reinforced = 0,
+    evidenceMismatch = 0;
 
   await db.transaction(async (tx) => {
     for (const action of result.actions!) {
@@ -158,6 +191,50 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
           const content = a.content;
           const category = a.category;
           const importance = a.importance;
+
+          // M2: provenance is mandatory on CREATE. Without a valid
+          // sourceMessageId pointing at one of the recent messages AND an
+          // evidenceQuote that substring-matches that message, drop the
+          // action — this is what blocks the LLM from fabricating facts.
+          const sourceMessageId =
+            typeof a.sourceMessageId === "string" ? a.sourceMessageId : null;
+          const evidenceQuote =
+            typeof a.evidenceQuote === "string"
+              ? a.evidenceQuote.slice(0, MAX_EVIDENCE_QUOTE_LEN)
+              : null;
+          if (!sourceMessageId || !evidenceQuote) {
+            log.warn(
+              { roomId, userId, content, sourceMessageId, evidenceQuote },
+              "memory.extraction-missing-provenance"
+            );
+            evidenceMismatch++;
+            continue;
+          }
+          const sourceMsg = msgById.get(sourceMessageId);
+          if (!sourceMsg) {
+            log.warn(
+              { roomId, userId, content, sourceMessageId },
+              "memory.extraction-bad-source-id"
+            );
+            evidenceMismatch++;
+            continue;
+          }
+          const sourceText = messageBody(sourceMsg);
+          if (!quoteMatchesMessage(evidenceQuote, sourceText)) {
+            log.warn(
+              {
+                roomId,
+                userId,
+                content,
+                sourceMessageId,
+                quote: evidenceQuote,
+                sourceSnippet: sourceText.slice(0, 80),
+              },
+              "memory.extraction-evidence-mismatch"
+            );
+            evidenceMismatch++;
+            continue;
+          }
 
           // Near-dup detection: on a hit, REINFORCE the existing row rather
           // than skip. This is the core Phase A signal — if a user keeps
@@ -212,6 +289,20 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
             continue;
           }
 
+          // Compute embedding inline so the new row is searchable
+          // immediately. Failure is non-fatal — back-fill will catch it
+          // later — but we still log so a degraded embedding provider
+          // doesn't go unnoticed.
+          let embedding: number[] | null = null;
+          try {
+            embedding = await embedOne(content);
+          } catch (err) {
+            log.warn(
+              { userId, content, err: (err as Error).message },
+              "memory.embedding-failed"
+            );
+          }
+
           const eventAt = parseEventAt(a.eventAt);
           await tx.insert(userMemories).values({
             userId,
@@ -222,6 +313,9 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
             sourceRoomId: roomId,
             eventAt: eventAt ?? undefined,
             lastReinforcedAt: new Date(),
+            sourceMessageIds: [sourceMessageId],
+            evidenceQuote,
+            embedding: embedding ?? undefined,
           });
           existingForDupCheck.push({ id: null, content });
           created++;
@@ -308,6 +402,7 @@ Analyze and return JSON. Remember: write every fact in ${language}, and resolve 
       deleted,
       rejected,
       reinforced,
+      evidenceMismatch,
     },
     "memory.result"
   );

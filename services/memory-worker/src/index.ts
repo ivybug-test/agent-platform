@@ -5,6 +5,12 @@ config({ path: resolve(process.cwd(), "../../.env") });
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { processRoomSummary } from "./jobs/room-summary.js";
+import { processRoomObservation } from "./jobs/room-observation.js";
+import { processObservationIdleScan } from "./jobs/observation-idle-scan.js";
+import {
+  processAgentSelfExtract,
+  processAgentSelfScan,
+} from "./jobs/agent-self.js";
 import { processUserMemory } from "./jobs/user-memory.js";
 import {
   processMemoryDedup,
@@ -30,6 +36,18 @@ const worker = new Worker(
     switch (job.name) {
       case "room-summary":
         await processRoomSummary(job.data);
+        break;
+      case "room-observation":
+        await processRoomObservation(job.data);
+        break;
+      case "observation-idle-scan":
+        await processObservationIdleScan(queue);
+        break;
+      case "agent-self-scan":
+        await processAgentSelfScan(queue);
+        break;
+      case "agent-self-extract":
+        await processAgentSelfExtract(job.data);
         break;
       case "user-memory":
         await processUserMemory(job.data);
@@ -63,6 +81,20 @@ worker.on("failed", (job, err) => {
 const dedupIntervalMs = Number(process.env.MEMORY_DEDUP_INTERVAL_MS) ||
   24 * 60 * 60 * 1000;
 
+// Observation idle-scan: default every 10 minutes. Looks for rooms that
+// have been idle ≥30 min (configurable) AND have ≥3000 chars of
+// unconsumed messages, then enqueues room-observation jobs for them.
+// Pairs with the volume-based trigger from chat route to catch
+// conversations that fizzle out below the volume threshold.
+const observationScanIntervalMs =
+  Number(process.env.OBSERVATION_SCAN_INTERVAL_MS) || 10 * 60 * 1000;
+
+// Agent self-extract: default once a day. Fan-out scan finds active
+// agents (any assistant msg in last 7 days) and queues a per-agent
+// extraction job. Idempotent per day via jobId.
+const agentSelfScanIntervalMs =
+  Number(process.env.AGENT_SELF_SCAN_INTERVAL_MS) || 24 * 60 * 60 * 1000;
+
 // upsertJobScheduler replaces any prior schedule with the same key, so
 // changing the interval just takes effect on next worker restart.
 Promise.all([
@@ -70,6 +102,16 @@ Promise.all([
     "memory-dedup-scan-scheduler",
     { every: dedupIntervalMs },
     { name: "memory-dedup-scan" }
+  ),
+  queue.upsertJobScheduler(
+    "observation-idle-scan-scheduler",
+    { every: observationScanIntervalMs },
+    { name: "observation-idle-scan" }
+  ),
+  queue.upsertJobScheduler(
+    "agent-self-scan-scheduler",
+    { every: agentSelfScanIntervalMs },
+    { name: "agent-self-scan" }
   ),
   // Run one scan right after boot so a fresh deploy cleans up any
   // existing duplicates instead of waiting up to `dedupIntervalMs`.
@@ -81,9 +123,13 @@ Promise.all([
 ])
   .then(() => {
     console.log(
-      `memory-worker: listening for jobs... (dedup scan every ${Math.round(dedupIntervalMs / 1000)}s; one-off startup scan queued)`
+      `memory-worker: listening for jobs... (dedup scan every ${Math.round(
+        dedupIntervalMs / 1000
+      )}s; observation idle scan every ${Math.round(
+        observationScanIntervalMs / 1000
+      )}s; one-off startup dedup-scan queued)`
     );
   })
   .catch((err) => {
-    console.error("failed to register dedup scan scheduler:", err);
+    console.error("failed to register scan schedulers:", err);
   });

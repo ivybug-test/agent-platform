@@ -9,9 +9,13 @@ export {
   getConfirmedRelationshipsForUser,
   getRoomMemories,
   getLatestSummary,
+  getRoomObservations,
   getUserMemories,
   getRoomUsersMemories,
+  getAgentMemories,
 } from "./queries";
+
+export type { AgentMemoryBundle, AgentMemoryRow } from "./queries";
 
 export { buildSystemPrompt } from "./prompts/system-prompt";
 

@@ -93,6 +93,34 @@ export async function llmComplete(
   return res.choices[0]?.message?.content || "";
 }
 
+/** Same shape as llmComplete but picks the model from CONSOLIDATION_LLM_MODEL
+ *  (falling back to LLM_MODEL). M4.2: sleep-time consolidation (observation
+ *  log + reflections + agent-self-extract) should use a stronger model than
+ *  the user-facing chat — observation quality directly determines whether
+ *  the agent recalls events correctly later. Burning Opus-tier tokens once
+ *  every 30k chars of conversation is cheap compared to one bad recall. */
+export async function llmCompleteStrong(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<string> {
+  const client = getClient();
+  const model =
+    process.env.CONSOLIDATION_LLM_MODEL ||
+    process.env.LLM_MODEL ||
+    "gpt-4o";
+
+  const res = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.3,
+  });
+
+  return res.choices[0]?.message?.content || "";
+}
+
 /** Call LLM and return parsed JSON response */
 export async function llmCompleteJSON<T = unknown>(
   systemPrompt: string,

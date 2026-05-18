@@ -23,6 +23,16 @@ export async function pushMemoryJobs(roomId: string, userId: string) {
   await queue.add("user-memory", { roomId, userId }, {
     jobId: `user-memory-${userId}-${Math.floor(Date.now() / 300000)}`,
   });
+  // M4.1: enqueue observation check. Worker bails internally if the
+  // char-volume threshold isn't crossed yet, so we can push every turn
+  // safely. 1-minute dedup bucket keeps Redis ops bounded.
+  await queue.add(
+    "room-observation",
+    { roomId },
+    {
+      jobId: `room-observation-${roomId}-${Math.floor(Date.now() / 60000)}`,
+    }
+  );
 }
 
 /** Push a caption-image job. Called right after an image message is

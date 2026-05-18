@@ -1,7 +1,95 @@
 # CHANGELOG.md
 
 ## 项目状态
-Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。剩余项:Phase C 嘴巴(TTS + 唱歌)、动态记忆 Phase B(由反复出现的事件聚合成语义 fact)、向量语义去重(D2)、MCP 集成。
+Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。**2026-05-17 启动记忆系统 Phase α (MVP) 升级**:对应计划文件 `subagent-agent-wild-beaver.md`,目标是 provenance(杀编造)+ agent 自我维度 + reflection v1(杀碎片化)+ pgvector 启用。剩余项:Phase C 嘴巴(TTS + 唱歌)、MCP 集成、Phase β/γ(结构化实体表 + 时序矛盾检测)。
+
+### 记忆 Phase α M4.4 — agent-self-extract daily job(2026-05-17)
+**依据**:Identity Drift in LLM Agents (arxiv 2412.00804) 实证 persona 在长对话里会漂移;Persistent Identity Multi-Anchor (arxiv 2604.09588) 主张需要周期性自我观察来锚定。
+- 新 prompt `prompts/agent-self.ts`:让 agent 看自己最近 100 条 assistant 消息,识别"behavioural patterns"(回复长度/语气/工具使用倾向/拒答模式);强制 evidenceMessageId + evidenceQuote;明确禁止 restate persona 或写成 user 特定事实
+- 新 job `jobs/agent-self.ts`:
+  - `processAgentSelfExtract({ agentId })`:加载 100 条样本 + 现有 self_tendency,跑 LLM,substring 校验 evidence,bigram dedup(≥0.55 reinforce 而非 create),最多 3 条/run
+  - `processAgentSelfScan(queue)`:fan-out,扫最近 7 天有活动的 agent,per-agent 入队 jobId 按天 bucket 去重
+- 注册 `agent-self-scan` 和 `agent-self-extract` job 类型
+- scheduler:每天一次跑 `agent-self-scan`(env `AGENT_SELF_SCAN_INTERVAL_MS` 默认 86400000)
+
+### 记忆 Phase α M4.2 — Dual-trigger consolidation + 强模型(2026-05-17)
+**依据**:Letta sleep-time agents + Mastra Observer/Reflector + LinkedIn CMA 共识——consolidation 应放后台、用更强模型。
+- `llm.ts` 新加 `llmCompleteStrong()`:读 `CONSOLIDATION_LLM_MODEL` env(fallback `LLM_MODEL`),让 observation/reflection 用 Opus 级模型,user-facing chat 仍用便宜模型
+- `room-observation.ts` 切到 `llmCompleteStrong`
+- 新 job `observation-idle-scan.ts`:每 10min 扫一次(env `OBSERVATION_SCAN_INTERVAL_MS`),找最近 30min 没人说话(env `OBSERVATION_IDLE_THRESHOLD_MS`)且未消费消息 ≥3000 chars(env `OBSERVATION_IDLE_MIN_CHARS`)的房间,fan-out 入队 room-observation job;5min dedup 桶避免和 chat-route 的 1min 桶相撞
+- 注册 `observation-idle-scan` job 类型 + 调度器
+- **覆盖完整**:chat-route 的体积触发(快聊场景)+ 这里的 idle 触发(慢聊场景)→ 都不漏
+
+### 记忆 Phase α M4.3 — 长上下文 vs 检索分支(2026-05-17)
+**依据**:Tian Pan 2026-04 决策框架 + BEAM (arxiv 2510.27246) 实测——modern 1M context 下,小房间全塞优于 RAG(全召回 + 无搜索伪影)。
+- `loadChatContext` 改为 adaptive:先 query 房间最近 30 天的 char 总量
+- **<80k chars 且 <500 条消息**:加载 30 天内**所有**消息(chronological,无 limit),命中"小房间"路径
+- **≥80k chars 或 ≥500 条**:走原 50 条最近窗口 + 依赖 retrieval 兜底
+- 返回多出 `contextMode: 'full-dump' | 'retrieval'` 和 `contextStats` 用于 chat.context 日志埋点
+- env var:`CHAT_FULL_DUMP_CHAR_THRESHOLD` (默认 80000) / `CHAT_FULL_DUMP_MAX_MESSAGES` (默认 500)
+- 实测预期:多数房间(<200 条消息)会进 full-dump,context 翻倍但 cache 命中后实际成本几乎不变;agent 召回率显著提升
+
+### 记忆 Phase α M4.5 — read_image 自动联想 user_memories(2026-05-17)
+**依据**:用户实测反馈"agent 看到熟悉的猫图却问'这是谁家的猫叫啥名'"——典型"看到不联想"失败。Root cause:caption 出来后 agent 没主动 search_memories。**修复**:工具自己做联想。
+- `image-read-tools.ts` 新增 `findRelatedMemoriesForCaption`:用 pg_trgm `similarity(content, caption)` 在 user_memories 里找相关条目,阈值 0.05(给中文 trigram 留余地),top 5
+- `read_image` 返回结构加 `relatedMemories: [{ id, content, importance, similarity }, ...]`
+- 工具 description 强化:明示 agent "see this user has a cat called 邦邦, refer by name instead of asking 'whose cat is this?'"
+- M5 升级路径:`similarity()` 换 cosine(`embedding <=> caption_embedding`)做语义查找,这里 trgm 是过渡方案
+- 验证:用户实际操作"二次发猫图"应能在工具结果里看到邦邦那条记忆
+
+### 记忆 Phase α M4.1 — Observation log(2026-05-17)
+**依据**:Mastra Observational Memory (2026-02) 在 LongMemEval 上 84.23% vs RAG 80.05%、成本下降 10x 的核心机制。Karpathy LLM Wiki (2026-04) 同思路。**直接对症用户反馈的"看到不联想"案例**——观察日志整块塞进 prompt,跨会话的事件自然进入 agent 视野,不需要它主动搜索。
+- migration 0015:`room_observations` 表(append-only,period_start/period_end + content + message_count + source_char_count)。索引按 (room_id, period_end DESC) 加速最近 N 条查询
+- schema.ts:`roomObservations` 表声明
+- 新建 `services/memory-worker/src/prompts/observation.ts`:LLM 提示要求"dated observation log"格式——5-12 行带 `[YYYY-MM-DD HH:mm]` 时间戳的事件行,焦点放在 artifacts(图/链接)、命名实体(人/宠物名)、决策、话题切换;明令禁止 emotional padding / summary 风格
+- 新建 `services/memory-worker/src/jobs/room-observation.ts`:从最近一条 observation 的 period_end 起读未消费消息,char 总量 < 30k 直接跳过(env `ROOM_OBSERVATION_THRESHOLD_CHARS` 可调);crosses-threshold 才跑 LLM;LLM 返回 "NONE" 表示窗口没料,不写入
+- worker `index.ts` 注册 `room-observation` job 分发
+- `apps/web/src/lib/queue.ts` `pushMemoryJobs` 加 `room-observation` 入队,1 分钟 dedup 桶避免 Redis 操作爆炸
+- `queries.ts` 新加 `getRoomObservations(roomId, limit=12)`,返回chronological(oldest 在前)
+- `format-helpers.ts` 新加 `formatObservations`,渲染成 prompt-cache 友好的"Conversation history (observation log...)"整块
+- `system-prompt.ts` 新增 **Layer 4a**(紧贴 Layer 4 room summary 之后):observation log。两者共存于 M4.1,M4.2/M5 再决定是否汰换 roomSummary
+- chat route 装配 Layer 4a 数据流
+- 三包构建通过
+- 已知:首次启用前没有任何观察日志记录,需要积累 ≥30k chars 才生成第一条。可以临时调低 `ROOM_OBSERVATION_THRESHOLD_CHARS=3000` 试运行
+
+### 记忆 Phase α M3 — Agent 自我记忆(2026-05-17)
+**依据**:用户明确要求 agent 应该有自己的记忆;Letta `persona` block + Sophia (arxiv 2512.18202) 的 narrative identity + Persistent Identity Multi-Anchor (arxiv 2604.09588) 共同建议多锚点设计。
+- migration 0014:新表 `agent_memories`(persona / self_tendency / world / narrative 四 kind + scope_user_id / scope_room_id 可空 + provenance + embedding + 衰减字段)。CHECK 约束确保 kind 和 scope 的一致性(persona/self_tendency/world 必须无 scope;narrative 必须有至少一个 scope)
+- schema.ts:`agentMemories` 表;复用 memory_importance / memory_source enum
+- 新建 `queries.getAgentMemories(agentId, userId, roomId)`:并行拉 persona(无上限)+ self_tendency top-3(14 天半衰期衰减打分)+ narrative for current user + narrative for current room
+- 新建 `formatAgentMemories`:四段拼成 `[About yourself]` 块,带 evidence_quote 后缀(M2 同款)
+- system-prompt 新增 **Layer 0**:位于 agent identity 之上,确保 persona / habits / 关系叙事影响下游所有 layer 的解读
+- chat route 串通 agent.id → getAgentMemories → buildSystemPrompt
+- 新建 `agent-self-tools.ts`,4 个工具:`remember_self` / `update_self` / `forget_self` / `recall_self`。所有写工具强制 sourceMessageId。tool 注册接入 memoryToolHandlers
+- tool guidance 加 agent self 工具简介
+- 三包(db / worker / web)全部构建通过
+- 暂未做:`/agent` 管理页(M3.3 后补)、agent-self-extract worker job(M4 sleep-time 时一并落地)、agent_memories 行的 embedding 是 NULL(由 M5 dedup 升级时一并 backfill)
+
+### 记忆 Phase α M2.5 — update / forget 路径补 provenance(2026-05-17)
+**依据**:**HaluMem (arxiv 2511.03506)** 实证 memory 幻觉主战场在 update 阶段而非 extraction。M2 只校验 extraction 是杀错了主要矛盾。
+- `update_memory` 工具:`sourceMessageId` 从可选改 **必填**;tool schema `required` 列表加入;返回 error 而非静默接受
+- `forget_memory` 工具同样必填 sourceMessageId
+- 两个工具的 evidenceQuote 仍可选(用户改正语句通常很短,verbatim quote 可选)
+- 写入时刷新 `user_memories.source_message_ids` / `evidence_quote` 为最新一次的来源(完整 before/after audit 留到 M5 的 `memory_revisions` 表)
+- Plan 文件加 "修订(2026-05-17 二次研究后)" 节,吸收 5 个 2025-10 至 2026-05 最新发现
+
+### 记忆 Phase α M2 — Provenance 落地(2026-05-17)
+- extraction prompt 改造:每条 CREATE 强制 `sourceMessageId` + `evidenceQuote`;OUTPUT FORMAT 加示例;消息列表前缀从 `[time]` 升级到 `[time] (msgId=uuid)`
+- worker 写入前 substring 校验:`evidenceQuote` 必须 verbatim 出现在 `sourceMessageId` 指向的消息里(大小写不敏感、空白归一);任一不通过 → 丢弃并记 `memory.extraction-evidence-mismatch`
+- 新增 `evidenceMismatch` 计数到 `memory.result` 日志
+- worker 写入 user_memories 时同步算 embedding(`embedOne(content)`),失败非致命(走 backfill 兜底)
+- `remember` 工具加可选 `sourceMessageId` / `evidenceQuote` 参数,tool schema 强烈建议传(便于后续溯源)
+- 读路径:`getUserMemories` / `getRoomUsersMemories` 返回 evidenceQuote;`formatUserMemories` 把 `[evidence: "..."]`(截断 60 字)拼到每条 pinned fact 后面
+- system prompt 新增 **IMPORTANT RULE 11**:"NEVER FABRICATE FACTS ABOUT USERS / RELATIONSHIPS — only assert what is GROUNDED",列出四种合法来源(pinned + 本轮工具结果 + 可见对话 + 本轮显式调用)和触发短语;不在四者中必须说"我不记得"
+- 验证:`pnpm --filter @agent-platform/db build` + worker build + web build 均通过
+
+### 记忆 Phase α M1 — pgvector + provenance 列 + embeddings 模块(2026-05-17)
+- migration 0012:`CREATE EXTENSION vector` + `embedding vector(1536)` 列(user_memories / room_memories / messages)+ HNSW 索引(m=16, ef_construction=64, cosine)
+- migration 0013:provenance 列(`source_message_ids jsonb`, `evidence_quote text`, `confidence real default 1.0`, `kind varchar default 'fact'`)加到 user_memories;room_memories 加前三列
+- 新建 `services/memory-worker/src/embeddings.ts`:OpenAI `text-embedding-3-small`(1536d)客户端,指数退避重试(500ms/1s/2s),`embedOne` / `embedBatch` / `toVectorLiteral`
+- 新建 `pnpm backfill-embeddings` CLI:三张表分别 backfill,batch=64,250ms 节流,支持 `--dry-run` / `--skip-*-memories` / `--skip-messages`
+- 环境变量新增:`EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS`(全部可选,缺省 fallback 到 OPENAI/LLM 变量)
+- 验证:`pnpm --filter @agent-platform/db build` 和 `pnpm --filter @agent-platform/memory-worker build` 都通过
 
 ## 当前阶段
 Phase 2 — Agent 架构升级(已完成);多用户重构(已完成)

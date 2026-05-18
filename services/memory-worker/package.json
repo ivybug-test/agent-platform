@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "cleanup": "tsx src/cli/cleanup.ts",
     "backfill-event-at": "tsx src/cli/backfill-event-at.ts",
+    "backfill-embeddings": "tsx src/cli/backfill-embeddings.ts",
     "strip-numbered-prefix": "tsx src/cli/strip-numbered-prefix.ts"
   },
   "dependencies": {

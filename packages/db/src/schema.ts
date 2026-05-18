@@ -10,6 +10,7 @@ import {
   jsonb,
   integer,
   primaryKey,
+  vector,
 } from "drizzle-orm/pg-core";
 
 /** A single search/fetch tool call surfaced in the chat UI. We persist the
@@ -178,6 +179,10 @@ export const messages = pgTable("messages", {
   // FK constraint lives in 0009_message_reply_to.sql — drizzle-kit's push
   // doesn't reliably author self-referential FKs.
   replyToMessageId: uuid("reply_to_message_id"),
+  // 1536-dim OpenAI text-embedding-3-small. Populated by the
+  // memory-worker's embedding job on insert; NULL until back-fill catches
+  // up on historical rows.
+  embedding: vector("embedding", { dimensions: 1536 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -255,9 +260,41 @@ export const userMemories = pgTable("user_memories", {
   // Together with `last_reinforced_at` they feed the read-path decay score.
   eventAt: timestamp("event_at", { withTimezone: true }),
   strength: real("strength").notNull().default(1.0),
+  // Provenance (Phase α M1): every extracted fact carries the message ids
+  // it was distilled from plus a verbatim quote. Reflection rows store
+  // *memory* ids in source_message_ids instead. evidence_quote validated
+  // substring-against the recent message window at write time to block
+  // fabrication. confidence is the extractor's self-rating 0..1.
+  // kind = 'fact' (raw extracted) | 'reflection' (synthesised by reflect job).
+  sourceMessageIds: jsonb("source_message_ids").$type<string[]>(),
+  evidenceQuote: text("evidence_quote"),
+  confidence: real("confidence").notNull().default(1.0),
+  kind: varchar("kind", { length: 20 }).notNull().default("fact"),
+  embedding: vector("embedding", { dimensions: 1536 }),
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Room observations (Phase α M4.1).
+//
+// Append-only, time-ordered "dated observations" — what happened in
+// each ~30k-char window of recent messages. Inspired by Mastra
+// Observational Memory (2026-02); coexists with room_summaries (legacy)
+// rather than replacing it (M4.1 ships side-by-side; M4.2/M5 decides
+// which to keep). Rendered as a single time-ordered block in the
+// system prompt, which is prompt-cache friendly (stable prefix).
+export const roomObservations = pgTable("room_observations", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  roomId: uuid("room_id")
+    .notNull()
+    .references(() => rooms.id),
+  content: text("content").notNull(),
+  periodStart: timestamp("period_start").notNull(),
+  periodEnd: timestamp("period_end").notNull(),
+  messageCount: integer("message_count").notNull().default(0),
+  sourceCharCount: integer("source_char_count"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 // Room summaries
@@ -350,6 +387,43 @@ export const agentUserAttitudeCounters = pgTable(
 // Facts that belong to the ROOM, not any single user. Project codenames,
 // group focus, shared agreements. Any room member can add / edit / delete.
 // Agent reads them through a Room context layer in buildSystemPrompt.
+// Agent self-memory (Phase α M3).
+//
+// Four kinds:
+//   - persona       declared identity / values / style. Always-pinned.
+//                   user_explicit by default (admin edits via /agent UI).
+//   - self_tendency learned behavioural patterns. Worker auto-extracts
+//                   from the agent's own assistant messages.
+//   - world         cross-room non-user-specific facts. Retrieved by
+//                   semantic search (M4+); always-pinned cap is 0.
+//   - narrative     autobiographical paragraph per (agent, user) or
+//                   (agent, room). Sleep-time agent rewrites periodically.
+//
+// Scope semantics — enforced by SQL CHECK in 0014_agent_memories.sql:
+//   persona/self_tendency/world  → both scope cols NULL
+//   narrative                    → at least one scope col non-null
+export const agentMemories = pgTable("agent_memories", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: uuid("agent_id")
+    .notNull()
+    .references(() => agents.id),
+  kind: varchar("kind", { length: 20 }).notNull(),
+  content: text("content").notNull(),
+  scopeUserId: uuid("scope_user_id").references(() => users.id),
+  scopeRoomId: uuid("scope_room_id").references(() => rooms.id),
+  importance: memoryImportanceEnum("importance").notNull().default("medium"),
+  source: memorySourceEnum("source").notNull().default("extracted"),
+  confidence: real("confidence").notNull().default(1.0),
+  strength: real("strength").notNull().default(1.0),
+  lastReinforcedAt: timestamp("last_reinforced_at"),
+  sourceMessageIds: jsonb("source_message_ids").$type<string[]>(),
+  evidenceQuote: text("evidence_quote"),
+  embedding: vector("embedding", { dimensions: 1536 }),
+  deletedAt: timestamp("deleted_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const roomMemories = pgTable("room_memories", {
   id: uuid("id").defaultRandom().primaryKey(),
   roomId: uuid("room_id")
@@ -361,6 +435,10 @@ export const roomMemories = pgTable("room_memories", {
     .notNull()
     .references(() => users.id),
   source: memorySourceEnum("source").notNull().default("extracted"),
+  sourceMessageIds: jsonb("source_message_ids").$type<string[]>(),
+  evidenceQuote: text("evidence_quote"),
+  confidence: real("confidence").notNull().default(1.0),
+  embedding: vector("embedding", { dimensions: 1536 }),
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

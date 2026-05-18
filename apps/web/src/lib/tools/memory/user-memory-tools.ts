@@ -178,6 +178,20 @@ const remember: ToolHandler = async (args, ctx) => {
   const subjectName =
     typeof args?.subjectName === "string" ? args.subjectName.trim() : "";
   const eventAt = parseEventAt(args?.eventAt);
+  // Provenance (M2): optional on the tool path — the agent is usually
+  // saving a fact in direct response to a user statement, in which case
+  // passing the user's verbatim quote + their message id makes the fact
+  // traceable later. We trust the agent here (no substring validation)
+  // because the tool runs through JWT-verified callback already; the
+  // worst case is a sloppy quote that hurts only the citation experience.
+  const evidenceQuote =
+    typeof args?.evidenceQuote === "string"
+      ? args.evidenceQuote.trim().slice(0, 120)
+      : null;
+  const sourceMessageId =
+    typeof args?.sourceMessageId === "string"
+      ? args.sourceMessageId.trim()
+      : null;
 
   if (!content) return { error: "content required" };
   if (!VALID_CATEGORIES.includes(category)) {
@@ -305,6 +319,8 @@ const remember: ToolHandler = async (args, ctx) => {
       confirmedAt: null,
       eventAt: eventAt ?? undefined,
       lastReinforcedAt: new Date(),
+      evidenceQuote: evidenceQuote || undefined,
+      sourceMessageIds: sourceMessageId ? [sourceMessageId] : undefined,
     })
     .returning({
       id: userMemories.id,
@@ -334,6 +350,25 @@ const updateMemory: ToolHandler = async (args, ctx) => {
     typeof args?.memoryId === "string" ? args.memoryId.trim() : "";
   if (!memoryId) return { error: "memoryId required" };
 
+  // M2.5: provenance is now REQUIRED on UPDATE. HaluMem (arxiv
+  // 2511.03506) empirically shows the update path is the bigger
+  // hallucination vector vs extraction. Without a citable source, an
+  // agent can silently rewrite facts.
+  const sourceMessageId =
+    typeof args?.sourceMessageId === "string"
+      ? args.sourceMessageId.trim()
+      : "";
+  if (!sourceMessageId) {
+    return {
+      error:
+        "sourceMessageId required — pass the msgId of the user message that motivates this update (their current message is fine)",
+    };
+  }
+  const evidenceQuote =
+    typeof args?.evidenceQuote === "string"
+      ? args.evidenceQuote.trim().slice(0, 120)
+      : null;
+
   const patch: {
     content?: string;
     category?: Category;
@@ -362,7 +397,10 @@ const updateMemory: ToolHandler = async (args, ctx) => {
 
   // Tools can only edit rows that are already visible to the subject —
   // pending third-party rows must be confirmed (or rejected) first, not
-  // silently edited through this path.
+  // silently edited through this path. We also refresh source_message_ids
+  // and evidence_quote so the row carries its MOST RECENT justification
+  // (full audit trail with before/after will live in memory_revisions in
+  // M5).
   const [row] = await db
     .update(userMemories)
     .set({
@@ -370,6 +408,8 @@ const updateMemory: ToolHandler = async (args, ctx) => {
       source: "user_explicit",
       lastReinforcedAt: new Date(),
       updatedAt: new Date(),
+      sourceMessageIds: [sourceMessageId],
+      ...(evidenceQuote ? { evidenceQuote } : {}),
     })
     .where(
       and(
@@ -398,12 +438,32 @@ const forgetMemory: ToolHandler = async (args, ctx) => {
     typeof args?.memoryId === "string" ? args.memoryId.trim() : "";
   if (!memoryId) return { error: "memoryId required" };
 
+  // M2.5: forget is a destructive update — require a citable source so we
+  // can audit "why did this fact disappear?" later. HaluMem found
+  // deletions are a substantial slice of memory hallucinations.
+  const sourceMessageId =
+    typeof args?.sourceMessageId === "string"
+      ? args.sourceMessageId.trim()
+      : "";
+  if (!sourceMessageId) {
+    return {
+      error:
+        "sourceMessageId required — pass the msgId of the user message asking to forget this fact (their current message is fine)",
+    };
+  }
+  const evidenceQuote =
+    typeof args?.evidenceQuote === "string"
+      ? args.evidenceQuote.trim().slice(0, 120)
+      : null;
+
   const [row] = await db
     .update(userMemories)
     .set({
       deletedAt: new Date(),
       source: "user_explicit",
       updatedAt: new Date(),
+      sourceMessageIds: [sourceMessageId],
+      ...(evidenceQuote ? { evidenceQuote } : {}),
     })
     .where(
       and(
@@ -561,6 +621,16 @@ export const userMemoryToolDefs = [
             description:
               'Optional ISO8601 date/datetime of when the event happened. Pass this whenever the fact describes a specific point in time (events, "skipped lunch today", "went to Shanghai", etc). Omit for timeless facts (identity, general preferences, relationships). Example: "2026-04-19" or "2026-04-19T12:30+08:00".',
           },
+          sourceMessageId: {
+            type: "string",
+            description:
+              'Strongly recommended. The msgId of the message that justifies this fact (pulled from a "(msgId=...)" prefix in the recent-window conversation). Lets the platform cite the source later when the user asks "where did you learn that?".',
+          },
+          evidenceQuote: {
+            type: "string",
+            description:
+              'Strongly recommended. A verbatim substring (≤120 chars) FROM the message identified by sourceMessageId — the user\'s own words that support this fact. Do NOT paraphrase or translate; copy the original wording. Example: if user wrote "我特别能吃辣", evidenceQuote = "我特别能吃辣".',
+          },
         },
       },
     },
@@ -570,15 +640,25 @@ export const userMemoryToolDefs = [
     function: {
       name: "update_memory",
       description:
-        "Correct an existing memory. Call this when the user explicitly corrects a fact the agent remembers. The memory becomes user-locked and will not be touched by background extraction.",
+        "Correct an existing memory. Call this when the user explicitly corrects a fact the agent remembers. The memory becomes user-locked and will not be touched by background extraction. REQUIRES sourceMessageId — usually the user's current message that contains the correction.",
       parameters: {
         type: "object",
-        required: ["memoryId"],
+        required: ["memoryId", "sourceMessageId"],
         properties: {
           memoryId: { type: "string" },
           content: { type: "string" },
           category: { type: "string", enum: [...VALID_CATEGORIES] },
           importance: { type: "string", enum: [...VALID_IMPORTANCES] },
+          sourceMessageId: {
+            type: "string",
+            description:
+              "REQUIRED. The msgId of the user message that motivates this correction (typically their CURRENT message — pull it from the recent-window (msgId=...) prefix). The platform audits memory edits and refuses untraceable updates.",
+          },
+          evidenceQuote: {
+            type: "string",
+            description:
+              "Strongly recommended. A verbatim substring (≤120 chars) from the message identified by sourceMessageId — the user's own correction wording.",
+          },
         },
       },
     },
@@ -588,15 +668,25 @@ export const userMemoryToolDefs = [
     function: {
       name: "forget_memory",
       description:
-        "Soft-delete a memory so it's no longer used and the background extractor cannot re-create it. Call this when the user explicitly asks to forget something.",
+        "Soft-delete a memory so it's no longer used and the background extractor cannot re-create it. Call this when the user explicitly asks to forget something. REQUIRES sourceMessageId — the user's current message that asks to forget.",
       parameters: {
         type: "object",
-        required: ["memoryId"],
+        required: ["memoryId", "sourceMessageId"],
         properties: {
           memoryId: { type: "string" },
           reason: {
             type: "string",
             description: "Optional reason for logging.",
+          },
+          sourceMessageId: {
+            type: "string",
+            description:
+              "REQUIRED. The msgId of the user message asking to forget this fact (typically their CURRENT message — pull it from the recent-window (msgId=...) prefix).",
+          },
+          evidenceQuote: {
+            type: "string",
+            description:
+              "Strongly recommended. A verbatim substring (≤120 chars) from the message — the user's own forget request wording.",
           },
         },
       },

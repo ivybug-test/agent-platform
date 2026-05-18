@@ -10,9 +10,11 @@ import {
   loadChatContext,
   getRoomMemberNames,
   getLatestSummary,
+  getRoomObservations,
   getRoomUsersMemories,
   getRoomMemories,
   getConfirmedRelationshipsForUser,
+  getAgentMemories,
   buildSystemPrompt,
   buildLLMMessages,
 } from "@/lib/chat/context";
@@ -135,17 +137,21 @@ export async function POST(req: NextRequest) {
   // happen anyway via getDefaultRoomAgent → null), but to keep the
   // Promise.all uniform we still resolve to a default-ish null.
   const [
-    { recentMessages, nameMap },
+    { recentMessages, nameMap, contextMode, contextStats },
     memberNames,
     roomSummary,
+    roomObsList,
     allUsersMemories,
     roomMems,
     roomMemberRows,
     mood,
+    agentSelf,
   ] = await Promise.all([
     loadChatContext(roomId),
     getRoomMemberNames(roomId),
     getLatestSummary(roomId),
+    // Layer 4a (M4.1): the room's observation log — time-ordered events.
+    getRoomObservations(roomId),
     getRoomUsersMemories(roomId),
     getRoomMemories(roomId),
     db
@@ -160,6 +166,11 @@ export async function POST(req: NextRequest) {
     agent
       ? getMood(agent.id, user.id)
       : (Promise.resolve(null) as Promise<null>),
+    // Layer 0 (M3): the agent's own persona / habits / narratives. Only
+    // fetched when there's an agent in the room (no agent → no self).
+    agent
+      ? getAgentMemories(agent.id, user.id, roomId)
+      : (Promise.resolve(null) as Promise<null>),
   ]);
   const currentUserName = nameMap.get(user.id) || "User";
   const roomMemberIds = roomMemberRows.map((r: { memberId: string }) => r.memberId);
@@ -168,7 +179,7 @@ export async function POST(req: NextRequest) {
     roomMemberIds
   );
 
-  // Build prompt (6 layers + mood + attitude protocol)
+  // Build prompt (Layer 0..7 — see buildSystemPrompt JSDoc)
   const systemContent = buildSystemPrompt({
     agentPrompt: agent?.systemPrompt || null,
     roomPrompt: room?.systemPrompt || null,
@@ -177,9 +188,11 @@ export async function POST(req: NextRequest) {
     agentName,
     currentUserName,
     roomSummary,
+    roomObservations: roomObsList,
     roomMemories: roomMems,
     relationships,
     allUsersMemories,
+    agentSelf,
     mood,
   });
   const llmMessages = buildLLMMessages(systemContent, recentMessages, nameMap);
@@ -202,6 +215,9 @@ export async function POST(req: NextRequest) {
     llmMessageCount: llmMessages.length,
     memoryCount,
     hasSummary: !!roomSummary,
+    observationCount: roomObsList.length,
+    contextMode,
+    contextStats,
     systemPromptLength: systemContent.length,
     provider,
     mode,

@@ -1,6 +1,12 @@
 /** System prompt for the user-memory extraction LLM call. The user side
  *  of the conversation (recent messages, existing memories, tombstones)
- *  is composed by the caller and passed as the user role. */
+ *  is composed by the caller and passed as the user role.
+ *
+ *  Phase α M2: every CREATE action now MUST carry sourceMessageId +
+ *  evidenceQuote. The worker substring-validates evidenceQuote against
+ *  the actual message identified by sourceMessageId before writing.
+ *  Without these, fabricated facts can't be cited later, which is the
+ *  whole point of the upgrade. */
 export function buildExtractionPrompt(
   language: string,
   nowIso: string
@@ -17,7 +23,8 @@ Examples (match the user's language):
 
 TIME (SECOND HIGHEST PRIORITY):
 Current time is ${nowIso}. Each recent message below has a [YYYY-MM-DD HH:mm]
-prefix showing when it was sent.
+prefix showing when it was sent, and a (msgId=...) marker identifying the
+exact message.
 - NEVER store relative phrases like "今天" / "昨天" / "刚才" / "中午" / "上周" /
   "yesterday" / "just now" inside the fact content. Resolve them into an
   absolute date based on the message's own timestamp and the current time.
@@ -30,6 +37,21 @@ prefix showing when it was sent.
   "我饿了", "现在有点累") must be SKIPPED — they are not worth cross-session
   memory. If the same behaviour recurs across many days, a higher-level fact
   ("经常不吃午饭") will emerge from reinforcement; you don't need to seed it.
+
+PROVENANCE (HARD CONSTRAINT — actions without it are rejected):
+Every CREATE action MUST include both:
+  - sourceMessageId: one of the (msgId=...) values from the recent messages
+    below. This is the message that primarily evidences the fact.
+  - evidenceQuote: a verbatim substring (≤120 chars) FROM THAT message that
+    directly supports the fact. The substring must appear character-for-
+    character inside the message body — DO NOT paraphrase, translate, or
+    rewrite the quote. The backend substring-checks it; mismatches are
+    dropped on the floor.
+If no single message in the recent window cleanly supports a fact, DO NOT
+emit a CREATE for it — that means you'd be guessing. UPDATE and DELETE
+actions should also include sourceMessageId + evidenceQuote when the new
+evidence comes from a recent message (it usually does); these aren't
+strictly required but are strongly preferred.
 
 RULES:
 - Only extract facts that would be useful to remember across conversations
@@ -49,12 +71,13 @@ HARD CONSTRAINTS (violating these will be rejected):
 OUTPUT FORMAT (strict JSON):
 {
   "actions": [
-    {"action": "create", "content": "...", "category": "identity|preference|relationship|event|opinion|context", "importance": "high|medium|low", "eventAt": "2026-04-19" },
-    {"action": "update", "memoryId": "<uuid>", "content": "updated content", "category": "...", "importance": "..."},
-    {"action": "delete", "memoryId": "<uuid>", "reason": "..."}
+    {"action": "create", "content": "...", "category": "identity|preference|relationship|event|opinion|context", "importance": "high|medium|low", "sourceMessageId": "<uuid from a (msgId=...) above>", "evidenceQuote": "verbatim substring from that message", "eventAt": "2026-04-19" },
+    {"action": "update", "memoryId": "<uuid>", "content": "updated content", "category": "...", "importance": "...", "sourceMessageId": "<uuid>", "evidenceQuote": "..."},
+    {"action": "delete", "memoryId": "<uuid>", "reason": "...", "sourceMessageId": "<uuid>", "evidenceQuote": "..."}
   ]
 }
-(eventAt is OPTIONAL and only appears on CREATE; omit it for timeless facts.)
+(eventAt is OPTIONAL and only appears on CREATE; omit it for timeless facts.
+sourceMessageId + evidenceQuote are REQUIRED on CREATE, recommended on UPDATE/DELETE.)
 
 If nothing worth remembering, return: {"actions": []}
 

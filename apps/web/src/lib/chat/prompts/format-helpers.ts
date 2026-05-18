@@ -7,14 +7,37 @@ const CATEGORY_LABELS: Record<string, string> = {
   context: "Current context",
 };
 
-/** Format memories for a single user, grouped by category */
+// Evidence quotes get clipped before injection so a single fact can't
+// blow out the prompt. 60 chars is enough to see WHY a fact was stored
+// without flooding the model with the full message.
+const MAX_EVIDENCE_DISPLAY_LEN = 60;
+
+function formatEvidence(quote: string | null | undefined): string {
+  if (!quote) return "";
+  const trimmed = quote.trim();
+  if (!trimmed) return "";
+  const clipped =
+    trimmed.length > MAX_EVIDENCE_DISPLAY_LEN
+      ? trimmed.slice(0, MAX_EVIDENCE_DISPLAY_LEN) + "…"
+      : trimmed;
+  // Escape any double quotes inside the clip so the suffix stays parseable.
+  return ` [evidence: "${clipped.replace(/"/g, '\\"')}"]`;
+}
+
+/** Format memories for a single user, grouped by category. M2: every
+ *  fact carries an `[evidence: "..."]` suffix when we have a stored
+ *  evidence quote. This both signals to the LLM that the fact is
+ *  grounded AND lets it cite the underlying user wording when asked. */
 export function formatUserMemories(
-  memories: { category: string; content: string }[]
+  memories: { category: string; content: string; evidenceQuote?: string | null }[]
 ): string {
-  const grouped = new Map<string, string[]>();
+  const grouped = new Map<
+    string,
+    { content: string; evidenceQuote: string | null }[]
+  >();
   for (const m of memories) {
     const list = grouped.get(m.category) || [];
-    list.push(m.content);
+    list.push({ content: m.content, evidenceQuote: m.evidenceQuote ?? null });
     grouped.set(m.category, list);
   }
 
@@ -22,10 +45,72 @@ export function formatUserMemories(
   for (const [cat, label] of Object.entries(CATEGORY_LABELS)) {
     const items = grouped.get(cat);
     if (items && items.length > 0) {
-      sections.push(`${label}:\n${items.map((i) => `- ${i}`).join("\n")}`);
+      sections.push(
+        `${label}:\n${items
+          .map((i) => `- ${i.content}${formatEvidence(i.evidenceQuote)}`)
+          .join("\n")}`
+      );
     }
   }
   return sections.join("\n");
+}
+
+/** Format agent self-memory layers (M3) into a single Layer-0 block.
+ *  Order: persona → self_tendency → narrative-with-user → narrative-with-room.
+ *  Empty sections are dropped. Returns null when there's nothing to inject
+ *  so the caller doesn't add a stray empty layer. */
+export function formatAgentMemories(opts: {
+  agentName: string;
+  currentUserName: string;
+  roomName: string;
+  persona: { content: string; evidenceQuote: string | null }[];
+  selfTendency: { content: string; evidenceQuote: string | null }[];
+  narrativeForUser: string | null;
+  narrativeForRoom: string | null;
+}): string | null {
+  const sections: string[] = [];
+
+  if (opts.persona.length > 0) {
+    sections.push(
+      `Persona (who you, ${opts.agentName}, are):\n${opts.persona
+        .map((p) => `- ${p.content}${formatEvidence(p.evidenceQuote)}`)
+        .join("\n")}`
+    );
+  }
+  if (opts.selfTendency.length > 0) {
+    sections.push(
+      `Habits you've noticed about yourself:\n${opts.selfTendency
+        .map((p) => `- ${p.content}${formatEvidence(p.evidenceQuote)}`)
+        .join("\n")}`
+    );
+  }
+  if (opts.narrativeForUser) {
+    sections.push(
+      `Your history with ${opts.currentUserName}:\n${opts.narrativeForUser}`
+    );
+  }
+  if (opts.narrativeForRoom) {
+    sections.push(
+      `Your sense of this room ("${opts.roomName}"):\n${opts.narrativeForRoom}`
+    );
+  }
+  if (sections.length === 0) return null;
+  return `[About yourself]\n\n${sections.join("\n\n")}`;
+}
+
+/** Format the observation log (M4.1) into a prompt-cache-friendly block.
+ *  Observations come in chronological order — we render them as a
+ *  single time-ordered log with a brief preamble so the LLM treats it
+ *  as factual history, not as a list of opinions. */
+export function formatObservations(
+  observations: { content: string; periodStart: Date; periodEnd: Date }[]
+): string | null {
+  if (observations.length === 0) return null;
+  // We don't need to render period boundaries — the LLM produced each
+  // observation block with absolute timestamps inside the lines, which
+  // is what the agent will actually use.
+  const body = observations.map((o) => o.content).join("\n\n");
+  return `Conversation history (observation log — each line is a real event with absolute time, oldest at top):\n\n${body}`;
 }
 
 /** Compact "YYYY-MM-DD HH:mm" in Asia/Shanghai — used as the per-message

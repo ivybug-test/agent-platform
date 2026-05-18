@@ -11,15 +11,21 @@ import {
   relationshipToolHandlers,
   relationshipToolDefs,
 } from "./relationship-tools";
+import {
+  agentSelfToolHandlers,
+  agentSelfToolDefs,
+} from "./agent-self-tools";
 
 export const memoryToolHandlers: Record<string, ToolHandler> = {
   ...userMemoryToolHandlers,
   ...roomMemoryToolHandlers,
   ...relationshipToolHandlers,
+  ...agentSelfToolHandlers,
 };
 
 export const memoryToolDefs = [
   ...userMemoryToolDefs,
   ...roomMemoryToolDefs,
   ...relationshipToolDefs,
+  ...agentSelfToolDefs,
 ];

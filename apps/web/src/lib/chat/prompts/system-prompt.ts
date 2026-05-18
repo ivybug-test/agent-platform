@@ -1,7 +1,10 @@
 import {
   formatUserMemories,
   formatCurrentTime,
+  formatAgentMemories,
+  formatObservations,
 } from "./format-helpers";
+import type { AgentMemoryBundle } from "../queries";
 import { CAPABILITIES } from "./capabilities";
 import { buildToolGuidance } from "./tool-guidance";
 import { buildRules } from "./rules";
@@ -63,19 +66,22 @@ function buildAttitudeProtocol(): string {
   ].join("\n");
 }
 
-/** Build the 6-layer system prompt (per CLAUDE.md context strategy).
+/** Build the system prompt (Phase α M3 adds Layer 0 agent self-memory).
  *
  *  Layers, in order:
+ *  - 0   Agent self-memory (M3: persona + self_tendency + narrative)
  *  - 1   Agent identity (the agent's own system prompt)
  *  - 1a  Capability declaration (counters "I'm a text model" defaults)
  *  - 1b  Wall-clock anchor (Asia/Shanghai now)
+ *  - 1c  Dynamic mood (Self/Favor for the current speaker)
  *  - 2   Room rules (room.system_prompt + roster)
  *  - 2b  Room context (shared facts across all members)
  *  - 2c  Known relationships involving the speaker
  *  - 3   Pinned memory snapshot (identity + high-importance only)
  *  - 4   Latest room summary
  *  - 5   (recent messages added separately as user/assistant turns)
- *  - 6   Tool usage hints + IMPORTANT RULES 1–10
+ *  - 6   Tool usage hints + IMPORTANT RULES 1–11
+ *  - 7   Attitude output protocol (last, when mood is set)
  */
 export function buildSystemPrompt(opts: {
   agentPrompt: string | null;
@@ -85,9 +91,18 @@ export function buildSystemPrompt(opts: {
   agentName: string;
   currentUserName: string;
   roomSummary: string | null;
+  roomObservations?: {
+    content: string;
+    periodStart: Date;
+    periodEnd: Date;
+  }[];
   roomMemories?: { content: string; importance: string }[];
   relationships?: { otherName: string; kind: string; content: string | null }[];
-  allUsersMemories: Map<string, { category: string; content: string }[]>;
+  allUsersMemories: Map<
+    string,
+    { category: string; content: string; evidenceQuote?: string | null }[]
+  >;
+  agentSelf?: AgentMemoryBundle | null;
   mood?: Mood | null;
 }): string {
   // Layer 3: Pinned memory snapshot (identity + high-importance only).
@@ -128,7 +143,25 @@ export function buildSystemPrompt(opts: {
 
   const nowLine = `Current time: ${formatCurrentTime()}. When the user says "今天" / "昨天" / "刚才" / "上周", resolve them against this timestamp before storing anything in memory.`;
 
+  // Layer 0: Agent self-memory (M3). Pinned ABOVE the agent's system
+  // prompt so persona / habits / relationship-narrative shape every
+  // downstream layer's interpretation. If no rows exist yet (fresh
+  // agent), this returns null and the layer is silently dropped.
+  const agentSelfSection = opts.agentSelf
+    ? formatAgentMemories({
+        agentName: opts.agentName,
+        currentUserName: opts.currentUserName,
+        roomName: opts.roomName,
+        persona: opts.agentSelf.persona,
+        selfTendency: opts.agentSelf.selfTendency,
+        narrativeForUser: opts.agentSelf.narrativeForUser,
+        narrativeForRoom: opts.agentSelf.narrativeForRoom,
+      })
+    : null;
+
   return [
+    // Layer 0: Agent self-memory
+    agentSelfSection,
     // Layer 1: Agent identity (system prompt)
     opts.agentPrompt || "You are a helpful assistant.",
     // Layer 1a: Capability declaration
@@ -153,9 +186,17 @@ export function buildSystemPrompt(opts: {
     relationshipsSection,
     // Layer 3: Pinned memory snapshot
     memorySection,
-    // Layer 4: Room summary
+    // Layer 4: Room summary (legacy, freestyle compressed digest)
     opts.roomSummary
       ? `Previous conversation summary:\n${opts.roomSummary}`
+      : null,
+    // Layer 4a: Observation log (M4.1) — time-ordered append-only
+    // record of events. Coexists with the summary above; the summary
+    // captures "current state of affairs", the observation log
+    // captures "the sequence of what happened". M4.2/M5 may collapse
+    // the two; for now both feed the model.
+    opts.roomObservations && opts.roomObservations.length > 0
+      ? formatObservations(opts.roomObservations)
       : null,
     // Layer 5: (recent messages are added separately as user/assistant turns)
     // Tool usage hints
