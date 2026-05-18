@@ -6,6 +6,7 @@ import {
 } from "@agent-platform/db";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { llmCompleteJSON } from "../llm.js";
+import { embedOne } from "../embeddings.js";
 import { createLogger } from "@agent-platform/logger";
 import { textSimilarity } from "../text-similarity.js";
 import { buildAgentSelfPrompt } from "../prompts/agent-self.js";
@@ -196,6 +197,13 @@ export async function processAgentSelfExtract(data: AgentSelfData) {
       continue;
     }
 
+    let embedding: number[] | null = null;
+    try {
+      embedding = await embedOne(content);
+    } catch (err) {
+      log.warn({ agentId, err }, "agent-self.embed-failed");
+    }
+
     await db.insert(agentMemories).values({
       agentId,
       kind: "self_tendency",
@@ -205,6 +213,7 @@ export async function processAgentSelfExtract(data: AgentSelfData) {
       lastReinforcedAt: new Date(),
       sourceMessageIds: [t.evidenceMessageId],
       evidenceQuote: t.evidenceQuote.slice(0, 120),
+      ...(embedding ? { embedding } : {}),
     });
     created++;
   }

@@ -3,6 +3,13 @@
 ## 项目状态
 Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。**2026-05-17 启动记忆系统 Phase α (MVP) 升级**:对应计划文件 `subagent-agent-wild-beaver.md`,目标是 provenance(杀编造)+ agent 自我维度 + reflection v1(杀碎片化)+ pgvector 启用。剩余项:Phase C 嘴巴(TTS + 唱歌)、MCP 集成、Phase β/γ(结构化实体表 + 时序矛盾检测)。
 
+### 记忆 Phase α M5b — agent_memories embedding backfill + 在线写(2026-05-18)
+**依据**:M3 落地时留的尾巴 — agent_memories 表的 embedding 列全 NULL,任何针对 agent 自我记忆的语义查询都失能(包括将来 M5d search_memories 升级)。
+- `services/memory-worker/src/cli/backfill-embeddings.ts`:新增 `backfillAgentMemories()` 走和其它三张表一致的批处理流(BATCH=64, sleep=250ms);新增 `--skip-agent-memories` flag;pre-count 输出 agent_memories 待 backfill 行数
+- `services/memory-worker/src/jobs/agent-self.ts` `processAgentSelfExtract`:新建 self_tendency 时同步 `embedOne(content)` 写入 row(失败非致命,走 backfill 兜底);现有 reinforce 路径不变(那条 row 早就 backfill 了)
+- Web 侧 `remember_self` / `update_self` 仍写 embedding=NULL(apps/web bundle 不带 openai SDK,刻意不引入 → 还是靠 backfill 周期补)
+- 验证:memory-worker build 通过
+
 ### 记忆 Phase α M5a — read_image 联想换 cosine(2026-05-18)
 **依据**:M4.5 落地时就标了"trgm 是过渡方案,M5 升级路径 = cosine over embedding"。pg_trgm 在中文同义改写("布偶"vs"猫","蛋糕"vs"甜食")上会被打散,embedding 能拾起来。
 - `services/memory-worker/src/jobs/caption-image.ts`:写 caption 时顺手 `embedOne("[image: ${caption}]")` 并写 `messages.embedding`。和 backfill CLI 用的文本(`messageBody()`)对齐 → 已 backfill 的老图和新图都走同一向量空间。embedding 失败不致命(走 backfill 兜底)

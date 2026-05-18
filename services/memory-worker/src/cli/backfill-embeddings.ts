@@ -1,6 +1,6 @@
 /**
- * One-time M1 backfill: populate the `embedding` column on existing
- * user_memories / room_memories / messages rows.
+ * One-time M1/M5 backfill: populate the `embedding` column on existing
+ * user_memories / room_memories / agent_memories / messages rows.
  *
  * Why: Phase α M1 just added the `embedding vector(1536)` columns and an
  * HNSW index over them. The index is built but every historical row has
@@ -34,6 +34,7 @@ import {
   db,
   userMemories,
   roomMemories,
+  agentMemories,
   messages,
 } from "@agent-platform/db";
 import { and, eq, isNull, sql, inArray } from "drizzle-orm";
@@ -46,6 +47,7 @@ const BATCH_SLEEP_MS = 250;
 const DRY_RUN = process.argv.includes("--dry-run");
 const SKIP_USER = process.argv.includes("--skip-user-memories");
 const SKIP_ROOM = process.argv.includes("--skip-room-memories");
+const SKIP_AGENT = process.argv.includes("--skip-agent-memories");
 const SKIP_MSG = process.argv.includes("--skip-messages");
 
 async function sleep(ms: number) {
@@ -157,6 +159,62 @@ async function backfillRoomMemories(): Promise<{ filled: number; failed: number 
         .update(roomMemories)
         .set({ embedding: v })
         .where(eq(roomMemories.id, rows[i].id));
+      filled++;
+    }
+
+    console.log(
+      `  page ${pageNo}: filled ${rows.length} (running total ${filled})`
+    );
+    await sleep(BATCH_SLEEP_MS);
+  }
+
+  return { filled, failed };
+}
+
+async function backfillAgentMemories(): Promise<{ filled: number; failed: number }> {
+  console.log("\n=== agent_memories ===");
+  let filled = 0;
+  let failed = 0;
+  let pageNo = 0;
+
+  while (true) {
+    const rows = await db
+      .select({
+        id: agentMemories.id,
+        content: agentMemories.content,
+      })
+      .from(agentMemories)
+      .where(
+        and(isNull(agentMemories.embedding), isNull(agentMemories.deletedAt))
+      )
+      .limit(BATCH_SIZE);
+
+    if (rows.length === 0) break;
+    pageNo++;
+
+    if (DRY_RUN) {
+      console.log(
+        `  [dry] page ${pageNo}: would embed ${rows.length} rows (e.g. "${rows[0].content.slice(0, 50)}")`
+      );
+      break;
+    }
+
+    let vectors: (number[] | null)[];
+    try {
+      vectors = await embedBatch(rows.map((r) => r.content));
+    } catch (err) {
+      console.error(`  page ${pageNo}: embedBatch failed:`, err);
+      failed += rows.length;
+      break;
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const v = vectors[i];
+      if (!v) continue;
+      await db
+        .update(agentMemories)
+        .set({ embedding: v })
+        .where(eq(agentMemories.id, rows[i].id));
       filled++;
     }
 
@@ -288,13 +346,17 @@ async function main() {
     .select({ n: sql<number>`count(*)`.mapWith(Number) })
     .from(roomMemories)
     .where(and(isNull(roomMemories.embedding), isNull(roomMemories.deletedAt)));
+  const [amCount] = await db
+    .select({ n: sql<number>`count(*)`.mapWith(Number) })
+    .from(agentMemories)
+    .where(and(isNull(agentMemories.embedding), isNull(agentMemories.deletedAt)));
   const [msgCount] = await db
     .select({ n: sql<number>`count(*)`.mapWith(Number) })
     .from(messages)
     .where(and(isNull(messages.embedding), eq(messages.status, "completed")));
 
   console.log(
-    `Eligible: user_memories=${umCount?.n ?? "?"}  room_memories=${rmCount?.n ?? "?"}  messages=${msgCount?.n ?? "?"}`
+    `Eligible: user_memories=${umCount?.n ?? "?"}  room_memories=${rmCount?.n ?? "?"}  agent_memories=${amCount?.n ?? "?"}  messages=${msgCount?.n ?? "?"}`
   );
 
   const totals = { filled: 0, failed: 0 };
@@ -305,6 +367,11 @@ async function main() {
   }
   if (!SKIP_ROOM) {
     const r = await backfillRoomMemories();
+    totals.filled += r.filled;
+    totals.failed += r.failed;
+  }
+  if (!SKIP_AGENT) {
+    const r = await backfillAgentMemories();
     totals.filled += r.filled;
     totals.failed += r.failed;
   }
