@@ -9,6 +9,11 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
+    "sha": "5befb2f",
+    "subject": "Memory Phase α Reflection v1: event cluster → 高阶模式",
+    "date": "2026-05-18T21:21:06+08:00"
+  },
+  {
     "sha": "ab975f6",
     "subject": "Memory Phase α M5c+M5d: cosine dedup + search_memories cosine top-up",
     "date": "2026-05-18T20:09:58+08:00"
@@ -17,10 +22,5 @@ export const RECENT_COMMITS: CommitInfo[] = [
     "sha": "b0b059f",
     "subject": "Memory Phase α M5b: agent_memories embedding — backfill + 在线写",
     "date": "2026-05-18T20:00:45+08:00"
-  },
-  {
-    "sha": "1370cc4",
-    "subject": "Memory Phase α M5a: read_image 联想换 cosine",
-    "date": "2026-05-18T19:58:02+08:00"
   }
 ];

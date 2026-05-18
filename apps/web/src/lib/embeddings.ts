@@ -14,8 +14,13 @@ import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("web:embeddings");
 
+const PROVIDER = (process.env.EMBEDDING_PROVIDER || "openai").toLowerCase();
 const MODEL = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
 const DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 1536);
+const MINIMAX_BASE_URL =
+  process.env.EMBEDDING_BASE_URL ||
+  process.env.MINIMAX_BASE_URL ||
+  "https://api.minimax.chat/v1";
 
 // One OpenAI client per process — lazy so cold paths don't pay import cost.
 let _client: unknown = null;
@@ -41,6 +46,56 @@ async function getClient() {
   return _client;
 }
 
+// MiniMax has a non-OpenAI-compatible shape: body {model,texts,type} →
+// resp {vectors,base_resp}. The tool path always passes type="query" so
+// MiniMax's query-side encoder is used (matches stored doc-side embeddings
+// produced by the worker's "db" calls).
+async function minimaxEmbed(text: string): Promise<number[] | null> {
+  const apiKey =
+    process.env.EMBEDDING_API_KEY || process.env.MINIMAX_API_KEY;
+  if (!apiKey) {
+    log.warn({}, "embed-query.minimax.no-key");
+    return null;
+  }
+  const res = await fetch(`${MINIMAX_BASE_URL}/embeddings`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: MODEL, texts: [text], type: "query" }),
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!res.ok) {
+    log.warn(
+      { status: res.status },
+      "embed-query.minimax.http-error"
+    );
+    return null;
+  }
+  const body = (await res.json()) as {
+    vectors?: number[][];
+    base_resp?: { status_code: number; status_msg: string };
+  };
+  const code = body.base_resp?.status_code;
+  if (code !== 0) {
+    log.warn(
+      { code, msg: body.base_resp?.status_msg },
+      "embed-query.minimax.logical-error"
+    );
+    return null;
+  }
+  const v = body.vectors?.[0];
+  if (!v || v.length !== DIMENSIONS) {
+    log.warn(
+      { length: v?.length, expected: DIMENSIONS },
+      "embed-query.minimax.bad-shape"
+    );
+    return null;
+  }
+  return v;
+}
+
 /** Embed a short query string. Returns null on empty input or any API
  *  failure — callers must fall back to a non-cosine path. Quiet on
  *  failure (warn-only) since the agent's tool call should still succeed
@@ -48,6 +103,19 @@ async function getClient() {
 export async function embedQuery(text: string): Promise<number[] | null> {
   const trimmed = (text || "").trim();
   if (!trimmed) return null;
+
+  if (PROVIDER === "minimax") {
+    try {
+      return await minimaxEmbed(trimmed);
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, queryPreview: trimmed.slice(0, 40) },
+        "embed-query.minimax.failed"
+      );
+      return null;
+    }
+  }
+
   try {
     const client = (await getClient()) as {
       embeddings: {
