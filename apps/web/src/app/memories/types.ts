@@ -7,7 +7,8 @@ export type Category =
   | "context";
 export type Importance = "high" | "medium" | "low";
 export type Source = "extracted" | "user_explicit";
-export type Tab = "mine" | "pending" | "relationships";
+export type MemoryKind = "fact" | "reflection";
+export type Tab = "profile" | "mine" | "pending" | "relationships";
 
 export type RelationshipKind =
   | "spouse"
@@ -22,12 +23,30 @@ export interface Memory {
   category: Category;
   importance: Importance;
   source: Source;
+  kind: MemoryKind;
   createdAt: string;
   updatedAt: string;
   lastReinforcedAt: string | null;
   authoredByUserId: string | null;
   confirmedAt: string | null;
   authoredByName?: string | null;
+}
+
+export interface NarrativeRow {
+  id: string;
+  content: string;
+  agentName: string;
+  agentId: string;
+  updatedAt: string;
+}
+
+export interface ObservationRow {
+  id: string;
+  content: string;
+  roomId: string;
+  roomName: string;
+  periodStart: string;
+  periodEnd: string;
 }
 
 export interface RelationshipRow {

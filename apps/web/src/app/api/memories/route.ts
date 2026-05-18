@@ -33,6 +33,7 @@ const SELECT_ROW = {
   eventAt: userMemories.eventAt,
   authoredByUserId: userMemories.authoredByUserId,
   confirmedAt: userMemories.confirmedAt,
+  kind: userMemories.kind,
 };
 
 /** Escape `\`, `%`, `_` so user input doesn't act as wildcards in ILIKE. */

@@ -10,12 +10,15 @@ import type {
   FriendRow,
   Importance,
   Memory,
+  NarrativeRow,
+  ObservationRow,
   RelationshipKind,
   RelationshipRow,
   Tab,
 } from "./types";
 import MineTab from "./components/MineTab";
 import PendingTab from "./components/PendingTab";
+import ProfileTab from "./components/ProfileTab";
 import RelationshipsTab from "./components/RelationshipsTab";
 
 export default function MemoriesPage() {
@@ -28,7 +31,9 @@ export default function MemoriesPage() {
   const [pendingRels, setPendingRels] = useState<RelationshipRow[]>([]);
   const [outgoingRels, setOutgoingRels] = useState<RelationshipRow[]>([]);
   const [friendList, setFriendList] = useState<FriendRow[]>([]);
-  const [tab, setTab] = useState<Tab>("mine");
+  const [narratives, setNarratives] = useState<NarrativeRow[]>([]);
+  const [observations, setObservations] = useState<ObservationRow[]>([]);
+  const [tab, setTab] = useState<Tab>("profile");
   const [relAddOpen, setRelAddOpen] = useState(false);
   const [relFriendId, setRelFriendId] = useState("");
   const [relKind, setRelKind] = useState<RelationshipKind>("friend");
@@ -63,10 +68,11 @@ export default function MemoriesPage() {
       const memUrl = opts.q
         ? `/api/memories?q=${encodeURIComponent(opts.q)}`
         : "/api/memories";
-      const [memRes, relRes, friRes] = await Promise.all([
+      const [memRes, relRes, friRes, profRes] = await Promise.all([
         fetch(memUrl),
         fetch("/api/relationships"),
         fetch("/api/friends"),
+        fetch("/api/profile"),
       ]);
       if (memRes.ok) {
         const data = await memRes.json();
@@ -83,6 +89,11 @@ export default function MemoriesPage() {
       if (friRes.ok) {
         const raw: FriendRow[] = await friRes.json();
         setFriendList(raw.filter((f) => f.direction === "mutual"));
+      }
+      if (profRes.ok) {
+        const data = await profRes.json();
+        setNarratives(data.narratives || []);
+        setObservations(data.observations || []);
       }
     } finally {
       setLoading(false);
@@ -275,9 +286,6 @@ export default function MemoriesPage() {
         </Link>
         <h1 className="text-sm font-semibold flex-1 truncate">
           我的记忆
-          <span className="text-base-content/40 font-normal ml-2">
-            {tab === "mine" ? mine.length : pending.length}
-          </span>
         </h1>
         {tab === "mine" && (
           <button
@@ -290,16 +298,29 @@ export default function MemoriesPage() {
       </div>
 
       {/* Tab bar */}
-      <div className="flex items-center gap-1 px-3 pt-2 bg-base-100 border-b border-base-300">
+      <div className="flex items-center gap-1 px-3 pt-2 bg-base-100 border-b border-base-300 overflow-x-auto">
         <button
-          className={`px-3 py-1.5 text-xs rounded-t-md border-b-2 ${
+          className={`px-3 py-1.5 text-xs rounded-t-md border-b-2 whitespace-nowrap ${
+            tab === "profile"
+              ? "border-primary text-primary font-semibold"
+              : "border-transparent text-base-content/60"
+          }`}
+          onClick={() => setTab("profile")}
+        >
+          画像
+        </button>
+        <button
+          className={`px-3 py-1.5 text-xs rounded-t-md border-b-2 whitespace-nowrap ${
             tab === "mine"
               ? "border-primary text-primary font-semibold"
               : "border-transparent text-base-content/60"
           }`}
           onClick={() => setTab("mine")}
         >
-          我的记忆
+          原始记忆
+          <span className="text-base-content/40 font-normal ml-1">
+            {mine.length}
+          </span>
         </button>
         <button
           className={`px-3 py-1.5 text-xs rounded-t-md border-b-2 flex items-center gap-1 ${
@@ -333,6 +354,17 @@ export default function MemoriesPage() {
 
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-3 py-3 md:px-4">
+        {tab === "profile" && (
+          <ProfileTab
+            mine={mine}
+            confirmedRels={confirmedRels}
+            narratives={narratives}
+            observations={observations}
+            onGoToMine={() => setTab("mine")}
+            onGoToRelationships={() => setTab("relationships")}
+          />
+        )}
+
         {tab === "pending" && (
           <PendingTab pending={pending} accept={accept} reject={reject} />
         )}
