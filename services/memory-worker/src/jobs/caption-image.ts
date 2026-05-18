@@ -1,6 +1,7 @@
 import { db, messages } from "@agent-platform/db";
 import { eq } from "drizzle-orm";
 import { llmCaptionImage } from "../llm.js";
+import { embedOne } from "../embeddings.js";
 import { createLogger } from "@agent-platform/logger";
 
 const log = createLogger("memory-worker");
@@ -52,6 +53,18 @@ export async function processCaptionImage(data: CaptionImageData) {
     return;
   }
 
+  // Embed the caption so M5 read_image can do cosine over user_memories
+  // without re-embedding at tool-call time. Matches what the backfill CLI
+  // produces for image rows via messageBody() — "[image: <caption>]".
+  // Non-fatal: if the embedding API blows up we still save the caption;
+  // the backfill CLI can fill the embedding later.
+  let embedding: number[] | null = null;
+  try {
+    embedding = await embedOne(`[image: ${caption}]`);
+  } catch (err) {
+    log.warn({ messageId, err }, "caption.embed-failed");
+  }
+
   await db
     .update(messages)
     .set({
@@ -63,6 +76,7 @@ export async function processCaptionImage(data: CaptionImageData) {
           generatedAt: new Date().toISOString(),
         },
       },
+      ...(embedding ? { embedding } : {}),
       updatedAt: new Date(),
     })
     .where(eq(messages.id, messageId));
@@ -73,6 +87,7 @@ export async function processCaptionImage(data: CaptionImageData) {
       roomId: msg.roomId,
       captionLength: caption.length,
       model,
+      embedded: !!embedding,
       durationMs: Date.now() - startedAt,
     },
     "caption.saved"

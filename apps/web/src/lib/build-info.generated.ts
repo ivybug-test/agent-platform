@@ -9,6 +9,11 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
+    "sha": "ff3989e",
+    "subject": "Memory Phase α (MVP): provenance + agent self + observation log + pgvector",
+    "date": "2026-05-18T19:53:18+08:00"
+  },
+  {
     "sha": "49f8a5b",
     "subject": "Agent mood: dynamic Self/Favor driven by user attitude",
     "date": "2026-05-13T23:52:20+08:00"
@@ -17,10 +22,5 @@ export const RECENT_COMMITS: CommitInfo[] = [
     "sha": "b704f2b",
     "subject": "generate_image: catch follow-up edits + push referenceMessageIds use",
     "date": "2026-05-10T19:51:30+08:00"
-  },
-  {
-    "sha": "e3b75a1",
-    "subject": "generate_image: kill auto over-firing + harden forced-route fallback",
-    "date": "2026-05-10T19:40:45+08:00"
   }
 ];

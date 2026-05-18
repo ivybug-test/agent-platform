@@ -3,6 +3,16 @@
 ## 项目状态
 Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。**2026-05-17 启动记忆系统 Phase α (MVP) 升级**:对应计划文件 `subagent-agent-wild-beaver.md`,目标是 provenance(杀编造)+ agent 自我维度 + reflection v1(杀碎片化)+ pgvector 启用。剩余项:Phase C 嘴巴(TTS + 唱歌)、MCP 集成、Phase β/γ(结构化实体表 + 时序矛盾检测)。
 
+### 记忆 Phase α M5a — read_image 联想换 cosine(2026-05-18)
+**依据**:M4.5 落地时就标了"trgm 是过渡方案,M5 升级路径 = cosine over embedding"。pg_trgm 在中文同义改写("布偶"vs"猫","蛋糕"vs"甜食")上会被打散,embedding 能拾起来。
+- `services/memory-worker/src/jobs/caption-image.ts`:写 caption 时顺手 `embedOne("[image: ${caption}]")` 并写 `messages.embedding`。和 backfill CLI 用的文本(`messageBody()`)对齐 → 已 backfill 的老图和新图都走同一向量空间。embedding 失败不致命(走 backfill 兜底)
+- `apps/web/src/lib/tools/image-read-tools.ts` `findRelatedMemoriesForCaption` 改造:
+  - **Cosine 分支**(新):用图的 `messages.embedding` 做查询向量,against `user_memories.embedding`,阈值 cosine 相似度 ≥ 0.30(距离 ≤ 0.70)
+  - **Trgm 分支**(保留):只查 `embedding IS NULL` 的 user_memories 行,等 backfill 跑完会变空集
+  - 两路 union + 按 id 去重(cosine 优先)+ 按 similarity 降序 + top 5
+  - 日志加 `path: "cosine+trgm" | "trgm-only"` 埋点判断 cosine 命中率
+- 三包构建通过
+
 ### 记忆 Phase α M4.4 — agent-self-extract daily job(2026-05-17)
 **依据**:Identity Drift in LLM Agents (arxiv 2412.00804) 实证 persona 在长对话里会漂移;Persistent Identity Multi-Anchor (arxiv 2604.09588) 主张需要周期性自我观察来锚定。
 - 新 prompt `prompts/agent-self.ts`:让 agent 看自己最近 100 条 assistant 消息,识别"behavioural patterns"(回复长度/语气/工具使用倾向/拒答模式);强制 evidenceMessageId + evidenceQuote;明确禁止 restate persona 或写成 user 特定事实
