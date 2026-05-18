@@ -33,6 +33,31 @@ export async function pushMemoryJobs(roomId: string, userId: string) {
       jobId: `room-observation-${roomId}-${Math.floor(Date.now() / 60000)}`,
     }
   );
+  // Reflection v1: same idempotency story — day-bucket dedup means at
+  // most one synthesis run per user per day across all of (every chat
+  // turn) + (daily cron). Worker bails fast when there aren't enough
+  // event memories to cluster.
+  await pushReflectionJob(userId);
+}
+
+/** Reflection v1 on-write trigger. Called after a chat turn completes if
+ *  the user has accumulated enough new event memories since the last
+ *  reflection pass that there's plausibly a new pattern to find.
+ *  Day-bucket jobId keeps it idempotent — at most one reflection job
+ *  per user per day, regardless of how many turns trigger it. The
+ *  worker decides whether the cluster threshold is actually met. */
+export async function pushReflectionJob(userId: string) {
+  const queue = getQueue();
+  const dayBucket = Math.floor(Date.now() / (24 * 60 * 60 * 1000));
+  await queue.add(
+    "reflection",
+    { userId },
+    {
+      jobId: `reflection-${userId}-${dayBucket}`,
+      removeOnComplete: 50,
+      removeOnFail: 20,
+    }
+  );
 }
 
 /** Push a caption-image job. Called right after an image message is

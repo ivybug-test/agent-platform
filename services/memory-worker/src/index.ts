@@ -17,6 +17,10 @@ import {
   processMemoryDedupScan,
 } from "./jobs/memory-dedup.js";
 import { processCaptionImage } from "./jobs/caption-image.js";
+import {
+  processReflection,
+  processReflectionScan,
+} from "./jobs/reflection.js";
 
 if (!process.env.REDIS_URL) {
   throw new Error("REDIS_URL environment variable is required");
@@ -61,6 +65,12 @@ const worker = new Worker(
       case "caption-image":
         await processCaptionImage(job.data);
         break;
+      case "reflection-scan":
+        await processReflectionScan(queue);
+        break;
+      case "reflection":
+        await processReflection(job.data);
+        break;
       default:
         console.warn(`Unknown job type: ${job.name}`);
     }
@@ -95,6 +105,12 @@ const observationScanIntervalMs =
 const agentSelfScanIntervalMs =
   Number(process.env.AGENT_SELF_SCAN_INTERVAL_MS) || 24 * 60 * 60 * 1000;
 
+// Reflection v1: default once a day. The on-write trigger in apps/web
+// catches active users between cron runs; this is the slow-conversation
+// safety net. Per-user dedupe via reflection-{userId}-{dayBucket}.
+const reflectionScanIntervalMs =
+  Number(process.env.REFLECTION_SCAN_INTERVAL_MS) || 24 * 60 * 60 * 1000;
+
 // upsertJobScheduler replaces any prior schedule with the same key, so
 // changing the interval just takes effect on next worker restart.
 Promise.all([
@@ -112,6 +128,11 @@ Promise.all([
     "agent-self-scan-scheduler",
     { every: agentSelfScanIntervalMs },
     { name: "agent-self-scan" }
+  ),
+  queue.upsertJobScheduler(
+    "reflection-scan-scheduler",
+    { every: reflectionScanIntervalMs },
+    { name: "reflection-scan" }
   ),
   // Run one scan right after boot so a fresh deploy cleans up any
   // existing duplicates instead of waiting up to `dedupIntervalMs`.

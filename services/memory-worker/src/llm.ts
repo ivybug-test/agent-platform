@@ -152,3 +152,38 @@ export async function llmCompleteJSON<T = unknown>(
   }
   return JSON.parse(text);
 }
+
+/** Strong model + JSON output combo. Used by reflection synthesis where
+ *  the cluster-to-pattern judgment is subtle enough that the cheap chat
+ *  model produces noisy / false-positive patterns; runs are infrequent
+ *  enough (per-user daily) that the cost premium is negligible. */
+export async function llmCompleteStrongJSON<T = unknown>(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<T> {
+  const client = getClient();
+  const model =
+    process.env.CONSOLIDATION_LLM_MODEL ||
+    process.env.LLM_MODEL ||
+    "gpt-4o";
+
+  const res = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    max_tokens: 4096,
+  });
+
+  const choice = res.choices[0];
+  const text = choice?.message?.content || "{}";
+  if (choice?.finish_reason === "length") {
+    throw new Error(
+      "LLM output hit max_tokens (finish_reason=length); the JSON is truncated."
+    );
+  }
+  return JSON.parse(text);
+}

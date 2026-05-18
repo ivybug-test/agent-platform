@@ -3,6 +3,25 @@
 ## 项目状态
 Phase 2 完成(tool-calling agent + 记忆工具 + UI)。多用户记忆重构(原 `streamed-yawning-pancake` 计划的 Phase A–D)也全部落地:subject/author 拆分、待确认代写流程、房间共享记忆、双向确认的用户关系。动态记忆 Phase A 于 2026-04-19 落地。2026-04-25 落地多模态(眼睛)+ 联网搜索 + 链接预览卡片:Kimi K2.6 视觉路由、异步 caption 管线、web_search/search_lyrics/fetch_url 工具(Bocha 主 / Tavily 备)、QQ 音乐 / 网易云专用 OG 卡片 adapter。**2026-05-17 启动记忆系统 Phase α (MVP) 升级**:对应计划文件 `subagent-agent-wild-beaver.md`,目标是 provenance(杀编造)+ agent 自我维度 + reflection v1(杀碎片化)+ pgvector 启用。剩余项:Phase C 嘴巴(TTS + 唱歌)、MCP 集成、Phase β/γ(结构化实体表 + 时序矛盾检测)。
 
+### 记忆 Phase α Reflection v1 — event cluster → 高阶模式(2026-05-18)
+**依据**:计划里和 provenance/agent-self/pgvector 并列的第四件大事,杀"碎片但没整体观"。Park 2023 + 计划修订点 3。**对症用户痛点**:agent 看到"2026-04-18 熬夜赶论文"+"2026-04-22 凌晨 2 点睡"+"2026-04-29 熬夜改 ppt"三条 atomic event,但识别不出"经常熬夜赶 ddl"这种模式。
+- 新 prompt `services/memory-worker/src/prompts/reflection.ts`:输入预先聚类好的 event memories,输出 `{ hasPattern, pattern, importance, representativeQuote? }`。强约束 fail-closed —— 小簇 / 单事件 dominate / 不同主题硬凑 都返回 hasPattern=false。pattern ≤30 字 CN / 80 字 EN,不带"今天"这种具体时间副词
+- 新 job `services/memory-worker/src/jobs/reflection.ts`:
+  - 拉用户最近 30 天 `category='event' AND kind='fact'` 且 `embedding IS NOT NULL` 的 user_memories(跨房间)
+  - 贪心 ball-clustering:按 importance/recency 选 seed,cosine 距离 ≤ 0.35 归簇,size ≥ 3 才送 LLM,每跑最多 5 个簇
+  - 用 `llmCompleteStrongJSON`(M4.2 强模型路径,reflection 错一次后果是注入错记忆 → 不能省)
+  - 写回 `user_memories(kind='reflection', category='context')`:`source_message_ids` 按 schema doc 约定存 memory id 链(而非 message id),`evidence_quote` 存 representativeQuote
+  - Dedup vs 已有 reflection:cosine 距离 ≤ 0.20 → reinforce(strength++),否则 insert。in-memory 列表同步刷新避免同一 run 内重复合成
+- 新 helper `llm.ts::llmCompleteStrongJSON`:强模型 + JSON output 组合(原 Strong 不带 JSON,原 JSON 不走强模型)
+- Worker 注册 `reflection` / `reflection-scan` job 类型 + scheduler 每日 02:00(env `REFLECTION_SCAN_INTERVAL_MS` 默认 86400000)。scan job 用 GROUP BY userId HAVING count ≥ 3 筛"够格"用户,fan-out per-user job,jobId `reflection-{userId}-{dayBucket}`
+- `apps/web/src/lib/queue.ts` 加 `pushReflectionJob(userId)`;`pushMemoryJobs` 顺手调一次 → 活跃用户当日就能看到新模式(day-bucket 防爆,worker 内 cluster threshold 防空跑)
+- 系统 prompt 注入升级:
+  - `getUserMemories` 返回 `kind` 字段
+  - `getRoomUsersMemories` 把 `kind='reflection'` 行也算进 pinned(原 only identity + high importance,现在加 reflection)
+  - `formatUserMemories` 把 reflection 行挑出来,在所有 category 之前放一个 `Recurring patterns:` 段 → 让 agent 一眼看到模式而非埋在 context 桶里
+- 三包构建通过(client bundle 无变化)
+- 未做(留下一轮):reflection UI 反思 tab(允许用户查看 + 撤回);`memory_revisions` audit 表(修订点 1 的尾巴)
+
 ### 记忆 Phase α M5d — search_memories 加 cosine top-up 分支(2026-05-18)
 **依据**:M5 的"读侧 pgvector 启用"。原 search_memories 只走 substring `ilike`,典型失败:agent 想 search "甜食" 但用户记忆是"爱吃蛋糕";search "猫" 但记忆是"养了一只布偶 邦邦"。cosine over embedding 能补回来。
 - 新建 `apps/web/src/lib/embeddings.ts`:server-only,lazy import openai SDK(client bundle 不变 — 验证 web build 输出 size 不变);`embedQuery(text)` 返回 1536d 向量,失败返回 null 给上层走 fallback;`toVectorLiteral` 拼 pgvector 字面

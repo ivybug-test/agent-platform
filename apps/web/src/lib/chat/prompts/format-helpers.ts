@@ -27,21 +27,50 @@ function formatEvidence(quote: string | null | undefined): string {
 /** Format memories for a single user, grouped by category. M2: every
  *  fact carries an `[evidence: "..."]` suffix when we have a stored
  *  evidence quote. This both signals to the LLM that the fact is
- *  grounded AND lets it cite the underlying user wording when asked. */
+ *  grounded AND lets it cite the underlying user wording when asked.
+ *
+ *  Reflection v1: kind='reflection' rows are lifted into a dedicated
+ *  "Recurring patterns" section above the category buckets — these are
+ *  the high-order patterns the offline reflection job synthesised, and
+ *  they should stand out from atomic facts. */
 export function formatUserMemories(
-  memories: { category: string; content: string; evidenceQuote?: string | null }[]
+  memories: {
+    category: string;
+    kind?: string;
+    content: string;
+    evidenceQuote?: string | null;
+  }[]
 ): string {
+  const patterns: { content: string; evidenceQuote: string | null }[] = [];
   const grouped = new Map<
     string,
     { content: string; evidenceQuote: string | null }[]
   >();
+
   for (const m of memories) {
+    const item = { content: m.content, evidenceQuote: m.evidenceQuote ?? null };
+    if (m.kind === "reflection") {
+      patterns.push(item);
+      continue;
+    }
     const list = grouped.get(m.category) || [];
-    list.push({ content: m.content, evidenceQuote: m.evidenceQuote ?? null });
+    list.push(item);
     grouped.set(m.category, list);
   }
 
   const sections: string[] = [];
+
+  // Patterns first — they describe stable traits/behaviour the user
+  // exhibits across many events, more useful for grounding the agent's
+  // long-arc understanding than any single event row would be.
+  if (patterns.length > 0) {
+    sections.push(
+      `Recurring patterns:\n${patterns
+        .map((p) => `- ${p.content}${formatEvidence(p.evidenceQuote)}`)
+        .join("\n")}`
+    );
+  }
+
   for (const [cat, label] of Object.entries(CATEGORY_LABELS)) {
     const items = grouped.get(cat);
     if (items && items.length > 0) {

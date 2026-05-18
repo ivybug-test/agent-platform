@@ -299,11 +299,14 @@ export async function getLatestSummary(
 export interface PinnedMemoryRow {
   category: string;
   content: string;
+  kind: string;
   evidenceQuote: string | null;
 }
 
 /** Get user memories with category, ordered by dynamic memory score
- *  (strength × importance_weight × recency decay). */
+ *  (strength × importance_weight × recency decay). Returns kind so the
+ *  formatter can lift reflection-synthesised patterns into a dedicated
+ *  prompt section instead of mixing them with raw facts. */
 export async function getUserMemories(
   userId: string
 ): Promise<PinnedMemoryRow[]> {
@@ -311,6 +314,7 @@ export async function getUserMemories(
     .select({
       content: userMemories.content,
       category: userMemories.category,
+      kind: userMemories.kind,
       evidenceQuote: userMemories.evidenceQuote,
     })
     .from(userMemories)
@@ -471,11 +475,16 @@ export async function getRoomUsersMemories(
   //
   // Multi-user (Phase 2): visibleToSubject() filters out both tombstones and
   // unconfirmed third-party writes.
+  // Identity + high-importance + ALL reflections (they're already cluster-
+  // size-gated to ≥3 events so noise is low and they're the most useful
+  // signal for "what's this person consistently like" — exactly what
+  // pinned context should carry).
   const allMemories = await db
     .select({
       userId: userMemories.userId,
       content: userMemories.content,
       category: userMemories.category,
+      kind: userMemories.kind,
       evidenceQuote: userMemories.evidenceQuote,
     })
     .from(userMemories)
@@ -485,7 +494,8 @@ export async function getRoomUsersMemories(
         visibleToSubject(),
         or(
           eq(userMemories.category, "identity"),
-          eq(userMemories.importance, "high")
+          eq(userMemories.importance, "high"),
+          eq(userMemories.kind, "reflection")
         )
       )
     )
@@ -504,6 +514,7 @@ export async function getRoomUsersMemories(
     const list = result.get(name) || [];
     list.push({
       category: m.category,
+      kind: m.kind,
       content: m.content,
       evidenceQuote: m.evidenceQuote,
     });
