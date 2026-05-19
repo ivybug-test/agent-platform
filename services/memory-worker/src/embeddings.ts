@@ -13,7 +13,26 @@ const EMBEDDING_MAX_RETRIES = 3;
 //                        SiliconFlow / any OAI-compatible endpoint.
 //   "minimax"          — fetch-based; MiniMax /v1/embeddings has a custom
 //                        shape: body {model,texts,type} → resp {vectors,base_resp}.
-const PROVIDER = (process.env.EMBEDDING_PROVIDER || "openai").toLowerCase();
+//
+// Read at call time, NOT module load. ES module imports are hoisted, so any
+// top-level `process.env.X` runs before the CLI's dotenv.config() call —
+// resulting in PROVIDER frozen to "openai" no matter what's in .env.
+function getProvider() {
+  return (process.env.EMBEDDING_PROVIDER || "openai").toLowerCase();
+}
+function getModel() {
+  return process.env.EMBEDDING_MODEL || "text-embedding-3-small";
+}
+function getDimensions() {
+  return Number(process.env.EMBEDDING_DIMENSIONS || 1536);
+}
+function getMinimaxBaseUrl() {
+  return (
+    process.env.EMBEDDING_BASE_URL ||
+    process.env.MINIMAX_BASE_URL ||
+    "https://api.minimax.chat/v1"
+  );
+}
 
 function getClient(): OpenAI {
   if (!_client) {
@@ -41,12 +60,6 @@ function getClient(): OpenAI {
   return _client;
 }
 
-const MODEL = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
-const DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 1536);
-const MINIMAX_BASE_URL =
-  process.env.EMBEDDING_BASE_URL ||
-  process.env.MINIMAX_BASE_URL ||
-  "https://api.minimax.chat/v1";
 // MiniMax's `type` field tells them whether this is a document being
 // stored or a query lookup; they use slightly different encoders. We
 // always use "db" because backfill / write-path both store; the on-demand
@@ -62,13 +75,13 @@ async function minimaxEmbed(
       "MiniMax embedding key missing — set EMBEDDING_API_KEY or MINIMAX_API_KEY"
     );
   }
-  const res = await fetch(`${MINIMAX_BASE_URL}/embeddings`, {
+  const res = await fetch(`${getMinimaxBaseUrl()}/embeddings`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model: MODEL, texts, type }),
+    body: JSON.stringify({ model: getModel(), texts, type }),
     signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -139,16 +152,17 @@ async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
  *  enqueue a retry job. */
 export async function embedOne(text: string): Promise<number[] | null> {
   if (isEmpty(text)) return null;
+  const dim = getDimensions();
 
-  if (PROVIDER === "minimax") {
+  if (getProvider() === "minimax") {
     const vectors = await withRetry(
       () => minimaxEmbed([text], "db"),
       "embedOne.minimax"
     );
     const v = vectors[0];
-    if (!v || v.length !== DIMENSIONS) {
+    if (!v || v.length !== dim) {
       throw new Error(
-        `embedding response shape unexpected: got ${v?.length} expected ${DIMENSIONS}`
+        `embedding response shape unexpected: got ${v?.length} expected ${dim}`
       );
     }
     return v;
@@ -158,16 +172,16 @@ export async function embedOne(text: string): Promise<number[] | null> {
   const res = await withRetry(
     () =>
       client.embeddings.create({
-        model: MODEL,
+        model: getModel(),
         input: text,
-        dimensions: DIMENSIONS,
+        dimensions: dim,
       }),
     "embedOne"
   );
   const v = res.data[0]?.embedding;
-  if (!v || v.length !== DIMENSIONS) {
+  if (!v || v.length !== dim) {
     throw new Error(
-      `embedding response shape unexpected: got ${v?.length} expected ${DIMENSIONS}`
+      `embedding response shape unexpected: got ${v?.length} expected ${dim}`
     );
   }
   return v;
@@ -187,15 +201,16 @@ export async function embedBatch(
     if (!isEmpty(texts[i])) nonEmpty.push({ idx: i, text: texts[i] });
   }
   if (nonEmpty.length === 0) return out;
+  const dim = getDimensions();
 
-  if (PROVIDER === "minimax") {
+  if (getProvider() === "minimax") {
     const vectors = await withRetry(
       () => minimaxEmbed(nonEmpty.map((x) => x.text), "db"),
       "embedBatch.minimax"
     );
     for (let i = 0; i < nonEmpty.length; i++) {
       const v = vectors[i];
-      if (!v || v.length !== DIMENSIONS) {
+      if (!v || v.length !== dim) {
         throw new Error(`embedding ${i} shape unexpected`);
       }
       out[nonEmpty[i].idx] = v;
@@ -207,9 +222,9 @@ export async function embedBatch(
   const res = await withRetry(
     () =>
       client.embeddings.create({
-        model: MODEL,
+        model: getModel(),
         input: nonEmpty.map((x) => x.text),
-        dimensions: DIMENSIONS,
+        dimensions: dim,
       }),
     "embedBatch"
   );
@@ -220,7 +235,7 @@ export async function embedBatch(
   }
   for (let i = 0; i < nonEmpty.length; i++) {
     const v = res.data[i]?.embedding;
-    if (!v || v.length !== DIMENSIONS) {
+    if (!v || v.length !== dim) {
       throw new Error(`embedding ${i} shape unexpected`);
     }
     out[nonEmpty[i].idx] = v;
