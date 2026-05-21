@@ -23,8 +23,8 @@
  */
 
 import { db, userMemories, users } from "@agent-platform/db";
-import { and, desc, eq, isNull, isNotNull, sql } from "drizzle-orm";
-import { llmCompleteJSON, llmCompleteStrongJSON } from "../llm.js";
+import { and, desc, eq, gte, isNull, isNotNull, or, sql } from "drizzle-orm";
+import { llmCompleteStrongJSON } from "../llm.js";
 import { embedOne } from "../embeddings.js";
 import { buildReflectionPrompt } from "../prompts/reflection.js";
 import { createLogger } from "@agent-platform/logger";
@@ -181,7 +181,10 @@ export async function processReflection(data: ReflectionData) {
         eq(userMemories.kind, "fact"),
         isNull(userMemories.deletedAt),
         isNotNull(userMemories.embedding),
-        sql`(${userMemories.eventAt} >= ${cutoff} OR ${userMemories.createdAt} >= ${cutoff})`
+        or(
+          gte(userMemories.eventAt, cutoff),
+          gte(userMemories.createdAt, cutoff)
+        )
       )
     )
     .orderBy(desc(userMemories.createdAt))) as EventRow[];
@@ -402,7 +405,10 @@ export async function processReflectionScan(queue: import("bullmq").Queue) {
         eq(userMemories.kind, "fact"),
         isNull(userMemories.deletedAt),
         isNotNull(userMemories.embedding),
-        sql`(${userMemories.eventAt} >= ${cutoff} OR ${userMemories.createdAt} >= ${cutoff})`
+        or(
+          gte(userMemories.eventAt, cutoff),
+          gte(userMemories.createdAt, cutoff)
+        )
       )
     )
     .groupBy(userMemories.userId)

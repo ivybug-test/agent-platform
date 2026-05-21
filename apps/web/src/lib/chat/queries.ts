@@ -19,6 +19,7 @@ import {
   isNull,
   isNotNull,
   or,
+  gt,
   sql,
 } from "drizzle-orm";
 import { visibleToSubject } from "@/lib/memory-filters";
@@ -91,7 +92,11 @@ export async function loadChatContext(roomId: string) {
         eq(messages.roomId, roomId),
         eq(messages.status, "completed"),
         ne(messages.content, ""),
-        sql`${messages.createdAt} > ${since}`
+        // Use drizzle's gt() so the Date is bound through the column's
+        // codec — passing the Date raw via sql`...` makes postgres-js
+        // throw "string expected, received Date" because it never gets a
+        // chance to format the value as ISO.
+        gt(messages.createdAt, since)
       )
     );
   const totalChars = volRow?.chars ?? 0;
@@ -115,7 +120,7 @@ export async function loadChatContext(roomId: string) {
             eq(messages.roomId, roomId),
             eq(messages.status, "completed"),
             ne(messages.content, ""),
-            sql`${messages.createdAt} > ${since}`
+            gt(messages.createdAt, since)
           )
         )
         .orderBy(messages.createdAt)

@@ -9,18 +9,18 @@ export interface CommitInfo {
 
 export const RECENT_COMMITS: CommitInfo[] = [
   {
-    "sha": "5befb2f",
-    "subject": "Memory Phase α Reflection v1: event cluster → 高阶模式",
-    "date": "2026-05-18T21:21:06+08:00"
+    "sha": "1130fa7",
+    "subject": "Fix MiniMax provider not detected: read env at call time, not module load",
+    "date": "2026-05-20T00:59:46+08:00"
   },
   {
-    "sha": "ab975f6",
-    "subject": "Memory Phase α M5c+M5d: cosine dedup + search_memories cosine top-up",
-    "date": "2026-05-18T20:09:58+08:00"
+    "sha": "9233946",
+    "subject": "Switch postgres image to pgvector/pgvector:pg16",
+    "date": "2026-05-20T00:51:59+08:00"
   },
   {
-    "sha": "b0b059f",
-    "subject": "Memory Phase α M5b: agent_memories embedding — backfill + 在线写",
-    "date": "2026-05-18T20:00:45+08:00"
+    "sha": "1f26049",
+    "subject": "MiniMax embedding adapter + update.sh 修补 0012-0015",
+    "date": "2026-05-19T00:43:19+08:00"
   }
 ];
